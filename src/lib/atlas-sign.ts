@@ -68,7 +68,7 @@ export async function issueReceipt(opts: {
     subject_type: opts.subject_type,
     subject_id: opts.subject_id,
     attestation: opts.attestation,
-    attested_by: payload.attested_by,
+    attested_by: opts.attested_by || 'dcs-atlas',
     trust_status: opts.trust_status || 'pre-gate-1',
     sig,
     prev_hash,
