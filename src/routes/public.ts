@@ -41,6 +41,21 @@ publicRouter.get('/world/:slug', async (req, res) => {
   return res.json({ ok: true, world: { ...world, live_players: live?.live_players ?? 0 } });
 });
 
+publicRouter.get('/market', async (req, res) => {
+  if (!supa) return res.json({ ok: true, items: [], note: 'db_not_provisioned' });
+  let q = supa.from('dcsgames_market_items')
+    .select('id, type, title, price_cents, rating_avg, sales_count, atlas_verified, creator:dcsgames_users(username, display_name)');
+  if (req.query.type) q = q.eq('type', String(req.query.type));
+  const { data } = await q.order('sales_count', { ascending: false }).limit(48);
+  const items = (data || []).map((m: any) => ({
+    id: m.id, type: m.type, title: m.title, price_cents: m.price_cents,
+    rating_avg: m.rating_avg, sales_count: m.sales_count, atlas_verified: m.atlas_verified,
+    creator_name: m.creator?.display_name || m.creator?.username || null, creator: undefined,
+  }));
+  res.set('Cache-Control', 'public, max-age=30');
+  return res.json({ ok: true, items });   // prices in minor units; purchases stay DARK
+});
+
 publicRouter.get('/events', async (req, res) => {
   if (!supa) return res.json({ ok: true, events: [], note: 'db_not_provisioned' });
   let q = supa.from('dcsgames_events').select('*').order('starts_at', { ascending: true });
