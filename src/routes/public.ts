@@ -14,7 +14,7 @@ publicRouter.get('/worlds', async (req, res) => {
   if (!supa) return res.json({ ok: true, rows: [], note: 'db_not_provisioned' });
 
   let q = supa.from('dcsgames_worlds')
-    .select('id, slug, title, genre, difficulty, thumbnail_url, trailer_url, rating_avg, total_plays, atlas_verified, creator_id')
+    .select('id, slug, title, genre, difficulty, thumbnail_url, trailer_url, rating_avg, total_plays, atlas_verified, creator_id, creator:dcsgames_users(username, display_name)')
     .eq('status', 'published');
   if (genre) q = q.eq('genre', genre);
   if (row === 'new' || row === 'recently_updated') q = q.order('updated_at', { ascending: false });
@@ -22,8 +22,14 @@ publicRouter.get('/worlds', async (req, res) => {
   else q = q.order('total_plays', { ascending: false }); // trending/most_played/fast_growing/recommended
   const { data, error } = await q.limit(limit);
   if (error) return res.status(500).json({ ok: false, error: error.message });
+  // flatten the joined creator name so the public client gets a simple field
+  const rows = (data || []).map((w: any) => ({
+    ...w,
+    creator_name: w.creator?.display_name || w.creator?.username || null,
+    creator: undefined,
+  }));
   res.set('Cache-Control', 'public, max-age=30');
-  return res.json({ ok: true, row: VALID_ROWS.has(row) ? row : 'trending', rows: data || [] });
+  return res.json({ ok: true, row: VALID_ROWS.has(row) ? row : 'trending', rows });
 });
 
 publicRouter.get('/world/:slug', async (req, res) => {
