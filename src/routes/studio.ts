@@ -2,6 +2,7 @@
 import { Router } from 'express';
 import { supa } from '../lib/supabase.js';
 import { getUser } from '../lib/auth.js';
+import { issueReceipt } from '../lib/atlas-sign.js';
 
 export const studioRouter = Router();
 
@@ -53,8 +54,17 @@ studioRouter.post('/worlds', async (req, res) => {
 
 studioRouter.post('/worlds/:id/publish', async (req, res) => {
   if (!supa) return res.status(503).json({ ok: false, error: 'db_not_provisioned' });
-  await supa.from('dcsgames_worlds').update({ status: 'published', updated_at: new Date().toISOString() }).eq('id', req.params.id).eq('creator_id', uid(req));
-  return res.json({ ok: true });
+  const { data: world } = await supa.from('dcsgames_worlds')
+    .update({ status: 'published', updated_at: new Date().toISOString() })
+    .eq('id', req.params.id).eq('creator_id', uid(req))
+    .select('id, slug, title, genre, maturity, safety_rating').single();
+  if (!world) return res.status(404).json({ ok: false, error: 'not_found' });
+  // Issue a signed Atlas receipt attesting the publish (ed25519, hash-chained).
+  const rcpt = await issueReceipt({
+    subject_type: 'world', subject_id: world.id, attested_by: 'studio.publish',
+    attestation: { event: 'published', slug: world.slug, title: world.title, genre: world.genre, maturity: world.maturity, safety_rating: world.safety_rating ?? null },
+  });
+  return res.json({ ok: true, receipt: rcpt.ok ? rcpt.id : null });
 });
 
 // AI generation — GATED on the AI model + sandbox (DK/ops provision). Until then

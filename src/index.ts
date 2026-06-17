@@ -5,6 +5,7 @@ import express, { type Request, type Response, type NextFunction } from 'express
 import cors from 'cors';
 import helmet from 'helmet';
 import { publicRouter } from './routes/public.js';
+import { authRouter } from './routes/auth.js';
 import { playerRouter } from './routes/player.js';
 import { studioRouter } from './routes/studio.js';
 import { atlasRouter } from './routes/atlas.js';
@@ -34,6 +35,7 @@ app.get('/health', (_req: Request, res: Response) =>
 
 // Routers (all AFTER cors)
 app.use('/api/public', publicRouter);
+app.use('/api/auth', authRouter);       // signup/login/me — mounted BEFORE the player gate (no token yet)
 app.use('/api', playerRouter);          // /api/me, /api/leaderboard, /api/market, /api/profile, …
 app.use('/api/studio', studioRouter);
 app.use('/api/atlas', atlasRouter);

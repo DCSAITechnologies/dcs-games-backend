@@ -2,8 +2,12 @@
 // receipts carry trust_status:"pre-gate-1" until production-soaked.
 import { Router } from 'express';
 import { supa } from '../lib/supabase.js';
+import { verifyReceiptSig, atlasPublicKey } from '../lib/atlas-sign.js';
 
 export const atlasRouter = Router();
+
+// Public signing key (so anyone can independently verify a receipt's ed25519 sig).
+atlasRouter.get('/key', (_req, res) => res.json({ ok: true, alg: 'ed25519', public_key_spki_b64: atlasPublicKey() }));
 
 atlasRouter.get('/receipts', async (req, res) => {
   if (!supa) return res.json({ ok: true, receipts: [], note: 'db_not_provisioned' });
@@ -17,10 +21,12 @@ atlasRouter.get('/receipts', async (req, res) => {
 
 atlasRouter.get('/verify/:id', async (req, res) => {
   if (!supa) return res.json({ ok: true, valid: false, note: 'db_not_provisioned' });
-  const { data } = await supa.from('dcsgames_atlas_receipts').select('id, sig, trust_status').eq('id', req.params.id).maybeSingle();
+  const { data } = await supa.from('dcsgames_atlas_receipts')
+    .select('id, subject_type, subject_id, attestation, attested_by, prev_hash, sig, trust_status')
+    .eq('id', req.params.id).maybeSingle();
   if (!data) return res.status(404).json({ ok: false, error: 'not_found' });
-  // Real ed25519 verification lands when the signing rails are wired; shape is stable.
-  return res.json({ ok: true, valid: !!data.sig, signed: !!data.sig, anchored: false, trust_status: data.trust_status });
+  const valid = verifyReceiptSig(data);   // real ed25519 verification
+  return res.json({ ok: true, valid, signed: !!data.sig, anchored: false, trust_status: data.trust_status });
 });
 
 atlasRouter.get('/reputation/:creator_id', async (req, res) => {
