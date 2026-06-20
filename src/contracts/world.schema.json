@@ -1,0 +1,69 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://dcsai.ai/schemas/world.schema.json",
+  "title": "DCS Games — world.json (C1)",
+  "description": "Generation OUTPUT and runtime INPUT. CW2 produces this; CW3 consumes it. Additive changes only without a sync.",
+  "type": "object",
+  "required": ["world_id", "schema_version", "meta", "terrain", "spawns", "objects", "npcs", "quests", "items"],
+  "properties": {
+    "world_id":       { "type": "string", "description": "stable id; base world is immutable + Atlas-signed" },
+    "schema_version": { "type": "string", "const": "1.0" },
+    "meta": {
+      "type": "object",
+      "required": ["title", "prompt", "creator_id", "created_at"],
+      "properties": {
+        "title":      { "type": "string" },
+        "prompt":     { "type": "string", "description": "the original user prompt" },
+        "genre":      { "type": "string" },
+        "creator_id": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "atlas_receipt_hash": { "type": ["string", "null"] }
+      }
+    },
+    "terrain": {
+      "type": "object",
+      "required": ["type", "size", "data"],
+      "properties": {
+        "type": { "enum": ["tilegrid", "heightmap"] },
+        "size": { "type": "object", "required": ["w", "h"], "properties": { "w": {"type":"integer"}, "h": {"type":"integer"} } },
+        "data": { "description": "tile codes or heightmap floats; engine-defined", "type": "array" },
+        "zones": { "type": "array", "items": { "type": "object", "properties": { "name": {"type":"string"}, "rect": {"type":"array"} } } }
+      }
+    },
+    "spawns": {
+      "type": "array",
+      "items": { "type": "object", "required": ["id","x","y","z"], "properties": {
+        "id": {"type":"string"}, "x": {"type":"number"}, "y": {"type":"number"}, "z": {"type":"number"}, "role": {"enum":["player","npc","item"]} } }
+    },
+    "objects": {
+      "type": "array",
+      "description": "placeable props/buildings; saved-state deltas reference these by object_id",
+      "items": { "type": "object", "required": ["object_id","kind","transform"], "properties": {
+        "object_id": {"type":"string"},
+        "kind":      {"type":"string", "description": "asset key, e.g. building.house, prop.tree"},
+        "transform": {"type":"object","required":["x","y","z"],"properties":{"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"},"rot":{"type":"number"},"scale":{"type":"number"}}},
+        "interactable": {"type":"boolean"},
+        "owner_id":  {"type":["string","null"], "description":"null = world-owned (from base)"}
+      } }
+    },
+    "npcs": {
+      "type": "array",
+      "items": { "type": "object", "required": ["npc_id","kind","spawn"], "properties": {
+        "npc_id": {"type":"string"}, "kind": {"type":"string","description":"teacher|police|zombie|merchant|boss|..."},
+        "spawn": {"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"}}},
+        "behavior": {"type":"string"}, "dialogue_seed": {"type":"string"} } }
+    },
+    "quests": {
+      "type": "array",
+      "items": { "type": "object", "required": ["quest_id","title","objectives"], "properties": {
+        "quest_id": {"type":"string"}, "title": {"type":"string"},
+        "objectives": {"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"text":{"type":"string"},"trigger":{"type":"string"}}}},
+        "reward": {"type":"object","properties":{"items":{"type":"array"},"xp":{"type":"integer"}}} } }
+    },
+    "items": {
+      "type": "array",
+      "items": { "type": "object", "required": ["item_id","name"], "properties": {
+        "item_id": {"type":"string"}, "name": {"type":"string"}, "stackable": {"type":"boolean"}, "icon": {"type":"string"} } }
+    }
+  }
+}

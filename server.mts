@@ -4,6 +4,9 @@
 // Money DARK. Honest data: unknown -> zeros/empty, never fabricated.
 import http from "node:http";
 import { generateWorld } from "./src/cw2/generate.mjs";
+import { generateVia, setAdapter } from "./src/cw2/adapter.mjs";              // CW2: generation adapter seam (seeder default; LLM hybrid when provisioned)
+import { makeHybridAdapter } from "./src/cw2/hybrid-enrich.mjs";              // CW2 v3.0: Cerebras hybrid enrich (seeder geometry + AI flavor, fail-safe)
+import { makeCerebrasClient } from "./src/cw2/cerebras-client.mjs";          // CW2: Cerebras inference client (OpenAI-compatible, key from env)
 import { toRuntimeWorld, toBaseWorldRow } from "./src/cw2/runtime-schema.mjs"; // CW2 fix: full C1 runtime schema -> renders with ZERO runtime patches
 import { PersistenceEngine, InMemoryPersistenceStore } from "./src/cw5/cw5_persistence.ts";
 import { SupabasePersistenceStore } from "./src/cw5/cw5_supabase_store.ts";
@@ -20,6 +23,12 @@ const PAYMENTS_LIVE = process.env.PAYMENTS_LIVE === "1";
 const SUPA = (process.env.SUPABASE_URL || "").replace(/\/$/, "");
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const HAS_SUPA = !!(SUPA && KEY);
+
+// CW2 generation: flip to Cerebras hybrid enrich when a key is present; else stay on the deterministic seeder.
+const _cerebras = makeCerebrasClient(); // null when CEREBRAS_API_KEY unset
+setAdapter(makeHybridAdapter({ modelClient: _cerebras }));
+const GEN_MODE = _cerebras ? ("cerebras-hybrid:" + _cerebras.model + " ×" + _cerebras.keyCount + "key") : "deterministic-seeder";
+console.log("CW2 generation adapter:", GEN_MODE);
 
 const worlds = new Map<string, any>();
 const _store = HAS_SUPA
@@ -86,6 +95,7 @@ const server = http.createServer(async (req, res) => {
       ok: true, service: "dcs-games-backend", payments_live: PAYMENTS_LIVE,
       auth: HAS_SUPA ? "supabase-jwt" : "dev-bearer",
       persistence: HAS_SUPA ? "supabase" : "in-memory",
+      generation: GEN_MODE,
       lanes: ["cw1-identity", "cw2-generation", "cw5-persistence", "cw7-atlas"],
       schema: "runtime-ready (cw2 toRuntimeWorld; zero runtime patches)",
       routes: ["/api/public/worlds", "/api/worlds/mine", "/api/me/revenue", "/worlds/generate", "/worlds/:id/manifest", "/atlas/key", "/verify"],
@@ -166,7 +176,7 @@ const server = http.createServer(async (req, res) => {
 
     if (url === "/worlds/generate" && method === "POST") {
       const b = await readBody(req);
-      const world = generateWorld(b.prompt || "Pirate Island");
+      const world = await generateVia(b.prompt || "Pirate Island"); // adapter seam: Cerebras hybrid when keyed, else seeder (always C1-valid)
       const runtime = toRuntimeWorld(world);                 // CW2 fix: render-ready (env/material/transform.position/spawn)
       worlds.set(world.world_id, runtime);                   // manifest serves the runtime world -> ZERO runtime-side patches
       const base = { world_id: world.world_id, objects: (world.objects || []).map((o: any) => ({ object_id: o.object_id, kind: o.kind, transform: o.transform || { x: 0, y: 0, z: 0 }, owner_id: o.owner_id ?? null })) };

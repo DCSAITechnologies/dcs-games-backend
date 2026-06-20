@@ -9,7 +9,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dir = path.dirname(fileURLToPath(import.meta.url));
-const SCHEMA = JSON.parse(fs.readFileSync(path.join(__dir, "../contracts/world.schema.json"), "utf8"));
+// Resilient load: validateWorld() uses manual field checks, not SCHEMA — so a missing schema file
+// must NOT crash module load (e.g. when the validator is imported at server boot via the adapter seam).
+let SCHEMA = null;
+try { SCHEMA = JSON.parse(fs.readFileSync(path.join(__dir, "../contracts/world.schema.json"), "utf8")); } catch { SCHEMA = null; }
 
 const errs = [];
 function req(obj, fields, where) {
