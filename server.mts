@@ -15,6 +15,7 @@ import { handleTrustSafetySSO } from "./src/cw1/ts-sso-kyc-slice.mjs"; // CW1 v3
 import { makeAtlasRoutes } from "./src/cw7/atlas-routes.mjs";
 import { verifyPageHTML } from "./src/cw7/atlas-verify-page.mjs"; // CW7: renderable public verify view
 import { makeKeyEndpoint } from "./src/cw7/atlas-key.mjs";       // CW7: GET /atlas/key (real ed25519 public key from env, honest when unset)
+import { atlasReady, verifyReceipt, atlasPublicKeyBase64, issueWorldReceipt } from "./src/cw7/atlas-local-sign.mjs"; // CW7: local ed25519 sign+verify (off-chain, no gas)
 import { makeCrossProductRouter } from "./src/cw7/atlas-cross-product.mjs"; // CW7 v4.0: cross-product reputation (node-http routeTable)
 import { createEconomyRouter } from "./src/cw6/economy-router.mjs";          // CW6 v3.0: economy routes (DARK), non-express fallback router
 
@@ -39,7 +40,7 @@ const idb = createIdentityStore();
 const atlas = makeAtlasRoutes({ worlds: Array.from(worlds.values()), events: [], receipts: [], verifiedWorldIds: [] });
 const crossProduct = makeCrossProductRouter({ resolveProductIdentities: (_id: string) => [] }); // CW7 v4.0: Sports identity wired later; honest empty until then
 const econRouter: any = createEconomyRouter({}); // CW6 v3.0: DARK; supabase + signReceipt injected later → honest empty + unsigned receipts, no fabricated sales
-const atlasKey = makeKeyEndpoint({ publicKey: () => process.env.ATLAS_PUBLIC_KEY || "" }); // private key stays in atlas-sign env
+const atlasKey = makeKeyEndpoint({ publicKey: () => process.env.ATLAS_PUBLIC_KEY || atlasPublicKeyBase64() }); // serves the key that matches the local signer
 
 function send(res: http.ServerResponse, code: number, body: any) {
   res.writeHead(code, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "*", "Access-Control-Allow-Methods": "*" });
@@ -147,7 +148,7 @@ const server = http.createServer(async (req, res) => {
       const rp = new URLSearchParams(q).get("receipt");
       let receipt: any = null;
       if (rp) { try { receipt = JSON.parse(Buffer.from(rp, "base64").toString("utf8")); } catch { try { receipt = JSON.parse(rp); } catch { receipt = null; } } }
-      return sendHTML(res, 200, verifyPageHTML(receipt)); // honest VERIFIED/INVALID/NOT_FOUND; never "trusted" on fail
+      return sendHTML(res, 200, verifyPageHTML(receipt, { verify: verifyReceipt })); // real ed25519 verify; honest VERIFIED/INVALID/NOT_FOUND
     }
 
     for (const entry of atlas.routes as Array<[string, RegExp, (m: RegExpMatchArray) => any]>) {
@@ -177,19 +178,40 @@ const server = http.createServer(async (req, res) => {
     if (url === "/worlds/generate" && method === "POST") {
       const b = await readBody(req);
       const world = await generateVia(b.prompt || "Pirate Island"); // adapter seam: Cerebras hybrid when keyed, else seeder (always C1-valid)
-      const runtime = toRuntimeWorld(world);                 // CW2 fix: render-ready (env/material/transform.position/spawn)
+      // auto-issue a real Atlas receipt so the world is verified + instantly playable (honest: unsigned if no key)
+      let receipt: any = null;
+      try {
+        receipt = issueWorldReceipt(world.world_id, uid !== "u_new" ? uid : world.meta?.creator_id);
+        world.meta = world.meta || {}; (world.meta as any).atlas_receipt_hash = receipt.receipt_hash; (world.meta as any).atlas_signed = !!receipt.sig;
+        (world as any).state = receipt.sig ? "published" : (world as any).state;
+      } catch { /* signing best-effort; never block generation */ }
+      const runtime = toRuntimeWorld(world);                 // CW2 fix: render-ready (env/material/transform.position/spawn) — carries meta.atlas_*
       worlds.set(world.world_id, runtime);                   // manifest serves the runtime world -> ZERO runtime-side patches
       const base = { world_id: world.world_id, objects: (world.objects || []).map((o: any) => ({ object_id: o.object_id, kind: o.kind, transform: o.transform || { x: 0, y: 0, z: 0 }, owner_id: o.owner_id ?? null })) };
       await persistence.registerBaseWorld(base);
       // best-effort: surface the world in public/mine feeds with its real name + durable runtime manifest (never fail generate on a feed-insert issue)
       if (HAS_SUPA) { try { const row: any = toBaseWorldRow(world); row.owner_id = uid; await supaInsert("dcsgames_base_worlds", row); } catch { /* feed insert is best-effort */ } }
-      return send(res, 200, { ok: true, world_id: world.world_id, status: "ready", manifest_url: "/worlds/" + world.world_id + "/manifest" });
+      return send(res, 200, { ok: true, world_id: world.world_id, status: "ready", manifest_url: "/worlds/" + world.world_id + "/manifest", atlas: receipt ? { receipt_hash: receipt.receipt_hash, verified: !!receipt.sig } : null });
     }
     let m = url.match(/^\/worlds\/([^/]+)\/manifest$/);
     if (m && method === "GET") {
       let w = worlds.get(m[1]);
       if (!w && HAS_SUPA) { const rows = await supaGet("dcsgames_base_worlds?world_id=eq." + encodeURIComponent(m[1]) + "&select=manifest&limit=1"); w = rows[0]?.manifest; } // survive restart: serve durable runtime manifest
       return w ? send(res, 200, w) : send(res, 404, { ok: false, error: "world_not_found" });
+    }
+    // Publish: issue a real ed25519 Atlas receipt, mark published, return a verify link. Play stays instant (generate already serves it).
+    m = url.match(/^\/worlds\/([^/]+)\/publish$/);
+    if (m && method === "POST") {
+      const id = m[1];
+      let wm: any = worlds.get(id);
+      if (!wm && HAS_SUPA) { const rows = await supaGet("dcsgames_base_worlds?world_id=eq." + encodeURIComponent(id) + "&select=manifest&limit=1"); wm = rows[0]?.manifest; }
+      if (!wm) return send(res, 404, { ok: false, error: "world_not_found" });
+      const receipt: any = issueWorldReceipt(id, uid !== "u_new" ? uid : wm.meta?.creator_id);
+      wm.meta = wm.meta || {}; wm.meta.atlas_receipt_hash = receipt.receipt_hash; wm.meta.atlas_signed = !!receipt.sig; wm.state = "published";
+      worlds.set(id, wm);
+      if (HAS_SUPA) { try { await supaInsert("dcsgames_base_worlds", { world_id: id, state: "published", manifest: wm }); } catch { /* best-effort */ } }
+      const verify_url = "/verify?receipt=" + Buffer.from(JSON.stringify(receipt)).toString("base64");
+      return send(res, 200, { ok: true, published: true, verified: !!receipt.sig, receipt, verify_url, key_configured: atlasReady() });
     }
     m = url.match(/^\/worlds\/([^/]+)\/save$/);
     if (m && method === "POST") { const b = await readBody(req); const delta = b.delta || b; delta.world_id = m[1]; const r = await persistence.save(delta); return send(res, 200, { ok: true, ...r }); }
