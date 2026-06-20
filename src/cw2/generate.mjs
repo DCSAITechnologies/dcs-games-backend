@@ -49,6 +49,36 @@ function tilegrid(size, r) {
   return data;
 }
 
+// citygrid: STRUCTURED layout (border + solid building blocks + streets) so the map reads as a
+// designed place, not random noise. `reserved` cells (spawns/objects/npcs) are carved back to floor
+// with a 1-tile buffer so nothing spawns inside a wall. 1 = wall, 0 = floor.
+function citygrid(size, r, reserved = []) {
+  const { w, h } = size;
+  const g = Array.from({ length: h }, () => Array(w).fill(0));
+  // perimeter wall
+  for (let x = 0; x < w; x++) { g[0][x] = 1; g[h - 1][x] = 1; }
+  for (let y = 0; y < h; y++) { g[y][0] = 1; g[y][w - 1] = 1; }
+  // solid building blocks of varied size, leaving streets (floor) between them
+  const blocks = 5 + Math.floor(r() * 5);
+  for (let b = 0; b < blocks; b++) {
+    const bw = 2 + Math.floor(r() * 4), bh = 2 + Math.floor(r() * 4);
+    const bx = 2 + Math.floor(r() * Math.max(1, w - bw - 3));
+    const by = 2 + Math.floor(r() * Math.max(1, h - bh - 3));
+    for (let y = by; y < by + bh && y < h - 1; y++) for (let x = bx; x < bx + bw && x < w - 1; x++) g[y][x] = 1;
+  }
+  // a few scattered single pillars for texture
+  const pillars = Math.floor(r() * 6);
+  for (let p = 0; p < pillars; p++) { const x = 1 + Math.floor(r() * (w - 2)), y = 1 + Math.floor(r() * (h - 2)); g[y][x] = 1; }
+  // carve reserved cells + 1-tile buffer back to floor (keeps spawns/NPCs/objects walkable)
+  for (const [cx, cz] of reserved) {
+    for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
+      const x = cx + dx, z = cz + dz;
+      if (x > 0 && z > 0 && x < w - 1 && z < h - 1) g[z][x] = 0;
+    }
+  }
+  return g;
+}
+
 const PALETTE = {
   horror:    { zone:"Quarantine Ward", obj:"barricade", npc:"zombie", behavior:"hunt", line:"They're coming...", item:"Med-kit", quest:"Escape the outbreak" },
   cyberpunk: { zone:"Neon Bazaar", obj:"vending-drone", npc:"android-vendor", behavior:"trade", line:"Chrome or credits?", item:"Data-shard", quest:"Crack the megacorp" },
@@ -70,6 +100,13 @@ export function generateWorld(prompt, opts = {}) {
   const pal = PALETTE[genre] || PALETTE.adventure;
   const world_id = "world_" + crypto.createHash("sha256").update(seed).digest("hex").slice(0, 12);
 
+  // cells that must stay walkable (match the spawns/objects/npcs placed below)
+  const reserved = [
+    [2, 2], [3, 2], [size.w - 3, size.h - 3],            // spawns
+    [5, 5], [size.w - 5, 6], [size.w - 3, size.h - 4],   // objects (incl. door)
+    [8, 7], [size.w - 6, size.h - 7],                    // npcs
+  ];
+
   const world = {
     world_id,
     schema_version: "1.0",
@@ -82,7 +119,7 @@ export function generateWorld(prompt, opts = {}) {
     terrain: {
       type: "tilegrid",
       size,
-      data: tilegrid(size, r),
+      data: citygrid(size, r, reserved),
       zones: [
         { zone_id: "z1", name: pal.zone, rect: [1, 1, Math.floor(size.w/2), Math.floor(size.h/2)] },
         { zone_id: "z2", name: "Outskirts", rect: [Math.floor(size.w/2), Math.floor(size.h/2), size.w-1, size.h-1] },
