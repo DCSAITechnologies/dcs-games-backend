@@ -100,12 +100,13 @@ export function generateWorld(prompt, opts = {}) {
   const pal = PALETTE[genre] || PALETTE.adventure;
   const world_id = "world_" + crypto.createHash("sha256").update(seed).digest("hex").slice(0, 12);
 
-  // cells that must stay walkable (match the spawns/objects/npcs placed below)
-  const reserved = [
-    [2, 2], [3, 2], [size.w - 3, size.h - 3],            // spawns
-    [5, 5], [size.w - 5, 6], [size.w - 3, size.h - 4],   // objects (incl. door)
-    [8, 7], [size.w - 6, size.h - 7],                    // npcs
-  ];
+  const W = size.w, H = size.h, hw = Math.floor(W / 2), hh = Math.floor(H / 2);
+  // deterministic placements (deeper world): 3 spawns, 6 objects, 5 npcs
+  const objCoords = [[5, 5], [W - 5, 6], [W - 3, H - 4], [hw, hh], [4, H - 8], [W - 8, 5]];
+  const npcCoords = [[8, 7], [W - 6, H - 7], [hw, 4], [5, H - 5], [W - 7, hh]];
+  const spawnCoords = [[2, 2], [3, 2], [W - 3, H - 3]];
+  // cells that must stay walkable
+  const reserved = [...spawnCoords, ...objCoords, ...npcCoords];
 
   const world = {
     world_id,
@@ -131,23 +132,32 @@ export function generateWorld(prompt, opts = {}) {
       { id: "sp_obj", x: size.w-3, y: 0, z: size.h-3, role: "item" },
     ],
     objects: [
-      { object_id: "ob_1", kind: pal.obj, transform: { x: 5, y: 0, z: 5, rot: 0, scale: 1 }, interactable: true, owner_id: null },
-      { object_id: "ob_2", kind: pal.obj, transform: { x: size.w-5, y: 0, z: 6, rot: 90, scale: 1 }, interactable: true, owner_id: null },
-      { object_id: "ob_door", kind: "door", transform: { x: size.w-3, y: 0, z: size.h-4, rot: 0, scale: 1 }, interactable: true, owner_id: null },
+      { object_id: "ob_1",    kind: pal.obj, transform: { x: objCoords[0][0], y: 0, z: objCoords[0][1], rot: 0,  scale: 1 }, interactable: true, owner_id: null },
+      { object_id: "ob_2",    kind: pal.obj, transform: { x: objCoords[1][0], y: 0, z: objCoords[1][1], rot: 90, scale: 1 }, interactable: true, owner_id: null },
+      { object_id: "ob_door", kind: "door",  transform: { x: objCoords[2][0], y: 0, z: objCoords[2][1], rot: 0,  scale: 1 }, interactable: true, owner_id: null },
+      { object_id: "ob_3",    kind: "crate", transform: { x: objCoords[3][0], y: 0, z: objCoords[3][1], rot: 0,  scale: 1 }, interactable: true, owner_id: null },
+      { object_id: "ob_4",    kind: "crate", transform: { x: objCoords[4][0], y: 0, z: objCoords[4][1], rot: 0,  scale: 1 }, interactable: true, owner_id: null },
+      { object_id: "ob_5",    kind: pal.obj, transform: { x: objCoords[5][0], y: 0, z: objCoords[5][1], rot: 45, scale: 1 }, interactable: true, owner_id: null },
     ],
     npcs: [
-      { npc_id: "npc_1", kind: pal.npc, spawn: { x: 8, y: 0, z: 7 }, behavior: pal.behavior, dialogue_seed: pal.line },
-      { npc_id: "npc_2", kind: pal.npc, spawn: { x: size.w-6, y: 0, z: size.h-7 }, behavior: pal.behavior, dialogue_seed: pal.line },
+      { npc_id: "npc_1", kind: pal.npc, spawn: { x: npcCoords[0][0], y: 0, z: npcCoords[0][1] }, behavior: pal.behavior, dialogue_seed: pal.line },
+      { npc_id: "npc_2", kind: pal.npc, spawn: { x: npcCoords[1][0], y: 0, z: npcCoords[1][1] }, behavior: pal.behavior, dialogue_seed: pal.line },
+      { npc_id: "npc_3", kind: pal.npc, spawn: { x: npcCoords[2][0], y: 0, z: npcCoords[2][1] }, behavior: pal.behavior, dialogue_seed: pal.line },
+      { npc_id: "npc_4", kind: pal.npc, spawn: { x: npcCoords[3][0], y: 0, z: npcCoords[3][1] }, behavior: pal.behavior, dialogue_seed: pal.line },
+      { npc_id: "npc_5", kind: pal.npc, spawn: { x: npcCoords[4][0], y: 0, z: npcCoords[4][1] }, behavior: pal.behavior, dialogue_seed: pal.line },
     ],
     quests: [
       { quest_id: "q1", title: pal.quest, objectives: [
-        { id: "o1", text: "Reach the objective zone", trigger: "enter_zone:z2" },
-        { id: "o2", text: `Interact with the ${pal.obj}`, trigger: "interact:ob_door" },
-      ], reward: { item_id: "it_1", xp: 100 } },
+        { id: "o1", text: "Explore and reach the objective zone", trigger: "enter_zone:z2" },
+        { id: "o2", text: "Recover the key item from the cache",   trigger: "interact:ob_3" },
+        { id: "o3", text: `Reach the ${pal.obj === "door" ? "exit" : "final"} and complete the mission`, trigger: "interact:ob_door" },
+      ], reward: { item_id: "it_1", xp: 150 } },
     ],
     items: [
-      { item_id: "it_1", name: pal.item, stackable: true, icon: `icon_${genre}_1` },
-      { item_id: "it_key", name: "Rusted Key", stackable: false, icon: "icon_key" },
+      { item_id: "it_1",   name: pal.item,      stackable: true,  icon: `icon_${genre}_1` },
+      { item_id: "it_key", name: "Rusted Key",  stackable: false, icon: "icon_key" },
+      { item_id: "it_2",   name: "Relic Fragment", stackable: true, icon: `icon_${genre}_2` },
+      { item_id: "it_3",   name: "Cipher Disc",    stackable: false, icon: `icon_${genre}_3` },
     ],
   };
   return world;
