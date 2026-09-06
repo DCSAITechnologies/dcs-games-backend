@@ -210,6 +210,27 @@ export function createSocialService(env = process.env, deps = {}) {
     };
   }
 
+  /** The row a brand-new principal gets. Kept out of ensureProfile so the
+   *  find-or-insert around it stays a single atomic step. */
+  async function buildProfileRow(principal) {
+    const row = {
+      principal_id: principal.id,
+      username: (principal.email ? String(principal.email).split("@")[0] : principal.id).toLowerCase().replace(/[^a-z0-9_]/g, "").slice(0, 24) || principal.id,
+      display_name: null,
+      email: principal.email || null,
+      bio: null,
+      avatar_color: "#2563FF",
+      xp: 0,
+      worlds_created: 0,
+      worlds_published: 0,
+      is_internal_tester: !!principal.isInternalTester,
+      created_at: new Date().toISOString(),
+    };
+    // A username collision must not fail a first login.
+    if (await principals.one((p) => p.username === row.username)) row.username = row.username + "_" + crypto.randomBytes(2).toString("hex");
+    return row;
+  }
+
   const svc = {
     dir,
     /** Where this service is actually persisting, and whether it is degraded. */
@@ -219,25 +240,18 @@ export function createSocialService(env = process.env, deps = {}) {
     /** Create the profile row on first sight. Idempotent. */
     async ensureProfile(principal) {
       if (!principal?.id) throw Errors.unauthenticated("a profile needs an authenticated principal");
-      const existing = await principals.one((p) => p.principal_id === principal.id);
-      if (existing) return existing;
-      const row = {
-        principal_id: principal.id,
-        username: (principal.email ? String(principal.email).split("@")[0] : principal.id).toLowerCase().replace(/[^a-z0-9_]/g, "").slice(0, 24) || principal.id,
-        display_name: null,
-        email: principal.email || null,
-        bio: null,
-        avatar_color: "#2563FF",
-        xp: 0,
-        worlds_created: 0,
-        worlds_published: 0,
-        is_internal_tester: !!principal.isInternalTester,
-        created_at: new Date().toISOString(),
-      };
-      // A username collision must not fail a first login.
-      if (await principals.one((p) => p.username === row.username)) row.username = row.username + "_" + crypto.randomBytes(2).toString("hex");
-      return await principals.insert(row);
+      // Find-or-insert must be ATOMIC. Looking first and then inserting leaves a
+      // window that every concurrent caller walks through: 128 simultaneous
+      // first sign-ins produced 128 profile rows for the same principal, all of
+      // them "successful". A first login is exactly when this happens, because
+      // a client that loads several panels at once issues several /me requests.
+      const { row: profile } = await principals.ensure(
+        (p) => p.principal_id === principal.id,
+        async () => await buildProfileRow(principal),
+      );
+      return profile;
     },
+
 
     /**
      * The /me view. Level and publish credits come from the CW1 identity-core

@@ -11,6 +11,10 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
 import { AppError, Errors, optional } from "./errors.mjs";
+import { createKeyedMutex } from "./mutex.mjs";
+
+/** Serialises writes to one world; different worlds never wait on each other. */
+const withLock = createKeyedMutex();
 
 export function canonicalize(v) {
   // Stable key order so a manifest hash is reproducible across processes.
@@ -192,7 +196,18 @@ export class WorldRepository {
    * Idempotent create-or-update. Re-running with the same manifest is a no-op
    * that returns the same hash, so a retried request cannot fork a world.
    */
-  async upsert({ worldId, ownerId, manifest, state = "draft", title = null, expected_version = null }) {
+  async upsert(args) {
+    // Serialised per world. This method reads the existing record, decides the
+    // next version from it, and writes — with awaits throughout. Two concurrent
+    // saves both read the same version and the second erased the first: 64
+    // concurrent saves returned 64x 200, produced ZERO conflicts, and advanced
+    // the world by ONE version. Sixty-three edits were acknowledged and lost,
+    // and the retained history did not have them either, so a rollback could
+    // not recover them. Only writes to the SAME world wait on each other.
+    return await withLock(`world:${args?.worldId}`, () => this._upsert(args));
+  }
+
+  async _upsert({ worldId, ownerId, manifest, state = "draft", title = null, expected_version = null }) {
     if (!worldId) throw Errors.validation("world_id is required");
     if (!manifest || typeof manifest !== "object") throw Errors.validation("manifest must be an object");
     const existing = await this.store.get(worldId);
