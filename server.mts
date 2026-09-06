@@ -225,6 +225,10 @@ const server = http.createServer(async (req, res) => {
         note: crossProductStatus === "AVAILABLE" ? null : "No second product is wired, so a cross-product reputation cannot be computed. The endpoint returns an honest empty result rather than a score.",
       },
       marketplace: { ...market.describe(), legacy_cw6_routes: "retired (410)" },
+      // Reported so /health cannot imply a capability that is absent: there is
+      // no PSP, so nothing is subscribable, and the endpoint says so rather
+      // than letting a caller infer it from the presence of a plans route.
+      subscriptions: subs.describe(),
       jobs: { async_generation: true, boot_id: BOOT_ID, interrupted_on_boot: bootReconcile.interrupted },
       v3: { assembly_router: true, playtest_gate: true, expansion_delta: true, world_memory: true, companion: true, chat_edit: true },
       safety: { age_gating: true, report_block: true, parental_consent: true, media_consent: true, automated_content_moderation: false, minor_onboarding_enabled: false },

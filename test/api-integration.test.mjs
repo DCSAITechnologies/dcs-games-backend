@@ -651,3 +651,31 @@ test("B15 GATE: a comped tester sees the real allowance, and it still is not rev
   assert.equal("dcs_plus" in (me.level_signals || {}), false, "the plan must not be advertised as a level signal");
   assert.ok(me.level_signals?.email_verified !== undefined, "the real level signals are still reported");
 });
+
+test("HONESTY: /health cannot claim a capability the routes do not provide", async () => {
+  const h = await (await req("/health")).json();
+
+  // Subscriptions: if health says nothing is subscribable, subscribing must
+  // actually refuse — and if it ever says otherwise, that is a founder decision
+  // that must not arrive by accident.
+  assert.equal(h.subscriptions.subscribable, false);
+  assert.equal(h.subscriptions.psp_integrated, false);
+  const sub = await req("/v3/subscriptions/subscribe", { method: "POST", headers: json(ALICE), body: "{}" });
+  assert.equal(sub.status, 503, "health says nothing is subscribable, so this must refuse");
+
+  // Verification: with no delivery provider, health must not imply the channel
+  // works — and starting a verification must not hand back a code either.
+  const chans = h.verification.channels || {};
+  for (const [name, c] of Object.entries(chans)) {
+    if (c.status === "AVAILABLE") continue;                 // a real provider exists; nothing to prove here
+    const r = await req(`/verify/${name}/start`, { method: "POST", headers: json(ALICE), body: JSON.stringify({ destination: "alice@dcsai.ai" }) });
+    assert.notEqual(r.status, 200, `${name} is ${c.status} but /verify/${name}/start succeeded`);
+    const body = await r.text();
+    assert.equal(/_devCode|"code"\s*:\s*"?\d{6}/.test(body), false, "a verification code must never reach a client");
+  }
+
+  // Payments: one flag, and every surface that depends on it must agree.
+  assert.equal(h.payments_live, false);
+  assert.equal((await (await req("/v3/marketplace/assert-dark")).json()).dark, true);
+  assert.equal((await (await req("/v3/subscriptions/assert-dark")).json()).dark, true);
+});
