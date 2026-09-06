@@ -11,10 +11,24 @@
 // because those are what production actually has, and every write survives a
 // restart. Money stays dark: a studio may record a revenue split, and that split
 // never settles anything.
+//
+// Round-3 closed two holes in it:
+//
+//   * A live block stopped a friend REQUEST (checked at the route) and nothing
+//     else. acceptFriend had no block check at all and party join had none
+//     either, so a request made before a block could be accepted after it. The
+//     check now lives here, on every path, and cannot be switched off.
+//
+//   * me() hardcoded dcs_plus:false, so a comped internal tester read as free
+//     here and as DCS Plus in subscriptions.entitlementsFor(). The real status
+//     is now an injected, optional dependency — and the entitlement fact
+//     (dcs_plus_effective) is kept strictly apart from the money fact
+//     (dcs_plus_paid, always false).
 import crypto from "node:crypto";
 import path from "node:path";
 import { Errors } from "./errors.mjs";
 import { createCollection, describeCollections } from "./collection.mjs";
+import { createSafetyService } from "./safety.mjs";
 import { computeLevel, publishCredits, canPublish } from "../cw1/identity-core.mjs";
 
 const FRIEND_STATES = ["requested", "accepted", "blocked"];
@@ -24,7 +38,18 @@ const ORG_ROLES = ["owner", "admin", "member"];
 
 const id = (p) => p + "_" + crypto.randomBytes(6).toString("hex");
 
-export function createSocialService(env = process.env) {
+/**
+ * @param {object} [env]
+ * @param {object} [deps]
+ * @param {(a:string,b:string)=>Promise<boolean>} [deps.isBlocked]
+ *        The block check. Omit it and the real safety service over the same env
+ *        is used; it CANNOT be switched off — see the note below.
+ * @param {{isBlocked?:Function}} [deps.safety]  a safety service, as an alternative
+ * @param {{statusFor:Function}} [deps.subscriptions]
+ *        Optional. Absent means "no subscription service is wired", which reads
+ *        exactly as it did before: free plan, no entitlement, no crash.
+ */
+export function createSocialService(env = process.env, deps = {}) {
   const dir = path.join(env.DCS_DATA_DIR || path.join(process.cwd(), ".dcs-data"), "social");
   // Supabase primary when configured, atomic local file always. Without this the
   // data survived a restart but not a redeploy, because a container disk is
@@ -43,6 +68,147 @@ export function createSocialService(env = process.env) {
   const plays = mk("world_plays", "dcsgames_world_plays", ["id"]);
   const ratings = mk("world_ratings", "dcsgames_world_ratings", ["world_id", "principal_id"]);
   const collections = { principals, friends, parties, partyMembers, teams, teamMembers, studios, studioMembers, orgs, orgMembers, plays, ratings };
+
+  const has = (k) => deps != null && Object.prototype.hasOwnProperty.call(deps, k);
+
+  // ============================================================ the block check
+  //
+  // Round-3: POST /social/friends checked safety.isBlocked at the ROUTE, and
+  // nothing else did. So A could request B, B could block A, and B (or A) could
+  // still accept — the pending row survived the block and either side could turn
+  // it into a friendship. Party join had no check at all. A guard that lives on
+  // one route out of three is not a guard; it is a habit that the next caller
+  // will not share.
+  //
+  // So it lives in the service, and it is REQUIRED rather than optional: there
+  // is no way to construct a social service that has no block check. Passing an
+  // explicit non-function is a startup error, not a silent skip, because
+  // "optional and quietly absent" is how the hole above was drilled. Omitting it
+  // binds the real safety service over the same env, which is the same durable
+  // store the rest of the estate blocks into.
+  let injectedIsBlocked = null;
+  if (has("isBlocked") || has("safety")) {
+    const raw = has("isBlocked")
+      ? deps.isBlocked
+      : (deps.safety && typeof deps.safety.isBlocked === "function" ? (a, b) => deps.safety.isBlocked(a, b) : deps.safety);
+    if (typeof raw !== "function") {
+      throw Errors.validation(
+        "a block check is required: pass deps.isBlocked(a, b) or deps.safety with an isBlocked method. It cannot be disabled — omit it entirely to use the real safety service.",
+      );
+    }
+    injectedIsBlocked = raw;
+  }
+  let ownSafety = null;
+  const blockCheck = () => {
+    if (injectedIsBlocked) return injectedIsBlocked;
+    // Built on first use so a service that never touches friends or parties does
+    // not create the safety store as a side effect of construction.
+    ownSafety = ownSafety || createSafetyService(env);
+    return (a, b) => ownSafety.isBlocked(a, b);
+  };
+
+  /**
+   * Blocked in EITHER direction. safety.isBlocked is already symmetric, but this
+   * asks both ways anyway: an injected check that only looks one way would
+   * otherwise let the blocker befriend the person they blocked.
+   */
+  async function isBlockedEitherWay(a, b) {
+    if (!a || !b || a === b) return false;
+    const check = blockCheck();
+    return !!(await check(a, b)) || !!(await check(b, a));
+  }
+
+  /**
+   * What happens to the stale row.
+   *
+   * A pending request that can never be accepted must not sit in the
+   * recipient's incoming list forever — the recipient's own block is what put it
+   * there, and the product would be telling them "someone you blocked wants to
+   * be your friend" indefinitely. So the row between the two is DELETED on
+   * discovery, whatever its status: a block also ends an existing friendship,
+   * which is what a user blocking someone means by it.
+   *
+   * It is deleted rather than rewritten as status:'blocked'. The block lives in
+   * the safety service, which is the authority on it; a second copy here would
+   * outlive an unblock and would then silently refuse a later, legitimate
+   * request that safety would have allowed.
+   */
+  async function dropFriendRowsBetween(a, b) {
+    return await friends.remove((f) =>
+      (f.user_id === a && f.friend_id === b) || (f.user_id === b && f.friend_id === a));
+  }
+
+  /** True (and the stale rows are gone) if these two are blocked. Never throws. */
+  async function purgeIfBlocked(a, b) {
+    if (!(await isBlockedEitherWay(a, b))) return false;
+    await dropFriendRowsBetween(a, b);
+    return true;
+  }
+
+  /** The refusal, for the write paths. */
+  async function refuseIfBlocked(a, b, action) {
+    if (await purgeIfBlocked(a, b)) {
+      throw Errors.forbidden("this relationship is blocked", { meta: { action } });
+    }
+  }
+
+  // ========================================================== subscription facts
+  //
+  // Round-3: me() hardcoded dcs_plus:false, so a comped internal tester's
+  // profile reported the free allowance of 1 publish credit while
+  // subscriptions.entitlementsFor() reported 10 for the same principal. Two
+  // answers to one question is worse than either answer.
+  //
+  // The two facts are kept apart and separately named everywhere below:
+  //   dcs_plus_effective — this principal has the entitlements;
+  //   dcs_plus_paid      — money changed hands. ALWAYS false. There is no PSP,
+  //                        so nothing here can ever set it, and a comped
+  //                        test grant must never read as revenue.
+  const subscriptions = has("subscriptions") ? deps.subscriptions : null;
+  if (subscriptions != null && typeof subscriptions.statusFor !== "function") {
+    throw Errors.validation("deps.subscriptions must expose statusFor(principal_id)");
+  }
+
+  const NO_SUBSCRIPTION = {
+    plan: "free", status: "none",
+    dcs_plus_effective: false,
+    dcs_plus_paid: false,
+    comped: false, test_mode: null, expires_at: null,
+    degraded: false, paid_claim_rejected: false,
+  };
+
+  async function subscriptionFacts(principalId) {
+    if (!subscriptions) {
+      return { ...NO_SUBSCRIPTION, source: "none", note: "No subscription service is wired here, so no plan is reported." };
+    }
+    let st;
+    try {
+      st = await subscriptions.statusFor(principalId);
+    } catch (e) {
+      // Degrading to the free allowance is the safe direction: it under-grants
+      // rather than handing out an entitlement nobody can confirm, and it says
+      // so instead of pretending the answer is a real "free".
+      return { ...NO_SUBSCRIPTION, degraded: true, source: "unavailable", note: "The subscription service could not be read, so the free allowance is reported. This is a degraded answer, not a confirmed 'free'." };
+    }
+    const effective = !!st && st.plan === "dcs_plus" && st.active_grant !== false;
+    return {
+      plan: effective ? "dcs_plus" : "free",
+      status: st?.status ?? "none",
+      dcs_plus_effective: effective,
+      // Never read from the status row. Nothing may set this true.
+      dcs_plus_paid: false,
+      // A status that claims a purchase is not believed AND not swallowed.
+      paid_claim_rejected: !!(st && st.paid),
+      comped: !!(st && st.comped),
+      test_mode: st?.test_mode ?? null,
+      expires_at: st?.expires_at ?? null,
+      degraded: false,
+      source: effective ? "comped_internal_test_grant" : "none",
+      note: effective
+        ? "This plan was comped for internal testing. It was not purchased and nobody was charged."
+        : "No subscription. Subscribing is not possible: no payment provider is integrated.",
+    };
+  }
 
   const svc = {
     dir,
@@ -83,18 +249,26 @@ export function createSocialService(env = process.env) {
       // known: email verification has no provider configured (Round-2 capability
       // 15), so it is false rather than assumed, and atlas_score stays 0 until a
       // real reputation exists. The level is therefore honestly conservative.
+      const sub = await subscriptionFacts(p.principal_id);
       const signals = {
         email_verified: !!p.email_verified,
         phone_verified: !!p.phone_verified,
         atlas_score: Number(p.atlas_score || 0),
-        dcs_plus: false,                       // subscriptions are dark
+        // The ENTITLEMENT fact, which is what publishCredits/canPublish read.
+        // It used to be hardcoded false, so a comped internal tester was told
+        // they had 1 publish credit while entitlementsFor() said 10.
+        dcs_plus: sub.dcs_plus_effective,
+        dcs_plus_effective: sub.dcs_plus_effective,
+        // The MONEY fact, kept separate and always false. Never an input to a
+        // level, an allowance or a total.
+        dcs_plus_paid: false,
         active_players: Number(p.active_players || 0),
         reports: Number(p.reports || 0),
         is_studio: !!p.is_studio,
       };
       const level = computeLevel(signals);
-      const credits = publishCredits({ level, dcs_plus: false });
-      const gate = canPublish({ level, dcs_plus: false, published_count: p.worlds_published });
+      const credits = publishCredits({ level, dcs_plus: sub.dcs_plus_effective });
+      const gate = canPublish({ level, dcs_plus: sub.dcs_plus_effective, published_count: p.worlds_published });
       return {
         principal_id: p.principal_id,
         username: p.username,
@@ -106,14 +280,53 @@ export function createSocialService(env = process.env) {
         worlds_created: p.worlds_created,
         worlds_published: p.worlds_published,
         is_internal_tester: p.is_internal_tester,
-        level_signals: signals,
+        // ONLY the signals that actually determine the level. `signals` also
+        // carries the plan, because publishCredits() reads it — but publishing
+        // the whole object listed dcs_plus beside five real inputs, so a user
+        // could reasonably read "DCS Plus raises my level". It does not: level
+        // is trust and gates public reach, the plan is an allowance. The plan's
+        // facts are reported under `subscription` below, where they are true.
+        level_signals: {
+          email_verified: signals.email_verified,
+          phone_verified: signals.phone_verified,
+          atlas_score: signals.atlas_score,
+          active_players: signals.active_players,
+          reports: signals.reports,
+          is_studio: signals.is_studio,
+        },
         // Infinity does not survive JSON, so it is reported as null with an
         // explicit unlimited flag rather than silently becoming zero.
         publish_credits: credits === Infinity ? null : credits,
         publish_credits_unlimited: credits === Infinity,
         can_publish: { ...gate, remaining: gate.remaining === Infinity ? null : gate.remaining, unlimited: gate.remaining === Infinity },
-        // Everything money-shaped is explicitly dark, not merely absent.
-        economy: { payments_live: false, balance_minor: 0, dcs_plus: false, note: "money is disabled during controlled internal testing" },
+        // The plan, as an entitlement fact. Nothing here is revenue.
+        subscription: {
+          plan: sub.plan,
+          status: sub.status,
+          dcs_plus_effective: sub.dcs_plus_effective,
+          dcs_plus_paid: false,
+          comped: sub.comped,
+          test_mode: sub.test_mode,
+          expires_at: sub.expires_at,
+          source: sub.source,
+          degraded: sub.degraded,
+          // A status row claiming a purchase is refused rather than copied.
+          paid_claim_rejected: sub.paid_claim_rejected,
+          note: sub.note,
+        },
+        // Everything money-shaped is explicitly dark, not merely absent. Note
+        // what dcs_plus means HERE: paid. It is false for a comped tester too,
+        // because nobody was charged — a comped grant is not revenue and must
+        // not be counted as any, in this object or in any total built from it.
+        economy: {
+          payments_live: false,
+          balance_minor: 0,
+          dcs_plus: false,
+          dcs_plus_paid: false,
+          paid_subscriptions: 0,
+          revenue_minor: 0,
+          note: "money is disabled during controlled internal testing; a comped internal-test grant is not a purchase and is never counted as revenue",
+        },
         created_at: p.created_at,
       };
     },
@@ -168,6 +381,9 @@ export function createSocialService(env = process.env) {
       if (!meId) throw Errors.unauthenticated("a friend request needs an authenticated principal");
       if (!otherId) throw Errors.validation("friend_id is required");
       if (meId === otherId) throw Errors.validation("you cannot befriend yourself");
+      // In the service, not only at the route: every path to a friendship goes
+      // through a block check now.
+      await refuseIfBlocked(meId, otherId, "request_friend");
 
       const existing = await friends.one((f) =>
         (f.user_id === meId && f.friend_id === otherId) || (f.user_id === otherId && f.friend_id === meId));
@@ -180,7 +396,15 @@ export function createSocialService(env = process.env) {
       return await friends.insert({ user_id: meId, friend_id: otherId, status: "requested", created_at: new Date().toISOString(), decided_at: null });
     },
 
+    /**
+     * Accept a pending request. This had NO block check of any kind, so a
+     * request made before a block could still be accepted after it, by either
+     * side, and the friendship was real.
+     */
     async acceptFriend(meId, otherId) {
+      if (!meId) throw Errors.unauthenticated("accepting a friend request needs an authenticated principal");
+      if (!otherId) throw Errors.validation("friend_id is required");
+      await refuseIfBlocked(meId, otherId, "accept_friend");
       const row = await friends.one((f) => f.user_id === otherId && f.friend_id === meId && f.status === "requested");
       if (!row) throw Errors.notFound(`a pending friend request from ${otherId}`);
       return await friends.update((f) => f.user_id === otherId && f.friend_id === meId, (f) => ({ ...f, status: "accepted", decided_at: new Date().toISOString() }));
@@ -195,15 +419,30 @@ export function createSocialService(env = process.env) {
 
     /** Accepted friends, plus incoming and outgoing requests, each clearly labelled. */
     async friendList(meId) {
-      const rows = await friends.find((f) => f.user_id === meId || f.friend_id === meId);
+      let rows = await friends.find((f) => f.user_id === meId || f.friend_id === meId);
+      // Sweep the rows a block has invalidated. A request that can never be
+      // accepted is removed here as well as at accept time, so it disappears
+      // from the list the moment its owner looks rather than lingering until
+      // someone tries to act on it.
+      const stale = [];
+      for (const f of rows) {
+        const other = f.user_id === meId ? f.friend_id : f.user_id;
+        if (await purgeIfBlocked(meId, other)) stale.push(other);
+      }
+      if (stale.length) rows = rows.filter((f) => !stale.includes(f.user_id === meId ? f.friend_id : f.user_id));
       return {
         friends: rows.filter((f) => f.status === "accepted").map((f) => ({ id: f.user_id === meId ? f.friend_id : f.user_id, since: f.decided_at })),
         incoming: rows.filter((f) => f.status === "requested" && f.friend_id === meId).map((f) => ({ id: f.user_id, at: f.created_at })),
         outgoing: rows.filter((f) => f.status === "requested" && f.user_id === meId).map((f) => ({ id: f.friend_id, at: f.created_at })),
+        // Said out loud: rows dropped because a block now stands between them.
+        removed_blocked: stale,
       };
     },
 
     async areFriends(a, b) {
+      // A block ends the friendship, so this must not keep answering true off a
+      // row the block should have taken with it.
+      if (await purgeIfBlocked(a, b)) return false;
       const row = await friends.one((f) =>
         ((f.user_id === a && f.friend_id === b) || (f.user_id === b && f.friend_id === a)) && f.status === "accepted");
       return !!row;
@@ -232,6 +471,19 @@ export function createSocialService(env = process.env) {
       if (p.closed_at) throw Errors.conflict("this party has closed");
       if (p.members.includes(meId)) return { ...p, idempotent: true };
       if (!p.open) throw Errors.forbidden("this party is invite-only");
+      // A party is a shared room. Joining one that holds someone you blocked —
+      // or who blocked you — puts the two of you back together, which is the
+      // thing the block exists to prevent, so it is refused here rather than
+      // left to whatever calls joinParty.
+      for (const member of p.members) {
+        if (await isBlockedEitherWay(meId, member)) {
+          await dropFriendRowsBetween(meId, member);
+          throw Errors.forbidden(
+            "this party includes someone you have blocked, or who has blocked you",
+            { meta: { action: "join_party", party_id: partyId } },
+          );
+        }
+      }
       if (p.size >= p.max_size) throw Errors.conflict(`this party is full (${p.size}/${p.max_size})`);
       await partyMembers.insert({ party_id: partyId, member_id: meId, joined_at: new Date().toISOString() });
       return await svc.getParty(partyId);

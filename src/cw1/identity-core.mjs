@@ -10,16 +10,26 @@ export const LEVELS = ["explorer", "builder", "publisher", "verified_builder", "
  * Inputs (all from owned tables / CW7 atlas_score / CW8 dcs_plus):
  *   email_verified, phone_verified : bool
  *   atlas_score                    : number (0..100, from CW7; null/0 if unknown)
- *   dcs_plus                       : bool   (subscription state, read from CW8)
  *   active_players                 : number (across this user's published worlds)
  *   reports                        : number (moderation reports against them)
  *   is_studio                      : bool   (has a studio account / collaborators)
+ */
+/**
+ * dcs_plus is deliberately NOT an input here, and this function used to bind it
+ * and never read it — which meant /me/profile listed it beside five signals that
+ * genuinely move the level, so a user could reasonably read "DCS Plus raises my
+ * level". It does not, and it must not.
+ *
+ * Level is a TRUST axis: it gates publishing to the public, so making it
+ * purchasable would make reach purchasable, and would let money substitute for
+ * the email verification `builder` requires and the atlas score `publisher`
+ * requires. The plan is an ALLOWANCE axis, and its effect is real and lives in
+ * publishCredits() below. The two axes are kept apart on purpose.
  */
 export function computeLevel(s = {}) {
   const email = !!s.email_verified;
   const phone = !!s.phone_verified;
   const atlas = Number(s.atlas_score || 0);
-  const plus = !!s.dcs_plus;
   const players = Number(s.active_players || 0);
   const reports = Number(s.reports || 0);
   const studio = !!s.is_studio;

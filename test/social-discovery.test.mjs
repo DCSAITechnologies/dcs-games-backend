@@ -11,6 +11,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createSocialService } from "../src/core/social.mjs";
+import { createSafetyService } from "../src/core/safety.mjs";
+import { createSubscriptionsService } from "../src/core/subscriptions.mjs";
 
 const tmp = () => ({ DCS_DATA_DIR: fs.mkdtempSync(path.join(os.tmpdir(), "dcs-social-")) });
 const svc = () => createSocialService(tmp());
@@ -53,7 +55,8 @@ test("B15: the level comes from real signals, and is honestly conservative", asy
   // No email provider is configured, so email_verified is false rather than assumed.
   assert.equal(me.level_signals.email_verified, false);
   assert.equal(me.level, "explorer");
-  assert.equal(me.level_signals.dcs_plus, false, "subscriptions are dark");
+  assert.equal(me.subscription.dcs_plus_effective, false, "subscriptions are dark");
+  assert.equal("dcs_plus" in me.level_signals, false, "the plan is not a level input and must not be listed as one");
   assert.equal(me.publish_credits, 1);
   assert.equal(me.publish_credits_unlimited, false);
   assert.equal(me.can_publish.allowed, true);
@@ -384,4 +387,261 @@ test("B15: creating an org validates its name and seat count", async () => {
   await assert.rejects(() => s.createOrg("u1", { name: "x" }), (e) => e.httpStatus === 422);
   await assert.rejects(() => s.createOrg("u1", { name: "Org", seats: 0 }), (e) => e.httpStatus === 422);
   await assert.rejects(() => s.createOrg("u1", { name: "Org", seats: 5000 }), (e) => e.httpStatus === 422);
+});
+
+// ======================================================= blocks (Round-3 fix)
+//
+// A live block must stop a friendship forming through ANY path. It used to stop
+// exactly one: POST /social/friends checked safety.isBlocked at the ROUTE.
+// acceptFriend had no block check at all, so A could request B, B could block A,
+// and the pending row survived for either side to accept. Party join had none
+// either. These tests drive the SERVICE, not the route, because that is where
+// the guard now lives — a future caller cannot route around it.
+
+/** A social service whose block check is a set of ordered pairs. */
+const withBlocks = (pairs = [], extra = {}) => {
+  const set = new Set(pairs.map(([a, b]) => a + ">" + b));
+  return createSocialService(tmp(), { isBlocked: async (a, b) => set.has(a + ">" + b) || set.has(b + ">" + a), ...extra });
+};
+
+test("R3 GATE: acceptFriend refuses across a live block — it had no block check at all", async () => {
+  // The exact reproduction: A requests B, then B blocks A.
+  const env = tmp();
+  const open = createSocialService(env, { isBlocked: async () => false });
+  await open.requestFriend("A", "B");
+  // Same store, now with the block in force.
+  const s = createSocialService(env, { isBlocked: async (a, b) => (a === "B" && b === "A") });
+  await assert.rejects(() => s.acceptFriend("B", "A"), (e) => e.httpStatus === 403 && /blocked/.test(e.detail));
+  // ...and the blocker's own side cannot accept it either.
+  await assert.rejects(() => s.acceptFriend("A", "B"), (e) => e.httpStatus === 403);
+  assert.equal(await s.areFriends("A", "B"), false);
+});
+
+test("R3 GATE: the stale pending request is deleted, not left to sit in a list forever", async () => {
+  const env = tmp();
+  const open = createSocialService(env, { isBlocked: async () => false });
+  await open.requestFriend("A", "B");
+  assert.equal((await open.friendList("B")).incoming.length, 1);
+
+  const s = createSocialService(env, { isBlocked: async (a, b) => (a === "B" && b === "A") });
+  await assert.rejects(() => s.acceptFriend("B", "A"), (e) => e.httpStatus === 403);
+  // Gone for both sides: a request that can never be accepted is not a request.
+  assert.deepEqual((await s.friendList("B")).incoming, []);
+  assert.deepEqual((await s.friendList("A")).outgoing, []);
+});
+
+test("R3: merely LOOKING at the friend list sweeps a request a block invalidated", async () => {
+  const env = tmp();
+  const open = createSocialService(env, { isBlocked: async () => false });
+  await open.requestFriend("A", "B");
+  const s = createSocialService(env, { isBlocked: async () => true });
+  const list = await s.friendList("B");
+  assert.deepEqual(list.incoming, []);
+  assert.deepEqual(list.removed_blocked, ["A"]);
+  // Really removed from the store, not merely filtered out of one response.
+  const raw = JSON.parse(fs.readFileSync(path.join(s.dir, "friends.json"), "utf8"));
+  assert.deepEqual(raw, []);
+});
+
+test("R3: the block is NOT shadowed in the friends table — unblocking lets a request work again", async () => {
+  const env = tmp();
+  let blocked = true;
+  const s = createSocialService(env, { isBlocked: async () => blocked });
+  await assert.rejects(() => s.requestFriend("A", "B"), (e) => e.httpStatus === 403);
+  blocked = false;                                  // safety.unblock()
+  const req = await s.requestFriend("A", "B");
+  assert.equal(req.status, "requested");
+  const f = await s.acceptFriend("B", "A");
+  assert.equal(f.status, "accepted");
+});
+
+test("R3 GATE: an existing friendship does not survive a block", async () => {
+  const env = tmp();
+  const open = createSocialService(env, { isBlocked: async () => false });
+  await open.requestFriend("A", "B");
+  await open.acceptFriend("B", "A");
+  assert.equal(await open.areFriends("A", "B"), true);
+
+  const s = createSocialService(env, { isBlocked: async () => true });
+  assert.equal(await s.areFriends("A", "B"), false, "a block ends the friendship, it does not merely hide it");
+  assert.deepEqual((await s.friendList("A")).friends, []);
+});
+
+test("R3 GATE: requestFriend is guarded in the SERVICE, not only at the route", async () => {
+  const s = withBlocks([["B", "A"]]);
+  await assert.rejects(() => s.requestFriend("A", "B"), (e) => e.httpStatus === 403 && /blocked/.test(e.detail));
+  await assert.rejects(() => s.requestFriend("B", "A"), (e) => e.httpStatus === 403);
+});
+
+test("R3: a one-directional block check still refuses both directions", async () => {
+  // safety.isBlocked is symmetric, but the service must not depend on that:
+  // an injected check that only looks one way would otherwise let the BLOCKER
+  // befriend the person they blocked.
+  const s = createSocialService(tmp(), { isBlocked: async (a, b) => a === "B" && b === "A" });
+  await assert.rejects(() => s.requestFriend("A", "B"), (e) => e.httpStatus === 403);
+  await assert.rejects(() => s.requestFriend("B", "A"), (e) => e.httpStatus === 403);
+});
+
+test("R3 GATE: party join refuses when a member is blocked, in either direction", async () => {
+  const a = withBlocks([["A", "B"]]);               // A blocked B
+  const p1 = await a.createParty("A", {});
+  await assert.rejects(() => a.joinParty("B", p1.id), (e) => e.httpStatus === 403 && /blocked/.test(e.detail));
+  assert.deepEqual((await a.getParty(p1.id)).members, ["A"]);
+
+  const b = withBlocks([["B", "A"]]);               // B blocked A
+  const p2 = await b.createParty("A", {});
+  await assert.rejects(() => b.joinParty("B", p2.id), (e) => e.httpStatus === 403);
+
+  // A block against a NON-member does not stop the join.
+  const c = withBlocks([["C", "B"]]);
+  const p3 = await c.createParty("A", {});
+  assert.deepEqual((await c.joinParty("B", p3.id)).members, ["A", "B"]);
+});
+
+test("R3 GATE: the block check cannot be switched off", async () => {
+  // Optional-and-silently-skipped is how the hole was drilled in the first
+  // place, so an explicit non-function is a startup error.
+  for (const bad of [null, false, undefined, "no", {}]) {
+    assert.throws(() => createSocialService(tmp(), { isBlocked: bad }), (e) => e.httpStatus === 422 && /block check is required/.test(e.detail));
+  }
+  assert.throws(() => createSocialService(tmp(), { safety: {} }), (e) => e.httpStatus === 422);
+});
+
+test("R3 GATE: with NO deps at all the real safety service is used — not no check", async () => {
+  // The default must be a real block check over the same store the rest of the
+  // estate blocks into, because server.mts constructs this service with no deps.
+  const env = tmp();
+  const social = createSocialService(env);
+  const safety = createSafetyService(env);
+  await social.requestFriend("A", "B");
+  await safety.block("B", "A");                      // written by a different service object
+  await assert.rejects(() => social.acceptFriend("B", "A"), (e) => e.httpStatus === 403 && /blocked/.test(e.detail));
+  const party = await social.createParty("A", {});
+  await assert.rejects(() => social.joinParty("B", party.id), (e) => e.httpStatus === 403);
+  assert.equal(await social.areFriends("A", "B"), false);
+});
+
+test("R3: a safety-shaped dependency is accepted as well as a bare function", async () => {
+  const env = tmp();
+  const safety = createSafetyService(env);
+  const social = createSocialService(env, { safety });
+  await safety.block("B", "A");
+  await assert.rejects(() => social.requestFriend("A", "B"), (e) => e.httpStatus === 403);
+});
+
+test("R3: accepting still 404s when there is no request and nobody is blocked", async () => {
+  const s = withBlocks([]);
+  await assert.rejects(() => s.acceptFriend("u1", "u2"), (e) => e.httpStatus === 404);
+  await assert.rejects(() => s.acceptFriend(null, "u2"), (e) => e.httpStatus === 401);
+  await assert.rejects(() => s.acceptFriend("u1", null), (e) => e.httpStatus === 422);
+});
+
+// ============================================== subscription wiring (Round-3)
+//
+// me() hardcoded dcs_plus:false, so a comped internal tester's profile reported
+// the free allowance of 1 publish credit while subscriptions.entitlementsFor()
+// reported 10 for the same principal.
+
+const fakeSubs = (rows = {}) => ({ statusFor: async (id) => rows[id] || { principal_id: id, plan: "free", status: "none", active_grant: false, paid: false, comped: false, test_mode: null } });
+
+test("R3: with no subscription service wired, /me is exactly what it was", async () => {
+  const s = svc();
+  const me = await s.me(P("u1", "alice@dcsai.ai"));
+  assert.equal(me.subscription.dcs_plus_effective, false);
+  assert.equal(me.publish_credits, 1);
+  assert.equal(me.subscription.plan, "free");
+  assert.equal(me.subscription.source, "none");
+  assert.equal(me.subscription.dcs_plus_effective, false);
+  assert.equal(me.subscription.dcs_plus_paid, false);
+});
+
+test("R3 GATE: a comped tester's profile reports the SAME allowance as entitlementsFor", async () => {
+  const env = tmp();
+  const subs = createSubscriptionsService(env);
+  await subs.grantTestPlan({ id: "staff", isInternalTester: true }, { id: "u1", isInternalTester: true }, "dcs_plus", { reason: "entitlement smoke test" });
+
+  const bare = createSocialService(env);
+  assert.equal((await bare.me(P("u1"))).publish_credits, 1, "the defect: unwired, the profile still says 1");
+
+  const s = createSocialService(env, { subscriptions: subs });
+  const me = await s.me(P("u1"));
+  const ent = await subs.entitlementsFor("u1", { level: me.level, publishedCount: me.worlds_published });
+  assert.equal(me.publish_credits, 10);
+  assert.equal(ent.entitlements[0].value, 10);
+  assert.equal(me.publish_credits, ent.entitlements[0].value, "one question must not have two answers");
+  assert.equal(me.can_publish.remaining, 10);
+  assert.equal(me.subscription.dcs_plus_effective, true);
+  assert.equal(me.subscription.plan, "dcs_plus");
+  assert.equal(me.subscription.source, "comped_internal_test_grant");
+});
+
+test("R3 GATE: a comped grant is an ENTITLEMENT, never revenue — the two are separately named", async () => {
+  const env = tmp();
+  const subs = createSubscriptionsService(env);
+  await subs.grantTestPlan({ id: "staff", isInternalTester: true }, { id: "u1", isInternalTester: true }, "dcs_plus");
+  const me = await createSocialService(env, { subscriptions: subs }).me(P("u1"));
+
+  assert.equal(me.subscription.dcs_plus_effective, true, "the tester has the entitlements");
+  assert.equal(me.subscription.dcs_plus_paid, false, "nobody was charged");
+  assert.equal(me.subscription.dcs_plus_effective, true);
+  assert.equal(me.subscription.dcs_plus_paid, false);
+  // The plan reaches the ALLOWANCE and never the level: level_signals carries
+  // only what actually determines the level, so nothing here tells a user that
+  // paying would raise their reach.
+  assert.equal("dcs_plus" in me.level_signals, false);
+  assert.equal("dcs_plus_effective" in me.level_signals, false);
+  assert.equal(me.subscription.comped, true);
+  assert.equal(me.subscription.test_mode, true);
+
+  // Nothing money-shaped moves, in this object or in any total built from it.
+  assert.equal(me.economy.dcs_plus, false);
+  assert.equal(me.economy.dcs_plus_paid, false);
+  assert.equal(me.economy.paid_subscriptions, 0);
+  assert.equal(me.economy.revenue_minor, 0);
+  assert.equal(me.economy.balance_minor, 0);
+  assert.equal(me.economy.payments_live, false);
+
+  // ...and the aggregate on the subscriptions side agrees.
+  const g = await subs.listGrants();
+  assert.equal(g.count, 1);
+  assert.equal(g.paid_count, 0);
+  assert.equal(g.total_price_minor, 0);
+  assert.equal(g.revenue_minor, 0);
+  assert.equal((await subs.assertDark()).dark, true);
+});
+
+test("R3 GATE: a status row claiming it was PAID is refused, not copied into the profile", async () => {
+  const s = createSocialService(tmp(), {
+    subscriptions: fakeSubs({ u1: { plan: "dcs_plus", status: "active", active_grant: true, paid: true, comped: false, test_mode: false } }),
+  });
+  const me = await s.me(P("u1"));
+  assert.equal(me.subscription.dcs_plus_paid, false, "there is no code path that may set this true");
+  assert.equal(me.subscription.paid_claim_rejected, true, "and the claim is surfaced rather than swallowed");
+  assert.equal(me.economy.dcs_plus, false);
+});
+
+test("R3: a subscription service that fails degrades to the free allowance instead of crashing /me", async () => {
+  const s = createSocialService(tmp(), { subscriptions: { statusFor: async () => { throw new Error("supabase down"); } } });
+  const me = await s.me(P("u1"));
+  assert.equal(me.publish_credits, 1, "degrade downwards: never grant an entitlement nobody can confirm");
+  assert.equal(me.subscription.degraded, true, "and say it is degraded rather than claiming a real 'free'");
+  assert.equal(me.subscription.dcs_plus_effective, false);
+});
+
+test("R3: a subscriptions dependency of the wrong shape is a startup error", async () => {
+  assert.throws(() => createSocialService(tmp(), { subscriptions: {} }), (e) => e.httpStatus === 422 && /statusFor/.test(e.detail));
+  // An explicit null means "none wired", which is legal and is today's behaviour.
+  assert.doesNotThrow(() => createSocialService(tmp(), { subscriptions: null }));
+});
+
+test("R3: a comped plan raises the ALLOWANCE and does not raise the LEVEL", async () => {
+  // computeLevel() takes dcs_plus and never reads it (src/cw1/identity-core.mjs:22).
+  // This pins the behaviour: a plan buys credits, not trust. If someone makes a
+  // level purchasable, this fails and they have to say so out loud.
+  const env = tmp();
+  const subs = createSubscriptionsService(env);
+  await subs.grantTestPlan({ id: "staff", isInternalTester: true }, { id: "u1", isInternalTester: true }, "dcs_plus");
+  const me = await createSocialService(env, { subscriptions: subs }).me(P("u1"));
+  assert.equal(me.level, "explorer");
+  assert.equal(me.publish_credits, 10);
 });

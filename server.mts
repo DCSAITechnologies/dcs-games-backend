@@ -75,9 +75,6 @@ const v3 = createAssemblyRouter();                                           // 
 const worldMemory = createWorldMemory();                                     // B7
 const companions = createCompanionService({ worldMemory });                  // B5
 const npcMemory = createNpcMemory({ worldMemory });                          // 9.5
-let progression: any = null;                                                 // B15, constructed after social below
-const social = createSocialService();                                        // B15: replaces the in-memory fixture users
-progression = createProgressionService({ social, worldMemory });
 const market = createMarketplaceService();                                   // B15: prepared, and dark at the schema level
 const verification = createVerificationService();                            // P2
 const jobsvc = createJobService();                                           // P1: async generation
@@ -88,6 +85,13 @@ const bootReconcile = await jobsvc.reconcileOnBoot(BOOT_ID);
 if (bootReconcile.interrupted) console.warn("P1 jobs marked interrupted on boot:", bootReconcile.interrupted);
 const subs = createSubscriptionsService();                                    // B15: no PSP, so nothing can be bought; internal testers can be comped
 const safety = createSafetyService();                                        // A5: real persistence, so moderation output can never be faked
+// social is constructed AFTER safety and subs because it takes both as required
+// collaborators. A live block must stop a friendship forming through EVERY path,
+// not only the one route that remembered to check — so the check lives in the
+// service and cannot be constructed away. And a comped tester's profile must
+// report the allowance they actually have, while still never reading as revenue.
+const social = createSocialService(process.env, { safety, subscriptions: subs });
+const progression = createProgressionService({ social, worldMemory });
 const repo = createWorldRepository();                                        // A3: replaces the process-local Map + swallowed best-effort insert
 console.log("A3 world store:", repo.kind);
 
@@ -360,11 +364,16 @@ const server = http.createServer(async (req, res) => {
     if (url === "/safety/block" && method === "POST") {
       const me = await mustBe(req, cid);
       const b = await readBody(req);
+      // A block with no subject used to answer 200. Someone who believes they
+      // have blocked a person and has not is worse off than someone told the
+      // call failed, so this refuses instead of quietly doing nothing.
+      if (!b.blocked_id) throw Errors.validation("blocked_id is required: who is being blocked", { correlationId: cid });
       return send(res, 200, { ok: true, ...(await safety.block(me.id, b.blocked_id)) });
     }
     if (url === "/safety/block" && method === "DELETE") {
       const me = await mustBe(req, cid);
       const b = await readBody(req);
+      if (!b.blocked_id) throw Errors.validation("blocked_id is required: whose block is being lifted", { correlationId: cid });
       return send(res, 200, { ok: true, ...(await safety.unblock(me.id, b.blocked_id)) });
     }
     if (url === "/safety/blocks" && method === "GET") {

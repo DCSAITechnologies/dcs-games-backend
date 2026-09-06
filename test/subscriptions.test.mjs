@@ -342,10 +342,14 @@ test("77: the service reports where it persists and that nothing is subscribable
   assert.equal(d.persistence, "file");
   assert.equal(d.payments_live, false);
   assert.equal(d.subscribable, false);
-  // The schema half of the invariant is not yet applied, and it says so rather
-  // than implying a durability it does not have.
-  assert.equal(d.schema_applied, null);
-  assert.match(d.schema_note, /not yet in migrations/);
+  // The schema half of the invariant is in the chain now, and whether it has
+  // been APPLIED is unknown from this process — which it says, rather than
+  // implying a durability it cannot see.
+  assert.equal(d.schema_applied, null, "this process cannot see which migrations a database has run");
+  assert.equal(d.schema_migration, "migrations/0008_subscriptions_dark.sql");
+  assert.match(d.schema_note, /not knowable from this process/);
+  // The claim is checked against the disk rather than believed.
+  assert.ok(fs.existsSync(path.join(import.meta.dirname, "..", d.schema_migration)), "describe() names a migration that must actually exist");
 });
 
 test("77: the DDL holds the same invariant the code holds", async () => {
@@ -364,4 +368,78 @@ test("77: an anonymous caller cannot subscribe", async () => {
   const s = svc();
   await assert.rejects(() => s.subscribe(null, "dcs_plus"), (e) => e.httpStatus === 401);
   await assert.rejects(() => s.subscribe("someone", "gold"), (e) => e.httpStatus === 422);
+});
+
+// ============================================== the never-expiring grant (R3)
+//
+// The default expiry protected the careless caller but not the deliberate one:
+// grantTestPlan(..., { expiresAt: null }) wrote expires_at:null and isLive()
+// treated a row with no expiry as live forever — a comped plan that outlives the
+// controlled internal window, which is the one thing it may not do. Migration
+// 0008 declares the column NOT NULL; the service now agrees with it.
+
+test("R3 GATE: a test grant cannot be made never-expiring", async () => {
+  const s = svc();
+  for (const bad of [null, ""]) {
+    await assert.rejects(
+      () => s.grantTestPlan(STAFF, TESTER, "dcs_plus", { expiresAt: bad }),
+      (e) => e.httpStatus === 422 && /must expire/.test(e.detail),
+    );
+  }
+  assert.equal((await s.listGrants()).count, 0, "the refusal must not leave a row behind");
+});
+
+test("R3 GATE: a row with no expiry does not entitle, and assertDark fails on it", async () => {
+  const s = svc();
+  await s.grantTestPlan(STAFF, TESTER, "dcs_plus");
+  const file = path.join(s.dir, "subscriptions.json");
+  const rows = JSON.parse(fs.readFileSync(file, "utf8"));
+  rows[0].expires_at = null;                       // an import, or a hand edit
+  fs.writeFileSync(file, JSON.stringify(rows));
+
+  const st = await s.statusFor(TESTER.id);
+  assert.equal(st.plan, "free", "a grant that never ends must not still entitle");
+  assert.equal(st.active_grant, false);
+  const d = await s.assertDark();
+  assert.equal(d.dark, false, "the check must be able to fail, or it proves nothing");
+  assert.match(d.problems.join(" "), /never expires/);
+});
+
+test("R3: the exported DDL has not drifted from migrations/0008", async () => {
+  const applied = fs.readFileSync(path.join(import.meta.dirname, "..", "migrations", "0008_subscriptions_dark.sql"), "utf8");
+  for (const guard of [
+    "check (plan in ('free','dcs_plus'))",
+    "check (status in ('comped','revoked'))",
+    "check (test_mode = true and comped = true and price_minor = 0)",
+    "expires_at   timestamptz not null",
+    "check (expires_at <= timestamptz '2026-10-01T00:00:00Z')",
+  ]) {
+    assert.ok(applied.includes(guard), `migration 0008 must hold: ${guard}`);
+    assert.ok(SUBSCRIPTIONS_DDL.includes(guard), `SUBSCRIPTIONS_DDL must mirror: ${guard}`);
+  }
+});
+
+// ================================================ a comp is never revenue (R3)
+
+test("R3 GATE: comping does not move any money-shaped total, count or aggregate", async () => {
+  const s = svc();
+  await s.grantTestPlan(STAFF, TESTER, "dcs_plus", { reason: "entitlement smoke test" });
+  await s.grantTestPlan(STAFF, { id: "tester_2", isInternalTester: true }, "dcs_plus");
+  const g = await s.listGrants();
+  assert.equal(g.count, 2, "two grants exist");
+  assert.equal(g.comped_count, 2, "and both are comped");
+  assert.equal(g.paid_count, 0, "none is a sale");
+  assert.equal(g.total_price_minor, 0);
+  assert.equal(g.revenue_minor, 0, "a count of grants is not a count of sales");
+  for (const row of g.grants) {
+    assert.equal(row.price_minor, 0);
+    assert.equal(row.comped, true);
+    assert.equal(row.test_mode, true);
+    assert.ok(!PAID_STATUSES.includes(row.status));
+  }
+  // And the entitlement side reports the same separation.
+  const ent = await s.entitlementsFor(TESTER.id, { level: "explorer", publishedCount: 0 });
+  assert.equal(ent.dcs_plus_effective, true);
+  assert.equal(ent.dcs_plus_paid, false);
+  assert.equal(ent.price_minor, 0);
 });

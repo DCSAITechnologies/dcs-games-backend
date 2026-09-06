@@ -12,8 +12,8 @@
 // price or a paid status. It is held the way marketplace.mjs holds its own —
 //   1. here, by refusing to subscribe at all rather than granting a free plan;
 //   2. by a status vocabulary that has no paid state to write into;
-//   3. in the schema, by CHECK constraints — see SUBSCRIPTIONS_DDL below, which
-//      is not yet in migrations/ (this lane does not own that directory).
+//   3. in the schema, by CHECK constraints — migrations/0008_subscriptions_dark.sql,
+//      mirrored by SUBSCRIPTIONS_DDL below.
 //
 // The two rules that shape everything else:
 //
@@ -94,10 +94,13 @@ export const PLANS = [
 ];
 
 /**
- * The schema half of the invariant. This lane does not own migrations/, so the
- * DDL lives here to be lifted into the chain verbatim. Until it is applied the
- * collection persists to its local shadow and reports itself degraded rather
- * than claiming a durability it does not have.
+ * The schema half of the invariant. It is now IN the chain as
+ * migrations/0008_subscriptions_dark.sql; this export mirrors it so the guard
+ * can be asserted from a test without reaching into migrations/, and
+ * test/subscriptions.test.mjs checks the two have not drifted apart.
+ *
+ * Whether 0008 has actually been applied to a database is not knowable from
+ * here, so describe() reports schema_applied as null rather than guessing.
  */
 export const SUBSCRIPTIONS_DDL = `
 create table if not exists public.dcsgames_subscriptions (
@@ -113,14 +116,21 @@ create table if not exists public.dcsgames_subscriptions (
   granted_by   text        not null,
   reason       text,
   granted_at   timestamptz not null default now(),
-  expires_at   timestamptz,
+  -- NOT NULL deliberately: a comped grant with no expiry is a grant that
+  -- outlives the internal window, which is the one thing it may not do.
+  expires_at   timestamptz not null,
   revoked_at   timestamptz,
 
   -- The money guard. A subscription that is not comped cannot exist, whatever
   -- the application layer believes, and a comped one cannot carry a price.
   -- Turning subscriptions on is a deliberate schema change plus a PSP, not an
   -- environment variable.
-  constraint dcsgames_subscriptions_dark check (test_mode = true and comped = true and price_minor = 0)
+  constraint dcsgames_subscriptions_dark check (test_mode = true and comped = true and price_minor = 0),
+
+  -- The controlled internal testing window closes 30 September 2026. Nothing
+  -- granted under it may outlive it.
+  constraint dcsgames_subscriptions_internal_window
+    check (expires_at <= timestamptz '2026-10-01T00:00:00Z')
 );
 
 create index if not exists dcsgames_subscriptions_plan_idx
@@ -172,12 +182,21 @@ export function createSubscriptionsService(env = process.env) {
     });
   }
 
-  /** A grant that has passed its expiry is spent, not silently still in force. */
+  /**
+   * A grant that has passed its expiry is spent, not silently still in force.
+   *
+   * A row with NO expiry is not live either. grantTestPlan cannot write one, but
+   * a row that arrived some other way (an import, a manual edit, a migration
+   * from the old build) would otherwise be a comped plan that never ends —
+   * exactly the never-expiring entitlement the internal window exists to
+   * prevent. assertDark flags it as well, so it is refused and reported.
+   */
   function isLive(row) {
     if (!row) return false;
     if (row.status !== "comped") return false;
     if (row.revoked_at) return false;
-    if (row.expires_at && Date.now() > new Date(row.expires_at).getTime()) return false;
+    if (!row.expires_at) return false;
+    if (Date.now() > new Date(row.expires_at).getTime()) return false;
     return true;
   }
 
@@ -192,8 +211,12 @@ export function createSubscriptionsService(env = process.env) {
       psp_integrated: pspIntegrated(),
       // Said plainly, because /health must not imply a capability that is absent.
       subscribable: false,
+      // Unknown from here: this process cannot see which migrations a database
+      // has run, and guessing "true" would be the kind of claim this module
+      // exists to avoid.
       schema_applied: null,
-      schema_note: "dcsgames_subscriptions is not yet in migrations/; see SUBSCRIPTIONS_DDL. Until it is applied the collection persists to its local shadow and reports itself degraded.",
+      schema_migration: "migrations/0008_subscriptions_dark.sql",
+      schema_note: "The DDL is in the chain as migrations/0008_subscriptions_dark.sql (mirrored by SUBSCRIPTIONS_DDL). Whether it has been applied to a database is not knowable from this process, so it is reported as unknown rather than assumed; the collection always writes its local shadow.",
       note: "No customer can subscribe. The only subscriptions that exist are comped internal-test grants, and every one of them is marked test_mode.",
     }),
 
@@ -246,9 +269,18 @@ export function createSubscriptionsService(env = process.env) {
       if (!PLAN_IDS.includes(planId)) throw Errors.validation(`plan must be one of: ${PLAN_IDS.join(", ")}`, { meta: { plans: PLAN_IDS } });
       if (planId === "free") throw Errors.validation("'free' is the absence of a subscription; there is nothing to grant");
 
-      const expires = expiresAt ? new Date(String(expiresAt).length === 10 ? expiresAt + "T23:59:59Z" : expiresAt) : null;
-      if (expires && Number.isNaN(expires.getTime())) throw Errors.validation("expires_at is not a date");
-      if (expires && expires.getTime() > new Date(INTERNAL_WINDOW_ENDS + "T23:59:59Z").getTime()) {
+      // An explicit null used to pass straight through to the row, producing a
+      // comped grant that never expired — the default protected the careless
+      // caller but not the deliberate one, and the column is NOT NULL in 0008.
+      if (expiresAt == null || expiresAt === "") {
+        throw Errors.validation(
+          `a test grant must expire; the controlled internal window ends ${INTERNAL_WINDOW_ENDS}`,
+          { meta: { window_ends: INTERNAL_WINDOW_ENDS } },
+        );
+      }
+      const expires = new Date(String(expiresAt).length === 10 ? expiresAt + "T23:59:59Z" : expiresAt);
+      if (Number.isNaN(expires.getTime())) throw Errors.validation("expires_at is not a date");
+      if (expires.getTime() > new Date(INTERNAL_WINDOW_ENDS + "T23:59:59Z").getTime()) {
         throw Errors.validation(`a test grant cannot outlive the internal window (${INTERNAL_WINDOW_ENDS})`);
       }
 
@@ -266,7 +298,7 @@ export function createSubscriptionsService(env = process.env) {
         granted_by: granter.id,
         reason: reason ? String(reason).slice(0, 400) : null,
         granted_at: new Date().toISOString(),
-        expires_at: expires ? expires.toISOString() : null,
+        expires_at: expires.toISOString(),
         revoked_at: null,
       };
       await subscriptions.upsert((s) => s.principal_id === subject.id, row);
@@ -394,6 +426,10 @@ export function createSubscriptionsService(env = process.env) {
         // Real sums over real rows. They are zero because every row is zero.
         total_price_minor: rows.reduce((a, r) => a + (Number(r.price_minor) || 0), 0),
         paid_count: rows.filter((r) => PAID_STATUSES.includes(r.status)).length,
+        comped_count: rows.filter((r) => r.comped === true).length,
+        // Named so that nothing downstream has to infer it: a comped grant is
+        // not revenue, and the count of grants is not a count of sales.
+        revenue_minor: 0,
         note: rows.length === 0
           ? "No subscription has ever been granted."
           : "Every row is a comped internal-test grant. None was purchased.",
@@ -427,6 +463,7 @@ export function createSubscriptionsService(env = process.env) {
         if (s.comped !== true) problems.push(`subscription ${who} is not marked comped`);
         if (!s.granted_by) problems.push(`subscription ${who} records no granter`);
         if (!PLAN_IDS.includes(s.plan)) problems.push(`subscription ${who} is on unknown plan '${s.plan}'`);
+        if (!s.expires_at) problems.push(`subscription ${who} never expires, so it outlives the internal window`);
         if (s.expires_at && new Date(s.expires_at).getTime() > new Date(INTERNAL_WINDOW_ENDS + "T23:59:59Z").getTime()) {
           problems.push(`subscription ${who} outlives the internal window`);
         }

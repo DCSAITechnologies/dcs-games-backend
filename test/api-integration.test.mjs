@@ -600,3 +600,54 @@ test("B15: a non-tester cannot comp anybody, including themselves", async () => 
   const g = await req("/v3/subscriptions/grants", { headers: auth(MALLORY) });
   assert.equal(g.status, 403);
 });
+
+// ------------------------------------- a block holds on EVERY path, over HTTP
+//
+// The block check used to live on POST /social/friends and nowhere else, so
+// A requests B, B blocks A, and either side could still call /accept — a
+// friendship formed across a live block. The check now lives in the service,
+// which is the only place that can cover a path nobody remembered to guard.
+
+test("A5 GATE: a block prevents a friendship forming through the accept path too", async () => {
+  const CARL = signLocalToken(SECRET, { sub: "user-carl", email: "carl@example.com" }, 3600);
+  const DANA = signLocalToken(SECRET, { sub: "user-dana", email: "dana@example.com" }, 3600);
+
+  const reqd = await req("/social/friends", { method: "POST", headers: json(CARL), body: JSON.stringify({ friend_id: "user-dana" }) });
+  assert.ok(reqd.status < 400, `request should succeed before any block: ${reqd.status}`);
+
+  const blocked = await req("/safety/block", { method: "POST", headers: json(DANA), body: JSON.stringify({ blocked_id: "user-carl" }) });
+  assert.ok(blocked.status < 400, `block should succeed: ${blocked.status} ${await blocked.text()}`);
+
+  // The accept path is the one that had no guard at all.
+  const accept = await req("/social/friends/accept", { method: "POST", headers: json(DANA), body: JSON.stringify({ friend_id: "user-carl" }) });
+  assert.ok(accept.status >= 400, `a blocked pair must not be able to become friends: ${accept.status} ${await accept.text()}`);
+
+  // And the un-acceptable request must not sit in her list forever.
+  const list = await (await req("/social/friends", { headers: auth(DANA) })).json();
+  const stillPending = JSON.stringify(list).includes("user-carl");
+  assert.equal(stillPending, false, "a request that can never be accepted must not linger in the list");
+});
+
+test("B15 GATE: a comped tester sees the real allowance, and it still is not revenue", async () => {
+  const g = await req("/v3/subscriptions/grant", {
+    method: "POST", headers: json(ALICE),
+    body: JSON.stringify({ principal_id: "alice@dcsai.ai", plan: "dcs_plus", reason: "entitlement path" }),
+  });
+  assert.ok(g.status === 200 || g.status === 409, `grant: ${g.status} ${await g.text()}`);
+
+  const ent = await (await req("/me/entitlements", { headers: auth(ALICE) })).json();
+  assert.equal(ent.dcs_plus_paid, false, "a comped grant must never read as paid");
+  assert.equal(ent.price_minor, 0);
+  assert.equal(ent.payments_live, false);
+
+  // The profile and the entitlement endpoint must not disagree about what this
+  // person may do — one saying 1 credit while the other says 10 is how a tester
+  // ends up debugging the wrong system.
+  const me = await (await req("/me/profile", { headers: auth(ALICE) })).json();
+  assert.equal(me.economy?.dcs_plus ?? false, false, "economy.dcs_plus means PAID and must stay false");
+  assert.equal(me.subscription?.dcs_plus_paid ?? false, false);
+  // The plan must not sit in level_signals: it does not move the level, and
+  // listing it there tells a user that paying would raise their reach.
+  assert.equal("dcs_plus" in (me.level_signals || {}), false, "the plan must not be advertised as a level signal");
+  assert.ok(me.level_signals?.email_verified !== undefined, "the real level signals are still reported");
+});
