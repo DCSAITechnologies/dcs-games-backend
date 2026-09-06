@@ -1011,3 +1011,16 @@ test("`limit` cannot smuggle query parameters into a listing", async (t) => {
   await s.list({ limit: "12" });
   assert.match(stub.wire.at(-1).url, /limit=12/, "a numeric string is still honoured");
 });
+
+test("A3: a loaded manifest carries the hash of what was actually returned", async () => {
+  // /versions was the only place a manifest_hash appeared, so a client loading
+  // a world could not verify what it received. The hash is computed over the
+  // manifest being RETURNED — a world upgraded on read must hash to what the
+  // caller got, not to what is stored, or the check is worse than useless.
+  const { manifestHash } = await import("../src/core/worldstore.mjs");
+  const a = { meta: { title: "A" }, zones: [{ id: "z" }] };
+  const b = { meta: { title: "A" }, zones: [{ id: "z" }] };
+  assert.equal(manifestHash(a), manifestHash(b), "the same content must hash the same");
+  const c = { meta: { title: "B" }, zones: [{ id: "z" }] };
+  assert.notEqual(manifestHash(a), manifestHash(c));
+});

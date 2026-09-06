@@ -46,7 +46,7 @@ import { createProgressionService } from "./src/core/progression.mjs";        //
 import { createSocialService } from "./src/core/social.mjs";                    // B15: durable profiles, friends, parties, teams, studios, discovery
 import { createSafetyService } from "./src/core/safety.mjs";                    // A5: age tiers, consent, report/block, moderation audit
 import { assertSchema, currentVersion } from "./src/core/schema.mjs";           // A2: boot-time schema assertion — refuse to serve an unsupported schema
-import { createWorldRepository } from "./src/core/worldstore.mjs";          // A3: durable, lossless, idempotent, ownership-aware world persistence
+import { createWorldRepository, manifestHash } from "./src/core/worldstore.mjs";          // A3: durable, lossless, idempotent, ownership-aware world persistence
 import { createPrincipalResolver } from "./src/core/principal.mjs";         // A1: PARENT-OWNED canonical principal. No x-user-id fallback, ever.
 import { AppError, Errors, newCorrelationId, logError, optional } from "./src/core/errors.mjs"; // A4: structured errors, correlation ids, no silent swallow
 
@@ -1140,7 +1140,12 @@ const server = http.createServer(async (req, res) => {
         // Any world still on the v1 contract is upgraded on read, so old worlds
         // keep working without a migration job.
         const { manifest, migrated } = ensureV3(rec.manifest, { worldVersion: rec.version, creatorId: rec.owner_id });
-        return send(res, 200, { ok: true, world_id: rec.world_id, world_version: rec.version, state: rec.state, owner: rec.owner_id, migrated_on_read: migrated, manifest });
+        // The hash travels with the manifest so a client can verify what it
+        // received. Without it, /versions was the only place the hash appeared,
+        // and a caller loading a world had no way to check integrity at all.
+        // It is computed over the manifest being RETURNED, so a world upgraded
+        // on read hashes to what the caller actually got, not to what is stored.
+        return send(res, 200, { ok: true, world_id: rec.world_id, world_version: rec.version, state: rec.state, owner: rec.owner_id, migrated_on_read: migrated, manifest_hash: manifestHash(manifest), manifest });
       }
 
       mm = url.match(/^\/v3\/worlds\/([^/]+)\/playtest$/);
