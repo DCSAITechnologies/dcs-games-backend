@@ -117,21 +117,29 @@ export function psqlExec(dsn, sql) {
     // problem, not a schema problem. Reported as itself: the boot log used to
     // print "A2 SCHEMA ASSERTION FAILED: spawn psql ENOENT" and send whoever
     // read it looking at migrations.
-    p.on("error", (e) => reject(
-      e && e.code === "ENOENT"
-        ? Object.assign(new Error(
-            `psql was not found (tried '${psqlBin()}'). This is a MISSING BINARY, not a schema failure: ` +
-            `the schema could not be checked at all. Install a postgresql client in the runtime image ` +
-            `(Nixpacks: add 'postgresql' to nixPkgs), or set PSQL_BIN to its path.`
-          ), { code: "PSQL_NOT_FOUND" })
-        : e
-    ));
+    p.on("error", (e) => reject(asPsqlNotFound(e)));
     p.on("close", (code) => (code === 0 ? resolve({ stdout: out, stderr: err }) : reject(new Error(`psql exited ${code}: ${err.trim() || out.trim()}`))));
     p.stdin.end(sql);
   });
 }
+/** Map a missing binary to something that says so. See psqlExec. */
+function asPsqlNotFound(e) {
+  if (e && e.code === "ENOENT") {
+    return Object.assign(new Error(
+      `psql was not found (tried '${process.env.PSQL_BIN || "psql"}'). This is a MISSING BINARY, not a schema ` +
+      `failure: the schema could not be checked at all. Install a postgresql client in the runtime image ` +
+      `(Nixpacks: add 'postgresql' to nixPkgs), or set PSQL_BIN to its path.`
+    ), { code: "PSQL_NOT_FOUND" });
+  }
+  return e;
+}
+
 export async function psqlScalar(dsn, sql) {
-  const { stdout } = await execFileAsync(psqlBin(), [...psqlArgs(dsn), "-Atc", sql], { maxBuffer: 8 * 1024 * 1024 });
+  // execFile, not spawn — so the ENOENT arrives here rather than through
+  // psqlExec's handler. Mapping it in only one of the two is how a deployed
+  // boot still printed "spawn psql ENOENT" under a schema-assertion heading.
+  const { stdout } = await execFileAsync(psqlBin(), [...psqlArgs(dsn), "-Atc", sql], { maxBuffer: 8 * 1024 * 1024 })
+    .catch((e) => { throw asPsqlNotFound(e); });
   return stdout.trim();
 }
 
