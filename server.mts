@@ -28,6 +28,7 @@ import { planExpansion, planEdit } from "./src/v3/expansion/planner.mjs";       
 import { applyDelta, verifyPreservation, emptyLiveState } from "./src/v3/expansion/delta.mjs";
 import { createWorldMemory } from "./src/v3/memory/world-memory.mjs";           // B7: factual world chronology
 import { createCompanionService } from "./src/v3/companion/companion.mjs";      // B5: personal AI companion
+import { createProgressionService } from "./src/core/progression.mjs";        // B15: retention from measured data only
 import { createSocialService } from "./src/core/social.mjs";                    // B15: durable profiles, friends, parties, teams, studios, discovery
 import { createSafetyService } from "./src/core/safety.mjs";                    // A5: age tiers, consent, report/block, moderation audit
 import { assertSchema, currentVersion } from "./src/core/schema.mjs";           // A2: boot-time schema assertion — refuse to serve an unsupported schema
@@ -58,7 +59,9 @@ const econRouter: any = createEconomyRouter({}); // CW6 v3.0: DARK; supabase + s
 const v3 = createAssemblyRouter();                                           // B1
 const worldMemory = createWorldMemory();                                     // B7
 const companions = createCompanionService({ worldMemory });                  // B5
+let progression: any = null;                                                 // B15, constructed after social below
 const social = createSocialService();                                        // B15: replaces the in-memory fixture users
+progression = createProgressionService({ social, worldMemory });
 const safety = createSafetyService();                                        // A5: real persistence, so moderation output can never be faked
 const repo = createWorldRepository();                                        // A3: replaces the process-local Map + swallowed best-effort insert
 console.log("A3 world store:", repo.kind);
@@ -320,6 +323,22 @@ const server = http.createServer(async (req, res) => {
     if (url === "/safety/consent/media" && method === "GET") {
       const me = await mustBe(req, cid);
       return send(res, 200, { ok: true, consents: await safety.mediaConsents(me.id) });
+    }
+
+    // ---- B15 retention and the creator dashboard, from measured data only ----
+    if (url === "/me/achievements" && method === "GET") {
+      const me = await mustBe(req, cid);
+      const owned = (await repo.listOwned(me.id, 200)).map((w: any) => w.world_id);
+      return send(res, 200, { ok: true, ...(await progression.achievements(me.id, owned)) });
+    }
+    if (url === "/me/streak" && method === "GET") {
+      const me = await mustBe(req, cid);
+      return send(res, 200, { ok: true, ...(await progression.streak(me.id)) });
+    }
+    if (url === "/me/dashboard" && method === "GET") {
+      const me = await mustBe(req, cid);
+      const owned = await repo.listOwned(me.id, 200);
+      return send(res, 200, { ok: true, ...(await progression.creatorDashboard(me.id, owned)) });
     }
 
     // ================= B15 social, profile and discovery ==================

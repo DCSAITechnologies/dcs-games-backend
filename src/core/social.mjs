@@ -359,6 +359,10 @@ export function createSocialService(env = process.env) {
       return await ratings.insert({ world_id: worldId, principal_id: principalId, rating, created_at: new Date().toISOString() });
     },
 
+    /** Raw measured rows, for services that compute over them (progression). */
+    async allPlays() { return await plays.all(); },
+    async allRatings() { return await ratings.all(); },
+
     /** Measured stats for one world. Zero means zero, never a placeholder. */
     async worldStats(worldId) {
       const p = await plays.find((x) => x.world_id === worldId);
