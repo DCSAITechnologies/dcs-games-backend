@@ -105,12 +105,48 @@ class PendingJournal {
     this.file = path.join(dir, name + ".pending.json");
     this.state = this._loadSync();
   }
+  /**
+   * ENOENT AND "CORRUPT" ARE TWO DIFFERENT FACTS, AND ONLY ONE OF THEM IS CLEAN.
+   *
+   * This used to catch every error and return null, commented "ENOENT or
+   * corrupt: nothing is pending". An ENOENT genuinely means nothing is pending.
+   * A file that EXISTS and cannot be read or parsed — a truncated write, a bad
+   * sector, an EACCES after a permissions change, a half-synced filesystem
+   * after an unclean shutdown — means we do not KNOW what is pending. And CLEAN
+   * is precisely the state in which this module lets the primary overwrite the
+   * shadow, so a process that started with an unreadable journal declared
+   * itself clean, read the primary and destroyed exactly the unconfirmed rows
+   * the journal exists to protect. That is the redeploy-during-an-outage
+   * scenario the durable marker was built for, arriving through the marker.
+   *
+   * Unknown therefore reads as PENDING. That is the safe direction and it
+   * converges: PENDING means the shadow is authoritative and is replayed at the
+   * primary, which destroys nothing, and the journal self-clears on the first
+   * replay the primary actually confirms.
+   */
   _loadSync() {
+    let raw;
     try {
-      const j = JSON.parse(fs.readFileSync(this.file, "utf8"));
-      if (!j || typeof j !== "object") return null;
-      return { at: j.at || null, detail: j.detail || "unconfirmed local writes", deletes: Array.isArray(j.deletes) ? j.deletes : [] };
-    } catch { return null; }                 // ENOENT or corrupt: nothing is pending
+      raw = fs.readFileSync(this.file, "utf8");
+    } catch (e) {
+      if (e && e.code === "ENOENT") return null;      // no journal: genuinely nothing is pending
+      return this._unknown(`the pending journal could not be read (${e?.code || e?.message || e})`);
+    }
+    let j;
+    try { j = JSON.parse(raw); } catch (e) { return this._unknown(`the pending journal is unreadable (${e?.message || e})`); }
+    if (!j || typeof j !== "object" || Array.isArray(j)) return this._unknown("the pending journal does not hold an object");
+    return {
+      at: j.at || null,
+      detail: j.detail || "unconfirmed local writes",
+      // A journal whose `deletes` is not an array has lost the one thing that
+      // cannot be inferred from the shadow, so the rest of it is not trusted
+      // either — the replay proceeds, it simply cannot re-apply deletions.
+      deletes: Array.isArray(j.deletes) ? j.deletes : [],
+    };
+  }
+  /** An unreadable journal: pending, dated now, with nothing claimed about deletions. */
+  _unknown(detail) {
+    return { at: new Date().toISOString(), detail, deletes: [], unreadable: true };
   }
   get pending() { return this.state; }
   /** Open (or extend) the journal. Called BEFORE the primary is attempted. */

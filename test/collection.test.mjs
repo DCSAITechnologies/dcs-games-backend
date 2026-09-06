@@ -232,6 +232,8 @@ const journal = (dir, name = "t") => {
 const mk = (dir, sb, name = "t", primaryKey = ["id"]) => createCollection({
   dir, name, table: "dcsgames_t", primaryKey, env: env(true), fetchImpl: sb.fetchImpl,
 });
+/** The stub's key for a row, without depending on how it is spelled. */
+const keyFor = (sb, want) => [...sb.rows.entries()].find(([, r]) => Object.entries(want).every(([k, v]) => String(r[k]) === String(v)))?.[0];
 /** The deliberate degradation logging is noise here. */
 function quiet() {
   const w = console.warn, e = console.error;
@@ -548,4 +550,68 @@ test("LANE C/4: the safe primitive does not lose a concurrent write, and is the 
   ]);
   const ids = (await c.all()).map((r) => r.id).sort();
   assert.deepEqual(ids, ["concurrent-a", "concurrent-b", "keep"], "no concurrent write may be erased");
+});
+
+test("LANE C/5: a journal that cannot be read is not evidence that nothing is pending", async (t) => {
+  t.after(quiet());
+  // ATTACK: destroy the durability marker, then let an ordinary read destroy the
+  // rows it was protecting.
+  //
+  // PendingJournal._loadSync caught EVERY error and returned null, commented
+  // "ENOENT or corrupt: nothing is pending". Those are two different facts. An
+  // ENOENT genuinely means nothing is pending. A file that exists and cannot be
+  // parsed — a truncated write, a bad sector, an EACCES after a permissions
+  // change, a half-synced filesystem after an unclean shutdown — means we do not
+  // KNOW what is pending, and this module's whole contract is that CLEAN is the
+  // state in which the primary is allowed to overwrite the shadow.
+  //
+  // So a process that started with an unreadable journal declared itself CLEAN,
+  // read the primary, and rewrote the shadow with the primary's answer —
+  // destroying exactly the unconfirmed rows the journal exists to protect. That
+  // is the redeploy-during-an-outage scenario the durable marker was built for,
+  // arriving through the marker itself.
+  const dir = tmp();
+  const sb = fakeSupabase({ failWrite: true });
+  const first = mk(dir, sb);
+  await first.insert({ id: "r1", reason: "harassment" });
+  assert.ok(first.degraded, "precondition: the primary refused the write");
+  assert.ok(journal(dir), "precondition: the journal was opened");
+  assert.equal(sb.rows.size, 0, "precondition: the row exists ONLY in the shadow");
+
+  // The journal file is corrupted — it exists, and it does not parse.
+  fs.writeFileSync(path.join(dir, "t.pending.json"), '{"at":"2026-09-07T00:00:00Z","del');
+
+  // A new process starts. The primary is healthy again.
+  sb.down.write = false;
+  const second = mk(dir, sb);
+  assert.ok(second.pending, "an unreadable journal must read as PENDING, not as CLEAN");
+  assert.ok(second.degraded, "and the process is degraded from its first second");
+  assert.match(String(second.degraded), /unreadable|could not be read/i, "saying why");
+
+  const rows = await second.all();
+  assert.deepEqual(rows.map((r) => r.id), ["r1"], "the unconfirmed row must survive the restart");
+  assert.deepEqual(shadow(dir).map((r) => r.id), ["r1"], "and must still be on disk");
+  // Treating it as pending means the shadow is replayed, so the two converge
+  // rather than the row being destroyed — and the marker then self-clears.
+  assert.ok(sb.find({ id: "r1" }), "and is pushed to the primary on the first healthy read");
+  assert.equal(journal(dir), null, "a confirmed replay clears the journal");
+  assert.equal(second.degraded, null, "and the collection is healthy again");
+});
+
+test("LANE C/6: an ABSENT journal still means clean, so an ordinary deletion still sticks", async (t) => {
+  t.after(quiet());
+  // The other half of LANE C/5: the fail-closed reading must not turn every
+  // collection permanently pending, which would make the primary never
+  // authoritative and a deletion impossible to make stick.
+  const dir = tmp();
+  const sb = fakeSupabase();
+  const c = mk(dir, sb);
+  await c.insert({ id: "a" });
+  await c.insert({ id: "b" });
+  assert.equal(journal(dir), null, "a confirmed write leaves no journal");
+  assert.equal(c.pending, null, "so the collection is CLEAN");
+
+  sb.rows.delete(keyFor(sb, { id: "b" }));       // deleted at the primary by another writer
+  assert.deepEqual((await c.all()).map((r) => r.id), ["a"], "the primary is authoritative when clean");
+  assert.deepEqual(shadow(dir).map((r) => r.id), ["a"], "and the deletion sticks in the shadow");
 });
