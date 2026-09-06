@@ -254,14 +254,58 @@ export class PersistenceEngine {
    *                 refuses. An op may leave an actor-bound field null (an
    *                 unowned object), but it may never name someone else.
    */
-  private assertActorBound(delta: SaveDelta, actorId: string | null): void {
+  /** Every op kind this engine can actually apply. */
+  static readonly KNOWN_OPS = ['place_object', 'move_object', 'remove_object', 'set_inventory', 'npc_state', 'var_set', 'economy'];
+
+  /** Ops that act on an object that may ALREADY belong to someone. */
+  static readonly OBJECT_OPS = ['place_object', 'move_object', 'remove_object'];
+
+  /**
+   * @param actorId  the authenticated principal this delta is attributed to.
+   * @param owned    object_id -> current owner_id, from the world as it stands.
+   *
+   * The first version of this check only read the OP's own fields, which left
+   * three ways to act on someone else's property:
+   *   - `place_object` REPLACES an object wholesale, so re-placing a victim's
+   *     house with `owner_id: null` stripped their ownership — the exact
+   *     "stripped owner_id licenses a deletion" outcome this check exists to
+   *     stop, permitted by the check itself.
+   *   - `remove_object` carries no person field at all, so it was unbound and
+   *     deleted another player's object outright.
+   *   - `move_object` omitting `owner_id` relocated anyone's object.
+   * The person is on the STORED OBJECT, not on the op, so the current owner has
+   * to be looked at. An unowned object stays free for anyone to shape.
+   */
+  private assertActorBound(delta: SaveDelta, actorId: string | null, owned: Map<string, string | null>): void {
     if (!actorId) throw new Error('save: an actor is required; a delta cannot be applied on nobody\'s behalf');
     for (const op of (delta as any).ops || []) {
-      const fields = PersistenceEngine.ACTOR_BOUND_FIELDS[(op as any).op] || [];
+      if (!op || typeof op !== 'object') throw new Error('save: every op must be an object');
+      const kind = (op as any).op;
+
+      // An unknown kind used to be appended to an APPEND-ONLY store and then
+      // throw on every subsequent load — silently and permanently bricking the
+      // world, acknowledged with ok:true. Refused before it is written.
+      if (!PersistenceEngine.KNOWN_OPS.includes(kind)) {
+        throw new Error(`save: unknown op '${String(kind)}' — this world would be unloadable if it were stored`);
+      }
+
+      // Own-property lookup: `op.op === "constructor"` used to return the Object
+      // constructor from the prototype chain, so `|| []` never fired and the
+      // loop threw "fields is not iterable" as a 500 blamed on us.
+      const fields = Object.prototype.hasOwnProperty.call(PersistenceEngine.ACTOR_BOUND_FIELDS, kind)
+        ? PersistenceEngine.ACTOR_BOUND_FIELDS[kind] : [];
       for (const f of fields) {
         const v = (op as any)[f];
         if (v != null && String(v) !== String(actorId)) {
-          throw new Error(`save: op '${(op as any).op}' sets ${f}='${v}' but the caller is '${actorId}' — a delta may not act on another player's behalf`);
+          throw new Error(`save: op '${kind}' sets ${f}='${v}' but the caller is '${actorId}' — a delta may not act on another player's behalf`);
+        }
+      }
+
+      if (PersistenceEngine.OBJECT_OPS.includes(kind)) {
+        const id = (op as any).object_id;
+        const currentOwner = id != null ? owned.get(String(id)) : undefined;
+        if (currentOwner != null && String(currentOwner) !== String(actorId)) {
+          throw new Error(`save: op '${kind}' acts on object '${id}', which belongs to '${currentOwner}', not to '${actorId}'`);
         }
       }
     }
@@ -270,7 +314,14 @@ export class PersistenceEngine {
   /** POST /worlds/:id/save — accept a delta → { ok, seq }. Append-only, idempotent, monotonic. */
   async save(delta: SaveDelta, opts: { actorId?: string | null } = {}): Promise<SaveAccepted> {
     if (!delta.world_id || delta.seq == null) throw new Error('save: world_id and seq required');
-    this.assertActorBound(delta, opts.actorId ?? null);
+    // Who owns what RIGHT NOW. Read before anything is appended, because the
+    // person a delta may not act on is recorded on the object, not on the op.
+    const owned = new Map<string, string | null>();
+    try {
+      const snap: any = await this.load(delta.world_id);
+      for (const o of (snap?.snapshot?.objects || snap?.objects || [])) owned.set(String(o.object_id), o.owner_id ?? null);
+    } catch { /* no base world yet: nothing is owned, so nothing can be taken */ }
+    this.assertActorBound(delta, opts.actorId ?? null, owned);
 
     if (await this.store.hasSeq(delta.world_id, delta.seq)) {
       return { ok: true, seq: delta.seq, duplicate: true };

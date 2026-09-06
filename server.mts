@@ -16,7 +16,7 @@ import { handleTrustSafetySSO } from "./src/cw1/ts-sso-kyc-slice.mjs"; // CW1 v3
 import { makeAtlasRoutes } from "./src/cw7/atlas-routes.mjs";
 import { verifyPageHTML } from "./src/cw7/atlas-verify-page.mjs"; // CW7: renderable public verify view
 import { makeKeyEndpoint } from "./src/cw7/atlas-key.mjs";       // CW7: GET /atlas/key (real ed25519 public key from env, honest when unset)
-import { atlasReady, verifyReceipt, atlasPublicKeyBase64, issueWorldReceipt } from "./src/cw7/atlas-local-sign.mjs"; // CW7: local ed25519 sign+verify (off-chain, no gas)
+import { atlasReady, verifyReceipt, atlasPublicKeyBase64, issueWorldReceipt, signedFields } from "./src/cw7/atlas-local-sign.mjs"; // CW7: local ed25519 sign+verify (off-chain, no gas)
 import { makeCrossProductRouter } from "./src/cw7/atlas-cross-product.mjs"; // CW7 v4.0: cross-product reputation (node-http routeTable)
 import { createEconomyRouter } from "./src/cw6/economy-router.mjs";          // CW6 v3.0: economy routes (DARK), non-express fallback router
 import { LANES } from "./src/v3/providers/contract.mjs";                        // B11: media lane
@@ -31,6 +31,8 @@ import { applyDelta, verifyPreservation, emptyLiveState, newDelta } from "./src/
 import { planRollback, recordRollback } from "./src/v3/expansion/rollback.mjs";              // B6: rollback as a new version, never a rewind
 import { diffManifests } from "./src/v3/expansion/diff.mjs";                 // B6: what actually changed between two versions
 import { createSubscriptionsService } from "./src/core/subscriptions.mjs";
+import path from "node:path";
+import { createCollection } from "./src/core/collection.mjs";                 // durable rows for the issued-receipt store
 import { createLiveStateService, mergeLiveState, cw5RuntimeStateSource, companionMemorySource } from "./src/core/livestate.mjs";
 import { createPlayerProgressService, playerProgressSources } from "./src/core/playerprogress.mjs";  // what the SERVER observed a player do  // B2: the server reads player-held state instead of asking the client for it   // B15: subscriptions, built DARK — nothing is purchasable
 import { createWorldMemory } from "./src/v3/memory/world-memory.mjs";           // B7: factual world chronology
@@ -81,6 +83,15 @@ const npcMemory = createNpcMemory({ worldMemory });                          // 
 // Every route that can destroy content used to take this from the REQUEST BODY,
 // so the protection was opt-in by the caller it protects against: omitting
 // live_state left inventory, companion memory and quest progress unchecked.
+// Issued Atlas receipts, kept so a third party can actually FETCH one.
+// The embed snippet and its descriptor both told external sites to
+// GET /api/atlas/receipt/:id and no such route existed, so every embedded
+// badge resolved a 404 and showed UNVERIFIABLE. A public verification
+// ecosystem that cannot serve the document being verified is not one.
+const atlasReceipts = createCollection({
+  dir: path.join(process.env.DCS_DATA_DIR || path.join(process.cwd(), ".dcs-data"), "atlas"),
+  name: "receipts", table: null, primaryKey: ["receipt_hash"], env: process.env,
+});
 const playerProgress = createPlayerProgressService();
 // The quest and NPC seams were null sources that refused rather than pretended.
 // They now read what the server itself OBSERVED — a spawn placement it performed
@@ -300,7 +311,7 @@ const server = http.createServer(async (req, res) => {
         subscriptions: ["GET /v3/subscriptions/plans", "POST /v3/subscriptions/subscribe", "POST /v3/subscriptions/grant", "POST /v3/subscriptions/revoke", "GET /v3/subscriptions/grants", "GET /v3/subscriptions/assert-dark", "GET /me/subscription", "GET /me/entitlements"],
         safety: ["GET /safety/age", "POST /safety/report", "GET /safety/reports", "POST /safety/block", "GET /safety/consent/media", "GET /safety/moderation-history"],
         jobs: ["GET /v3/jobs", "GET /v3/jobs/:id"],
-        trust: ["GET /atlas/key", "GET /verify", "GET /v3/providers"],
+        trust: ["GET /atlas/key", "GET /atlas/receipt/:id", "GET /verify", "GET /v3/providers"],
         retired: ["GET /api/marketplace (410)", "GET /api/me/payouts (410)", "GET /me/revenue (410)", ...retiredSocialRoutes(), "POST /verify/:channel/{start,confirm} on the legacy identity slice (410)"],
       },
       manifest_version: MANIFEST_VERSION,
@@ -375,11 +386,39 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (await handleIdentity(req, res, idCtx)) return;
-    if ((url.startsWith("/ts/") || url.startsWith("/kyc/")) ) await mustBeInternalTester(req, cid); // T&S console + payout KYC: internal testers only
+    // The slice serves /payout/kyc and /payout/kyc/start; there is no /kyc/...
+    // path in it at all, so that prefix gated NOTHING and the payout-KYC shell
+    // was reachable by any authenticated caller. The gate now names the prefixes
+    // the slice actually serves.
+    if (url.startsWith("/ts/") || url.startsWith("/kyc/") || url.startsWith("/payout/")) {
+      await mustBeInternalTester(req, cid);   // T&S console + payout KYC: internal testers only
+    }
     if (await handleTrustSafetySSO(req, res, { user: principal ? { id: principal.id } : null, send, body: readBody, db: { mode: "memory" } })) return; // T&S/KYC (in-memory repo; DARK). Supabase persistence = follow-up migration 0002
 
     // ---- CW7 public trust surface ----
     if (url === "/atlas/key" && method === "GET") return send(res, 200, atlasKey.key());
+    {
+      // The receipt an embedded badge fetches. PUBLIC and unauthenticated by
+      // design: the entire point is that a third party can check our attestation
+      // without asking us to be trusted. Served in CANONICAL form — aliases
+      // resolved, fallbacks applied — so a verifier that follows /atlas/key
+      // rebuilds exactly the bytes the key signed. Both /api/... and the bare
+      // path answer, because the snippet has always used the /api prefix.
+      const rm = url.match(/^(?:\/api)?\/atlas\/receipt\/([^/]+)$/);
+      if (rm && method === "GET") {
+        const row: any = await atlasReceipts.one((x: any) => x.receipt_hash === rm[1] || x.receipt?.receipt_id === rm[1]);
+        if (!row) throw Errors.notFound(`atlas receipt ${rm[1]}`, { correlationId: cid });
+        const r = row.receipt;
+        return send(res, 200, {
+          ok: true,
+          ...signedFields(r),                       // the canonical body, field for field
+          sig: r.sig, signer: r.signer, ts: r.ts, receipt_hash: r.receipt_hash,
+          canonical: true,
+          note: "Rebuild the signed body from GET /atlas/key's canonical_fields, canonical_aliases and canonical_fallbacks, then verify sig against public_key.",
+          correlation_id: cid,
+        });
+      }
+    }
     if (url === "/verify" && method === "GET") {
       const q = (req.url || "").split("?")[1] || "";
       const rp = new URLSearchParams(q).get("receipt");
@@ -1498,6 +1537,11 @@ const server = http.createServer(async (req, res) => {
       }
       const receipt: any = issueWorldReceipt(id, me.id);
       wm.meta = wm.meta || {}; wm.meta.atlas_receipt_hash = receipt.receipt_hash; wm.meta.atlas_signed = !!receipt.sig;
+      // Stored so GET /atlas/receipt/:id can serve it. Keyed on the hash, which
+      // is what the receipt is identified by everywhere else.
+      await optional("atlas-receipt-store", () => atlasReceipts.upsert((x: any) => x.receipt_hash === receipt.receipt_hash, {
+        receipt_hash: receipt.receipt_hash, subject_id: id, receipt, issued_at: new Date().toISOString(),
+      }), cid);
       const saved = await repo.upsert({ worldId: id, ownerId: me.id, manifest: wm, state: "published" });
       await social.ensureProfile(me);
       await social.recordWorldPublished(me.id);

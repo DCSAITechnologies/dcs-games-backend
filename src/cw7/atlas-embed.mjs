@@ -30,14 +30,24 @@ export function clientVerifier(cfg) {
     el.textContent = (status === 'VERIFIED' ? '\u2713 ' : '\u2717 ') + status + (detail ? ' — ' + detail : '');
     el.setAttribute('data-status', status);
   }
-  function canonicalBody(r, fields) {
+  function canonicalBody(r, fields, aliases, fallbacks) {
+    // Resolve exactly as the signer does. The ORDER alone is not enough: the
+    // signer resolves aliases and applies fallbacks before serialising, so a
+    // receipt written in the CW7 spelling has none of the canonical keys on it
+    // and a raw read builds "{}". /atlas/key serves the rules for this reason.
     // Built from the field list the SERVER serves, never from a list restated
     // here. This function used to name the five fields in its own order, which
     // did not match the signer's sorted order, so every genuine receipt showed
     // INVALID in the widget. A verifier must follow the signer, not agree with
     // it by hand.
     var b = {};
-    for (var i = 0; i < fields.length; i++) b[fields[i]] = r[fields[i]];
+    for (var i = 0; i < fields.length; i++) {
+      var f = fields[i], v = r[f];
+      var alt = (aliases && aliases[f]) || [];
+      for (var j = 0; j < alt.length && (v === undefined || v === null); j++) v = r[alt[j]];
+      if (v === undefined || v === null) v = fallbacks && f in fallbacks ? fallbacks[f] : null;
+      b[f] = v === undefined ? null : v;
+    }
     return JSON.stringify(b, fields);
   }
   Promise.all([
@@ -52,7 +62,7 @@ export function clientVerifier(cfg) {
     // If the server did not tell us the field order, we cannot rebuild the
     // signed bytes; guessing would produce a confident wrong answer.
     if (!key.canonical_fields || !key.canonical_fields.length) return show('UNVERIFIABLE', 'server did not publish the canonical field order');
-    var msg = new TextEncoder().encode(canonicalBody(receipt, key.canonical_fields));
+    var msg = new TextEncoder().encode(canonicalBody(receipt, key.canonical_fields, key.canonical_aliases, key.canonical_fallbacks));
     crypto.subtle.importKey('raw', raw, { name: 'Ed25519' }, false, ['verify']).then(function (pk) {
       return crypto.subtle.verify({ name: 'Ed25519' }, pk, sig, msg);
     }).then(function (okSig) {

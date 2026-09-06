@@ -1,4 +1,4 @@
-import { CANONICAL_FIELD_ORDER } from './atlas-local-sign.mjs';
+import { CANONICAL_FIELD_ORDER, SIGNED_FIELDS } from './atlas-local-sign.mjs';
 // atlas-key.mjs — serves GET /atlas/key (CW7 mandate item: "/atlas/* + /atlas/key live").
 // The public verify view + any external verifier needs the Atlas ed25519 PUBLIC key to independently
 // check a receipt's signature. CW7 exposes the public key (never the private key — that stays in the
@@ -24,6 +24,14 @@ export function makeKeyEndpoint(deps = {}) {
       format: 'base64',
       // a verifier reconstructs the canonical body and checks sig with this key
       canonical_fields: CANONICAL_FIELD_ORDER,
+      // The ORDER alone is not enough to rebuild the signed bytes: the signer
+      // RESOLVES ALIASES and APPLIES FALLBACKS before serialising, so a receipt
+      // written in the CW7 spelling (world_id/builder_id/action) has none of the
+      // canonical keys on it, and a verifier doing a raw read builds "{}". The
+      // rules are served alongside the order, from the same single enumeration
+      // the signer uses, so an external verifier can reproduce them exactly.
+      canonical_aliases: Object.fromEntries(Object.entries(SIGNED_FIELDS).map(([k, v]) => [k, v.aliases])),
+      canonical_fallbacks: Object.fromEntries(Object.entries(SIGNED_FIELDS).map(([k, v]) => [k, v.fallback])),
     };
   }
 

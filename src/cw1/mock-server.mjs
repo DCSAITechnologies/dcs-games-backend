@@ -257,7 +257,14 @@ const PORT = process.env.PORT || 8787;
 if (process.argv[1] && process.argv[1].endsWith("mock-server.mjs")) {
 
 // Refuse to run anywhere that is not explicitly a development machine.
-if (process.env.NODE_ENV === "production" || (process.env.NODE_ENV && process.env.NODE_ENV !== "development" && process.env.DCS_ALLOW_MOCK_SERVER !== "1")) {
+// Fail CLOSED. This read `NODE_ENV === "production" || (NODE_ENV && ...)`, so
+// with NODE_ENV UNSET — the ordinary case on a fresh box — the second disjunct
+// short-circuited on the falsy value and the guard let the process listen. This
+// is the guard that makes the _devCode opt-in safe: without it, a fixture that
+// returns verification codes and treats a bearer token as a raw user id is
+// serving. The sibling service.mjs states the same rule the other way round and
+// gets it right.
+if (process.env.NODE_ENV !== "development" && process.env.DCS_ALLOW_MOCK_SERVER !== "1") {
   console.error("REFUSING TO START: mock-server.mjs is a development fixture that returns verification codes and serves seeded users. Set DCS_ALLOW_MOCK_SERVER=1 if you really mean it.");
   process.exit(78);
 }

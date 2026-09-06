@@ -16,7 +16,25 @@ import { Errors } from "./errors.mjs";
 /** @typedef {{id:string, source:string, email:string|null, roles:string[], ageTier:string|null, isInternalTester:boolean}} Principal */
 
 const VERIFY_CACHE_TTL_MS = 60_000;
-const _cache = new Map(); // token-hash -> { principal, expires }
+// NOT module-global.
+//
+// A shared map keyed on the token alone let one resolver answer with another
+// resolver's principal: a resolver built with a DIFFERENT SECRET returned a
+// cached principal it would itself have rejected, a supabase-mode resolver
+// returned a local-HS256 principal without ever calling Supabase, and
+// isInternalTester crossed between them — a field that gates world generation,
+// rollback, marketplace listings and subscription grants. One process happens
+// to build one resolver today, which is the only reason this was latent.
+// The cache now lives inside each resolver.
+
+/** Find a header by name, whatever case the caller used. */
+function lookupHeader(headers, name) {
+  const want = String(name).toLowerCase();
+  for (const k of Object.keys(headers || {})) {
+    if (k.toLowerCase() === want) return headers[k];
+  }
+  return undefined;
+}
 
 function hashToken(t) {
   return crypto.createHash("sha256").update(t).digest("base64url");
@@ -37,10 +55,16 @@ function safeEqual(a, b) {
 // Used for internal testing and CI when no Supabase project is configured.
 // These are real signed JWTs: a forged or edited token fails verification.
 
+/** The issuer this service stamps AND requires. Stamping without checking is decoration. */
+export const LOCAL_ISSUER = "dcs-games-local";
+
 export function signLocalToken(secret, claims, ttlSeconds = 3600) {
   const header = { alg: "HS256", typ: "JWT" };
   const now = Math.floor(Date.now() / 1000);
-  const payload = { iat: now, exp: now + ttlSeconds, iss: "dcs-games-local", ...claims };
+  // iss is a DEFAULT, not an override: a caller may stamp another issuer, and
+  // verifyLocalToken is what refuses it. Forcing it here would make a
+  // foreign-issuer token unconstructible and the check untestable.
+  const payload = { iat: now, exp: now + ttlSeconds, iss: LOCAL_ISSUER, ...claims };
   const enc = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
   const signingInput = `${enc(header)}.${enc(payload)}`;
   const sig = crypto.createHmac("sha256", secret).update(signingInput).digest("base64url");
@@ -63,6 +87,12 @@ export function verifyLocalToken(secret, token) {
   const now = Math.floor(Date.now() / 1000);
   if (typeof payload.exp === "number" && payload.exp < now) throw Errors.invalidToken("token expired");
   if (typeof payload.nbf === "number" && payload.nbf > now) throw Errors.invalidToken("token not yet valid");
+  // The issuer was STAMPED on every token and never checked. Harmless while one
+  // secret exists, and this estate is explicitly multi-product with a
+  // cross-product identity seam — the moment a second issuer shares a secret,
+  // an unchecked `iss` is a token minted for one product accepted by another.
+  // A token with no issuer at all is refused: absence is not a match.
+  if (payload.iss !== LOCAL_ISSUER) throw Errors.invalidToken("token was not issued for this service");
   return payload;
 }
 
@@ -73,6 +103,8 @@ export function createPrincipalResolver(cfg = {}) {
   const supabaseKey = cfg.supabaseKey ?? process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
   const localSecret = cfg.localSecret ?? process.env.DCS_AUTH_SECRET ?? "";
   const fetchImpl = cfg.fetch || globalThis.fetch;
+  /** This resolver's own verification cache. See the note at VERIFY_CACHE_TTL_MS. */
+  const _cache = new Map();   // token-hash -> { principal, expires }
   const testers = new Set(
     String(cfg.internalTesters ?? process.env.DCS_INTERNAL_TESTERS ?? "")
       .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean)
@@ -117,7 +149,13 @@ export function createPrincipalResolver(cfg = {}) {
    */
   async function resolve(headers = {}, correlationId) {
     const get = (n) => {
-      const v = headers[n] ?? headers[n.toLowerCase()];
+      // Case-insensitive for real. This was `headers[n] ?? headers[n.toLowerCase()]`
+      // with an already-lower-case `n`, so the fallback was a no-op and
+      // `X-User-Id` slipped past the refusal into a silent anonymous. node:http
+      // lower-cases headers so it was not reachable over the wire, but the code
+      // was written as though it handled case and did not.
+      const direct = headers[n];
+      const v = direct !== undefined ? direct : lookupHeader(headers, n);
       return Array.isArray(v) ? v[0] : (v == null ? "" : String(v));
     };
     const raw = get("authorization");
@@ -138,6 +176,7 @@ export function createPrincipalResolver(cfg = {}) {
     if (hit && hit.expires > Date.now()) return hit.principal;
 
     let principal;
+    let tokenExpSeconds = null;      // the token's OWN expiry, for the cache bound
     if (hasSupabase) {
       let r;
       try {
@@ -155,9 +194,15 @@ export function createPrincipalResolver(cfg = {}) {
     } else {
       const claims = verifyLocalToken(secret, token); // throws AppError on any failure
       principal = decorate(claims.sub, "local-hs256", claims.email, claims);
+      if (typeof claims.exp === "number") tokenExpSeconds = claims.exp;
     }
 
-    _cache.set(ck, { principal, expires: Date.now() + VERIFY_CACHE_TTL_MS });
+    // Never cache past the token's OWN expiry. `exp` was checked only on a miss,
+    // so an expired token kept working for up to a minute — the only revocation
+    // local mode has, arriving late on every route.
+    let until = Date.now() + VERIFY_CACHE_TTL_MS;
+    if (Number.isFinite(tokenExpSeconds)) until = Math.min(until, tokenExpSeconds * 1000);
+    if (until > Date.now()) _cache.set(ck, { principal, expires: until });
     return principal;
   }
 

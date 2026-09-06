@@ -1,3 +1,4 @@
+import { signedFields } from './atlas-local-sign.mjs';
 // atlas-trust.mjs — CW7 (DCS Games): reputation/trust scoring + ownership ledger over signed receipts.
 // Per CW7_ATLAS_FULL.md: receipts (ed25519) are the source of truth for verification/ownership;
 // events (visits/ratings/reports/play-with) are MOCKED Day-one and swapped to CW4/CW5 real events later.
@@ -17,23 +18,30 @@ export function buildOwnershipHistory(worldId, receipts, deps = {}) {
   // forgot to inject a verifier got "signature valid" for a sig of the literal
   // string NOT-A-SIGNATURE. A missing verifier means unverified, never verified.
   const verify = deps.verifyReceiptSig || (() => false);
+  // Read every receipt through the SAME resolution the signature covers. Reading
+  // r.world_id / r.builder_id / r.action raw is a separate reading of a signed
+  // document, and every separate reading this estate has had turned out to be a
+  // forgery primitive. It also silently failed on our own receipts:
+  // issueWorldReceipt writes the canonical spellings (subject_id/attested_by/
+  // attestation), so a genuinely signed world reported owner:null, verified:false.
   const chain = receipts
-    .filter((r) => r.world_id === worldId)
     .filter((r) => verify(r))                 // only signature-valid receipts count — provable, not promised
-    .sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
+    .map((r) => ({ raw: r, s: signedFields(r) }))
+    .filter((x) => String(x.s.subject_id) === String(worldId))
+    .sort((a, b) => (a.raw.ts || '').localeCompare(b.raw.ts || ''));
 
   // Validate the chain links (each update points to the prior receipt). A broken link = tampering.
   const history = [];
   let prevId = null;
   let intact = true;
-  for (const r of chain) {
-    if (r.action === 'create') {
+  for (const { raw: r, s: sf } of chain) {
+    if (sf.attestation === 'create') {
       if (history.length > 0) intact = false;            // a second 'create' breaks the chain
-      history.push({ builder_id: r.builder_id, action: 'create', ts: r.ts, receipt_id: r.receipt_id });
+      history.push({ builder_id: sf.attested_by, action: 'create', ts: r.ts, receipt_id: r.receipt_id });
       prevId = r.receipt_id;
-    } else if (r.action === 'update') {
+    } else if (sf.attestation === 'update') {
       if (r.prev_receipt_id !== prevId) intact = false;  // link mismatch = tampered/forged
-      history.push({ builder_id: r.builder_id, action: 'update', ts: r.ts, receipt_id: r.receipt_id });
+      history.push({ builder_id: sf.attested_by, action: 'update', ts: r.ts, receipt_id: r.receipt_id });
       prevId = r.receipt_id;
     }
   }

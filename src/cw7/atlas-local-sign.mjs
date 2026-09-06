@@ -72,7 +72,10 @@ function load() {
  */
 export const SIGNED_FIELDS = {
   attestation:  { aliases: ["action"],      fallback: "create" },
-  attested_by:  { aliases: ["builder_id"],  fallback: null },
+  // author_id is read by atlas-seller-provenance as "who authored this / who
+  // owns it now" and was outside the signed body entirely — a sixth spelling of
+  // the attesting party that no signature covered.
+  attested_by:  { aliases: ["builder_id", "author_id"],  fallback: null },
   prev_hash:    { aliases: [],              fallback: null },
   subject_type: { aliases: [],              fallback: "world" },
   subject_id:   { aliases: ["world_id", "asset_id"], fallback: null },
@@ -83,12 +86,59 @@ export const SIGNED_FIELDS = {
  * anything that signs, verifies, hashes or DISPLAYS one must go through here,
  * so that what a viewer is shown is by construction what the key attested.
  */
+/**
+ * One reading of a VALUE, not merely of a field.
+ *
+ * The field-level fix stopped signing and display disagreeing about WHICH key
+ * to read. They could still disagree about what the value IS: canonicalBody
+ * goes through JSON.stringify, which honours toJSON, while the verify page's
+ * escaper goes through String(), which honours toString/Symbol.toPrimitive. An
+ * object whose toJSON says "victim-world" and whose toString says "world-a" was
+ * therefore SIGNED as one and DISPLAYED as the other, beneath a VERIFIED badge.
+ *
+ * So a signed value must be a primitive. Anything else is coerced exactly once,
+ * here, by the same rule the signature uses.
+ */
+function signedValue(v) {
+  if (v == null) return null;
+  const t = typeof v;
+  if (t === "string" || t === "number" || t === "boolean") return v;
+  // Apply toJSON once — the signature's own rule — then require what comes back
+  // to be a primitive. An object that still is not one cannot be signed and
+  // displayed consistently, so it is not a value this system can attest.
+  let j;
+  try { j = JSON.parse(JSON.stringify(v)); } catch { return String(v); }
+  const jt = typeof j;
+  if (j == null) return null;
+  if (jt === "string" || jt === "number" || jt === "boolean") return j;
+  return JSON.stringify(j);
+}
+
+/**
+ * Does any signed field hold something that is not a primitive?
+ *
+ * Checked on the RAW receipt, before resolution, because the point is that two
+ * consumers would coerce the original object differently.
+ */
+export function hasNonPrimitiveSignedField(receipt) {
+  if (!receipt) return false;
+  for (const [name, { aliases }] of Object.entries(SIGNED_FIELDS)) {
+    for (const key of [name, ...aliases]) {
+      const v = receipt[key];
+      if (v == null) continue;
+      const t = typeof v;
+      if (t !== "string" && t !== "number" && t !== "boolean") return true;
+    }
+  }
+  return false;
+}
+
 export function signedFields(r) {
   const out = {};
   for (const [name, { aliases, fallback }] of Object.entries(SIGNED_FIELDS)) {
     let v = r?.[name];
     for (const a of aliases) { if (v == null) v = r?.[a]; }
-    out[name] = v ?? fallback;
+    out[name] = signedValue(v ?? fallback);
   }
   return out;
 }
@@ -139,8 +189,23 @@ export function canonicalSubjectId(r) {
  */
 export function hasConflictingAlias(receipt) {
   if (!receipt) return false;
+  // Compare each alias against the RESOLVED field, not against the canonical
+  // spelling alone.
+  //
+  // This used to read `receipt[name]` and skip when it was absent — but
+  // signedFields() resolves subject_id FROM world_id, so a receipt can carry a
+  // signed subject with no canonical field present at all. For exactly those
+  // receipts — which is the documented CW7 shape — the check was skipped
+  // entirely, and a genuine world attestation could be replayed as verified
+  // provenance for an asset the estate never saw:
+  //   sign  { world_id: "world-a", builder_id: "honest", action: "create" }
+  //   append  asset_id: "premium-asset", author_id: "attacker"
+  //   -> verifyReceipt() true, and the provenance view names the attacker.
+  // The signature was intact throughout; the disagreement was between which
+  // spelling signed and which spelling was read.
+  const resolved = signedFields(receipt);
   for (const [name, { aliases }] of Object.entries(SIGNED_FIELDS)) {
-    const canonical = receipt[name];
+    const canonical = resolved[name];
     if (canonical == null) continue;
     for (const a of aliases) {
       if (receipt[a] != null && String(receipt[a]) !== String(canonical)) return true;
@@ -155,6 +220,13 @@ export function verifyReceipt(receipt) {
   // An unsigned alias that contradicts the signed subject is a forgery attempt,
   // even though the signature over the canonical body is intact.
   if (hasConflictingAlias(receipt)) return false;
+  // A signed field whose value is not a primitive cannot be shown consistently:
+  // the signature goes through JSON.stringify (which honours toJSON) and the
+  // page through String() (which honours toString), so one object can be signed
+  // as one subject and displayed as another beneath a VERIFIED badge. Coercing
+  // would pick a winner silently; refusing says plainly that this is not a value
+  // the system can attest.
+  if (hasNonPrimitiveSignedField(receipt)) return false;
   // receipt_hash is derivable from the signed body, so a value that disagrees
   // with it is either corruption or a forged identifier. It is the field a
   // third party cross-references, so it must not be free to be anything.
