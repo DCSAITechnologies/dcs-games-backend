@@ -23,9 +23,12 @@ SERVICE="${SERVICE:-dcs-games-staging}"
 URL="${STAGE_URL:-https://dcs-games-backend-staging.up.railway.app}"
 LEDGER="reports/DEPLOYMENTS.md"
 
-if [ -n "$(git status --porcelain)" ]; then
+# The ledger is written by this script AFTER a verified deploy, so its own row
+# is uncommitted by the time the next deploy runs. Everything else must be clean.
+DIRTY="$(git status --porcelain -- . ":(exclude)$LEDGER")"
+if [ -n "$DIRTY" ]; then
   echo "REFUSING: worktree is dirty. Commit first, so the deployed code is a commit that exists." >&2
-  git status --short >&2
+  echo "$DIRTY" >&2
   exit 2
 fi
 COMMIT="$(git rev-parse HEAD)"
