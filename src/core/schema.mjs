@@ -269,6 +269,26 @@ export async function assertSchema(dsn, { required = REQUIRED_SCHEMA_VERSION, ta
  * and confirm it lands on the same table set and version.
  */
 export async function proveReproducible(adminDsn, dbName, { dir = MIGRATIONS_DIR, allowDrop = true } = {}) {
+  // A DATABASE NAME IS AN IDENTIFIER, NOT A FRAGMENT OF SQL. This argument was
+  // interpolated straight into `drop database if exists ${dbName};`,
+  // `create database ${dbName};` and a quoted literal in a pg_database lookup.
+  // psql runs a SCRIPT, so a `;` in the name ends the statement and everything
+  // after it executes as the ADMIN role — and the whole purpose of this
+  // function is to DROP the database it is handed, so the blast radius is every
+  // other database on the cluster:
+  //
+  //   node scripts/migrate.mjs staging --db='t; drop database dcs_games_prod; --'
+  //
+  // `--db` is read straight from argv (scripts/migrate.mjs:38). Validated here,
+  // before any SQL is built and before any connection is made, because this is
+  // the only place that knows the value is destined to be an identifier.
+  // Postgres identifiers are at most 63 bytes.
+  if (typeof dbName !== "string" || !/^[A-Za-z_][A-Za-z0-9_$]{0,62}$/.test(dbName)) {
+    throw Errors.validation(
+      `'${String(dbName)}' is not a valid database name. A name must start with a letter or underscore, ` +
+      `contain only letters, digits, underscore or $, and be at most 63 characters — it is an identifier, not SQL.`
+    );
+  }
   const base = adminDsn.replace(/\/[^/]*$/, "");
   const target = `${base}/${dbName}`;
   // This DROPS the named database. The name defaults to `dcs_games_staging`

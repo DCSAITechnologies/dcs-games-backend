@@ -360,3 +360,52 @@ dbTest("A2: rebuilding does not silently destroy a database somebody else is usi
     await psqlExec(ADMIN, `drop database if exists ${existing};`).catch(() => {});
   }
 });
+
+// ===========================================================================
+// LANE C — security closure (section 10). The attack, written first.
+// ===========================================================================
+
+test("LANE C/S1: a database name is an identifier, not a fragment of SQL", async () => {
+  // ATTACK: proveReproducible() interpolated its `dbName` argument straight into
+  //   psqlScalar(admin, `select 1 from pg_database where datname = '${dbName}';`)
+  //   psqlExec  (admin, `drop database if exists ${dbName};`)
+  //   psqlExec  (admin, `create database ${dbName};`)
+  // psql runs a SCRIPT, so a `;` in the name ends the statement and everything
+  // after it executes as the ADMIN role. The function's whole purpose is to DROP
+  // the database it is handed, so the blast radius of a name that is not a name
+  // is every other database on the cluster:
+  //
+  //   node scripts/migrate.mjs staging --db='t; drop database dcs_games_prod; --'
+  //
+  // `--db` is read straight from argv at scripts/migrate.mjs:38. An operator
+  // pasting a name from anywhere — a CI variable, a ticket, a shell history
+  // entry — is one quote away from dropping a database nobody named.
+  //
+  // The name is now validated as a Postgres identifier BEFORE any psql runs, so
+  // this test needs no database: it must be refused before a connection is made.
+  const attacks = [
+    "t; drop database dcs_games_prod; --",
+    "t\"; drop database x; --",
+    "t' or '1'='1",
+    "t --comment",
+    "t;",
+    "t x",
+    "t$(whoami)",
+    "t`id`",
+    "",
+    "1abc",
+    "x".repeat(64),
+    "public.t",
+  ];
+  for (const bad of attacks) {
+    await assert.rejects(
+      () => proveReproducible("postgresql://127.0.0.1:5432/postgres", bad, { allowDrop: false }),
+      (e) => e.code === "validation_failed",
+      `a database name of ${JSON.stringify(bad)} must be refused before any SQL is built`,
+    );
+  }
+  // And the names this estate actually uses are still names.
+  for (const good of ["dcs_games_staging", "dcs_t_ab12cd", "_scratch", "A_b_9"]) {
+    assert.equal(/^[A-Za-z_][A-Za-z0-9_$]{0,62}$/.test(good), true, `${good} must remain a legal identifier`);
+  }
+});
