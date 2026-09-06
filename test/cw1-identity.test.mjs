@@ -15,7 +15,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { signLocalToken } from "../src/core/principal.mjs";
-import { RETIRED_SOCIAL, retiredSocialRoutes } from "../src/cw1/identity-slice.mjs";
+import { RETIRED_SOCIAL, RETIRED_IDENTITY, retiredSocialRoutes } from "../src/cw1/identity-slice.mjs";
 import { computeLevel, publishCredits } from "../src/cw1/identity-core.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -148,11 +148,18 @@ test("retiring these routes also closed two unauthenticated reads", async () => 
 test("the slice publishes the retired-route list server.mts should advertise", () => {
   // /health's `routes.retired` array is hand-maintained. This is the same list,
   // generated from the guard, so the advertisement can be derived rather than copied.
+  // It must cover BOTH retirement tables: server.mts spreads exactly this one
+  // call into routes.retired, so anything missing here is a route /health does
+  // not admit is gone.
   const lines = retiredSocialRoutes();
-  assert.equal(lines.length, 5);
+  assert.equal(lines.length, Object.keys(RETIRED_SOCIAL).length + Object.keys(RETIRED_IDENTITY).length);
   for (const concept of ["friends", "parties", "teams", "studios", "orgs"]) {
     assert.ok(lines.some((l) => l.includes(`/${concept}/*`) && l.includes("410")),
       `the list should name ${concept} and its status`);
+  }
+  for (const p of ["/me", "/profile/:id", "/subscriptions", "/publish/check", "/identity/portable", "/invite"]) {
+    assert.ok(lines.some((l) => l.includes(` ${p} `) && l.includes("410")),
+      `the list should name ${p} and its status`);
   }
 });
 
@@ -355,4 +362,136 @@ test("dcs_plus is not an input to computeLevel, and must not become one", async 
   const src = fs.readFileSync(path.join(GB, "src/cw1/identity-core.mjs"), "utf8");
   const fn = src.slice(src.indexOf("export function computeLevel"), src.indexOf("export function publishCredits"));
   assert.ok(!/dcs_plus/.test(fn), "computeLevel must not even bind dcs_plus — a dead binding reads as a live input");
+});
+
+// ==========================================================================
+// 6. The fixture-backed half of the slice.
+//
+// Six routes read createIdentityStore()'s seeded demo Maps (u_dk, u_kanya,
+// u_new). A real principal id is never a key in them, so on the running server
+// they crashed, 404ed forever, or served fabricated data — one of them without
+// asking who was calling. Reproduced 7 Sep 2026 against this same harness:
+//
+//   POST /publish/check     -> 500 {"detail":"Cannot read properties of
+//                                    undefined (reading 'dcs_plus')"}
+//   GET  /identity/portable -> 500 {"detail":"Cannot set properties of
+//                                    undefined (setting 'level_cache')"}
+//   GET  /profile/u_dk      -> 200, NO Authorization header, body
+//                              {"bio":"Founder. Builder.","followers":1284,...}
+//   GET  /subscriptions     -> 200 {"plan":"free","_shadow":true} beside
+//                              /me/subscription's real answer
+//   POST /subscriptions     -> 200 {"status":"dark"} for a write that stored
+//                              nothing
+//   POST /invite            -> 200 and a join URL, into a Map nothing reads
+// ==========================================================================
+
+test("no route in the slice can answer 5xx by reading a store real principals are absent from", async () => {
+  // The two crashers, driven with a valid token exactly as a client would.
+  for (const [m, p] of [["POST", "/publish/check"], ["GET", "/identity/portable"]]) {
+    const r = await call(m, p, m === "POST" ? {} : undefined);
+    assert.ok(r.status < 500, `${m} ${p} answered ${r.status}: ${JSON.stringify(r.body).slice(0, 200)}`);
+    assert.equal(r.status, 410, `${m} ${p} should be retired`);
+    assert.equal(r.body.error, "gone");
+    assert.ok(r.body.superseded_by, `${m} ${p} must name where the answer really lives`);
+  }
+});
+
+test("the fixture-backed identity routes are retired and every one names a surface that answers", async () => {
+  const cases = [
+    ["GET", "/me"],
+    ["GET", "/profile/u_dk"],
+    ["GET", "/subscriptions"],
+    ["POST", "/subscriptions"],
+    ["POST", "/publish/check"],
+    ["GET", "/identity/portable"],
+    ["POST", "/invite"],
+  ];
+  for (const [m, p] of cases) {
+    const r = await call(m, p, m === "GET" ? undefined : {});
+    assert.equal(r.status, 410, `${m} ${p} should be retired, got ${r.status}`);
+    assert.equal(r.body.error, "gone");
+    assert.ok(typeof r.body.detail === "string" && r.body.detail.length > 40,
+      `${m} ${p} must explain WHY, not just refuse`);
+    assert.ok(r.body.superseded_by, `${m} ${p} must name its replacement`);
+  }
+
+  // A retirement is only honest if the surface it names actually answers. Every
+  // replacement below is probed, so this table cannot come to point at nothing.
+  const profile = await call("GET", "/me/profile");
+  assert.equal(profile.status, 200, "/me/profile is named as the replacement for /me and /publish/check");
+  assert.ok("can_publish" in profile.body && "publish_credits" in profile.body,
+    "/me/profile must really carry the publish gate that /publish/check pointed at");
+
+  const pub = await call("GET", "/profiles/" + encodeURIComponent(profile.body.username));
+  assert.equal(pub.status, 200, "/profiles/:username is named as the replacement for /profile/:id");
+
+  const sub = await call("GET", "/me/subscription");
+  assert.equal(sub.status, 200, "/me/subscription is named as the replacement for GET /subscriptions");
+  assert.equal(sub.body.paid, false, "and it stays dark");
+
+  const key = await fetch(BASE + "/atlas/key");
+  assert.equal(key.status, 200, "/atlas/key is named in the /identity/portable retirement");
+
+  const friend = await call("POST", "/social/friends", { friend_id: "user-invitee" });
+  assert.ok([200, 201].includes(friend.status), "/social/friends is named as the replacement for /invite");
+});
+
+test("the retirement guard matches whole paths, so it cannot swallow the routes it points at", async () => {
+  // /me/profile and /me/subscription live one segment under a retired path. A
+  // prefix match here would retire the durable replacements themselves.
+  for (const p of ["/me/profile", "/me/subscription", "/me/entitlements"]) {
+    assert.notEqual((await call("GET", p)).status, 410, `${p} must not inherit /me's retirement`);
+  }
+  // /profiles/:username is a different first segment from /profile/:id.
+  const me = await call("GET", "/me/profile");
+  assert.equal((await call("GET", "/profiles/" + encodeURIComponent(me.body.username))).status, 200);
+});
+
+test("retiring the private identity routes did not turn them into an anonymous existence oracle", async () => {
+  // These demanded a principal before they were retired, so they answer 401
+  // ahead of the 410. /profile/:id never authenticated at all — that was the
+  // hole — so it is refused outright, with no credential needed to be told so.
+  for (const [m, p] of [["GET", "/me"], ["GET", "/subscriptions"], ["POST", "/subscriptions"],
+                        ["POST", "/publish/check"], ["GET", "/identity/portable"], ["POST", "/invite"]]) {
+    const r = await anon(m, p);
+    assert.equal(r.status, 401, `anonymous ${m} ${p} should still be refused for want of a credential`);
+  }
+});
+
+test("GET /profile/:id no longer serves a fabricated profile to an unauthenticated caller", async () => {
+  // Before: 200 with the seeded u_dk fixture — a bio, 1284 followers and 312
+  // following that were never measured, to a caller with no Authorization
+  // header. Same hole GET /studios/:id was retired for.
+  const r = await anon("GET", "/profile/u_dk");
+  assert.equal(r.status, 410);
+  const body = JSON.stringify(r.body);
+  for (const leak of ["Founder. Builder.", "1284", "Deepak", "Pioneer", "Horror co-op"]) {
+    assert.ok(!body.includes(leak), `the fixture must not survive in the refusal: found ${leak}`);
+  }
+  // And the durable public profile still demands nothing private but exists.
+  assert.equal((await anon("GET", "/profile/u_kanya")).status, 410);
+});
+
+test("the seeded demo store is unreachable from every route, not just the ones named above", async () => {
+  // createIdentityStore() still exists because src/cw1/db.mjs seeds its
+  // in-memory fallback from it. Nothing in the slice may read it any more: the
+  // moment a route does, the fixture is back on the wire.
+  const src = fs.readFileSync(path.join(GB, "src/cw1/identity-slice.mjs"), "utf8");
+  const handler = src.slice(src.indexOf("export async function handleIdentity"));
+  for (const read of ["db.users", "db.profiles", "db.subscriptions", "db.invites", "db.seq"]) {
+    assert.ok(!handler.includes(read), `handleIdentity must not read ${read}`);
+  }
+  assert.deepEqual(Object.keys(RETIRED_IDENTITY).sort(),
+    ["/identity/portable", "/invite", "/me", "/profile", "/publish/check", "/subscriptions"]);
+});
+
+test("a retired identity route is retired on every verb, not only the one it used to serve", async () => {
+  // POST /publish/check was the only verb the slice answered; a GET fell through
+  // to a 404, so the same path told two different stories about whether it
+  // exists.
+  for (const [m, p] of [["GET", "/publish/check"], ["DELETE", "/invite"],
+                        ["PATCH", "/subscriptions"], ["POST", "/identity/portable"]]) {
+    assert.equal((await call(m, p, m === "GET" ? undefined : {})).status, 410,
+      `${m} ${p} should be retired too`);
+  }
 });

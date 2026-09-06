@@ -3,17 +3,28 @@
 // router; if it returns true it handled the request, else fall through to the shared routes.
 // This is the identity slice that "wins" per the ruling — richer than the Day0 stub.
 //
-// Zero deps. Reuses CW1's frozen logic. The shared mock keeps its world/netcode/save routes;
-// this owns: /me, /profile/:id, /subscriptions (DARK), /publish/check, /invite,
-// /identity/portable, /auth/*.
+// Zero deps. The shared mock keeps its world/netcode/save routes.
 //
-// It no longer owns friends, parties, teams, studios or orgs. Those were served
-// here from process-local Maps while /social/* served the same four objects
-// durably, so the estate had two stores for one concept — see RETIRED_SOCIAL
-// below for what that actually cost and what replaced it.
+// This slice now OWNS NO LIVE ROUTE. It is a retirement table: every path it
+// once served is answered with a 410 that names the durable surface which
+// answers the same question. Two rounds got it here —
+//   * friends, parties, teams, studios and orgs were process-local Maps while
+//     /social/* served the same objects durably: two stores for one concept.
+//     See RETIRED_SOCIAL.
+//   * /me, /profile/:id, /subscriptions, /publish/check, /identity/portable and
+//     /invite read a SEEDED DEMO STORE that no real principal is a key in, so
+//     they 500ed, 404ed, or served fabricated fixtures — one of them to an
+//     unauthenticated caller. See RETIRED_IDENTITY.
+//
+// createIdentityStore() survives because src/cw1/db.mjs seeds its in-memory
+// fallback repo from it. Nothing in this file reads it any more.
 
-import { computeLevel, buildMe, canPublish, publishCredits } from "./identity-core.mjs";
-import { portableIdentity } from "./identity-studio.mjs";
+// identity-core and identity-studio are deliberately NOT imported any more.
+// The only routes that used computeLevel/buildMe/canPublish/publishCredits and
+// portableIdentity are retired below, and every one of them fed those pure
+// functions a row out of a seeded demo store. src/core/social.mjs calls the
+// same identity-core rules over the DURABLE profile row, which is where the
+// level and the publish allowance are now computed exactly once.
 // createVerificationStore is deliberately NOT imported any more: the only routes
 // that used it (/verify/:channel/{start,confirm}) are retired below, so the
 // module-level store it built was a third in-memory challenge store that nothing
@@ -99,17 +110,92 @@ export const RETIRED_SOCIAL = {
     detail: "this endpoint did not check who was calling; use /social/orgs" },
 };
 
+// ---- RETIRED: the fixture-backed half of this slice -----------------------------
+//
+// Everything below was served out of createIdentityStore()'s seeded Maps —
+// u_dk "Deepak Dudi" with atlas_score 72 and an active dcs_plus row, u_kanya,
+// u_new. Those ids are demo fixtures. A real principal id (a Supabase user id,
+// or the `sub` of a locally signed token) is NEVER a key in them, so on the
+// running server these routes did one of three things, none of which is a
+// service:
+//
+//   POST /publish/check   -> 500 "Cannot read properties of undefined
+//                            (reading 'dcs_plus')"   [reproduced 7 Sep 2026]
+//   GET  /identity/portable -> 500 "Cannot set properties of undefined
+//                            (setting 'level_cache')" [reproduced 7 Sep 2026]
+//   GET  /me              -> 404 for every principal that will ever call it
+//   GET  /subscriptions   -> a second answer to a question /me/subscription
+//                            already answers durably
+//   GET  /profile/:id     -> 200, TO AN ANONYMOUS CALLER, with the fixture:
+//                            {"id":"u_dk","bio":"Founder. Builder.",
+//                             "followers":1284,"following":312}
+//   POST /invite          -> 200 and a join URL, written into db.invites, which
+//                            NO route in this estate reads. A write-only store.
+//
+// The /profile/:id case is the same authorisation hole GET /studios/:id and
+// GET /parties/:id were retired for above: it never called who(req) at all.
+// The /publish/check case is worse than a crash — had the store been populated
+// it would have computed a publish allowance from fixture signals while
+// /me/profile computes the SAME allowance from the durable profile row, which
+// is the two-books defect this file was cleaned up for, applied to the gate
+// that decides who may publish to the public.
+//
+// So they are retired the same way, with a 410 that names the durable surface
+// that answers the same question for real. Keyed on the exact path (or its
+// first segment for /profile/:id) rather than a prefix scan, so a future
+// /identity/something is a plain 404 and not a silent inheritance of this
+// retirement.
+export const RETIRED_IDENTITY = {
+  "/me": {
+    superseded_by: "/me/profile",
+    // `private` = this route demanded a principal before it was retired. Those
+    // keep answering 401 to an anonymous caller ahead of the 410, so retiring a
+    // private surface does not turn it into an anonymous route-existence
+    // oracle. test/route-authz.test.mjs pins that ordering for /subscriptions.
+    private: true,
+    detail: "this endpoint read a seeded demo store that no real principal is a key in, so it answered 404 to every caller it will ever have; use /me/profile, which is built from the durable profile row",
+  },
+  "/profile": {
+    superseded_by: "/profiles/:username",
+    private: false,
+    detail: "this endpoint served a hardcoded demo profile (bio, follower and following counts that were never measured) to an unauthenticated caller and never checked who was asking; use /profiles/:username, which serves the durable profile and no private field",
+  },
+  "/subscriptions": {
+    superseded_by: "/me/subscription",
+    private: true,
+    detail: "this endpoint kept plans in a process-local map seeded with an active dcs_plus row, so it reported a subscription that no service had granted while /me/subscription reported the real one; use /me/subscription to read a plan and POST /v3/subscriptions/subscribe to attempt one, which refuses honestly because no payment provider is integrated",
+  },
+  "/publish/check": {
+    superseded_by: "/me/profile",
+    private: true,
+    detail: "this endpoint computed the publish gate from a seeded demo store and threw a 500 for every real principal; the same gate, computed from the durable profile, is on /me/profile as can_publish and publish_credits",
+  },
+  "/identity/portable": {
+    superseded_by: "/atlas/key and /atlas/receipt/:id",
+    private: true,
+    // Deliberately NOT pointed at a portable-identity endpoint: there is not
+    // one. Naming a replacement that does not exist would be the same dishonesty
+    // as the 500 it replaces.
+    detail: "this endpoint built a portable identity from a seeded demo store and threw a 500 for every real principal. There is no durable portable-identity route yet; what is real today is the signed attestation a third party can verify without trusting us — GET /atlas/key for the public key and GET /atlas/receipt/:id for a receipt — and /me/profile for the computed level",
+  },
+  "/invite": {
+    superseded_by: "/social/friends",
+    private: true,
+    detail: "this endpoint minted an invite token into a process-local map that no route in this estate ever reads and a restart erased, and handed back a join URL that resolves to nothing; to add someone, use POST /social/friends, which is durable and readable back",
+  },
+};
+
 /**
  * handleIdentity(req, res, ctx) -> boolean
- *   ctx = { db, send, body, who }  (the shared mock supplies its own helpers; or use the defaults)
+ *   ctx = { send, who }  — `db` and `body` are still accepted for call-site
+ *   compatibility but no longer read: there is no live route left to read them.
  *   returns true if this slice handled the route, false to fall through to shared routes.
  */
 export async function handleIdentity(req, res, ctx) {
-  const { db, send, body, who } = ctx;
+  const { send, who } = ctx;
   const url = new URL(req.url, "http://x");
   const path = url.pathname, m = req.method;
   const seg = path.split("/").filter(Boolean);
-  const uid = (p) => p + "_" + (++db.seq) + Math.random().toString(36).slice(2,6);
 
   // auth
   // auth — RETIRED.
@@ -131,14 +217,31 @@ export async function handleIdentity(req, res, ctx) {
     });
     return true;
   }
-  if (path === "/me" && m === "GET") {
-    // buildMe(undefined) produced a complete-looking profile with no id — an
-    // invented record, indistinguishable from a real empty one.
-    const rec = db.users.get(who(req));
-    if (!rec) { send(res, 404, { ok:false, error:"not_found", detail:"no identity record for this principal" }); return true; }
-    send(res, 200, buildMe(rec)); return true;
+  // /me, /profile/:id, /subscriptions, /publish/check, /identity/portable and
+  // /invite — RETIRED (see RETIRED_IDENTITY above). One guard for all six, so
+  // the retirement notice and the behaviour come from one table.
+  //
+  // Matched on the WHOLE path, not a prefix — unlike the social guard, which
+  // keys on the first segment. It has to be: /me/profile and /me/subscription
+  // are the durable replacements and live one segment under a retired path, so
+  // a prefix match here would retire the very routes this table points at.
+  // /profile/:id is the one exception, because its id is a path segment; note
+  // that /profiles/:username is a different first segment and is untouched.
+  //
+  // Method-agnostic apart from OPTIONS, so a retired route cannot be half-alive
+  // on a verb its retirement notice did not mention.
+  {
+    const key = seg[0] === "profile" ? "/profile" : path;
+    const r = RETIRED_IDENTITY[key];
+    if (r && m !== "OPTIONS") {
+      // A private route stays private: resolve the principal first, so an
+      // anonymous caller is refused rather than told which private surfaces
+      // this deployment once had.
+      if (r.private) who(req);
+      send(res, 410, { ok:false, error:"gone", detail:r.detail, superseded_by:r.superseded_by });
+      return true;
+    }
   }
-  if (seg[0]==="profile" && m==="GET") { const p=db.profiles.get(seg[1]); send(res, p?200:404, p||{error:"not_found"}); return true; }
 
   // friends / parties / teams / studios / orgs — RETIRED (see RETIRED_SOCIAL above).
   // One guard, so a new sub-path under any of these concepts cannot quietly
@@ -148,10 +251,6 @@ export async function handleIdentity(req, res, ctx) {
     send(res, 410, { ok:false, error:"gone", detail:r.detail, superseded_by:r.superseded_by });
     return true;
   }
-
-  // subscriptions (DARK)
-  if (path==="/subscriptions"&&m==="GET") { const me=who(req); send(res,200,db.subscriptions.get(me)||{plan:"free",status:"none",_shadow:true}); return true; }
-  if (path==="/subscriptions"&&m==="POST") { who(req); send(res,200,{status:"dark",note:"written by CW8 payments; DARK until DK flips",_shadow:true}); return true; }
 
   // verification (P2) → feeds level
   // SECURITY (6 Sep 2026): this route returned the verification code in its own
@@ -166,21 +265,26 @@ export async function handleIdentity(req, res, ctx) {
     return true;
   }
 
-  // publish gate (M-P3) + portable identity (P9) + invite
-  if (path==="/publish/check"&&m==="POST") { const me=who(req); const u=db.users.get(me); const level=computeLevel(u); send(res,200,{...canPublish({level,dcs_plus:u.dcs_plus,published_count:u.published_count}),level,credits:publishCredits({level,dcs_plus:u.dcs_plus})}); return true; }
-  if (path==="/identity/portable"&&m==="GET") { const u=db.users.get(who(req)); u.level_cache=computeLevel(u); const att={verified:u.email_verified&&u.phone_verified&&u.atlas_score>=50,atlas_score:u.atlas_score}; send(res,200,portableIdentity(u,att)); return true; }
-  if (path==="/invite"&&m==="POST") { const me=who(req); const tok=uid("inv"); db.invites.set(tok,{by:me,created:Date.now()}); send(res,200,{invite_token:tok,url:"https://games.dcsai.ai/join/"+tok}); return true; }
-
   return false; // not an identity route — let the shared mock handle it
 }
 
 /**
- * The retired social routes, in the shape server.mts's /health `routes.retired`
- * array already uses. Derived from RETIRED_SOCIAL so the advertisement and the
- * behaviour cannot drift apart.
+ * Every route this slice has retired, in the shape server.mts's /health
+ * `routes.retired` array already uses. Derived from the two retirement tables
+ * so the advertisement and the behaviour cannot drift apart.
+ *
+ * The name says "social" because server.mts spreads this call into
+ * `routes.retired` and server.mts belongs to another lane; it must therefore
+ * carry the WHOLE retired surface of this slice, or /health under-reports it
+ * and a caller reading /health cannot tell that /publish/check is gone.
  */
 export function retiredSocialRoutes() {
-  return Object.keys(RETIRED_SOCIAL).map(
-    (k) => `ALL /${k}/* on the legacy identity slice (410 -> ${RETIRED_SOCIAL[k].superseded_by})`,
-  );
+  return [
+    ...Object.keys(RETIRED_SOCIAL).map(
+      (k) => `ALL /${k}/* on the legacy identity slice (410 -> ${RETIRED_SOCIAL[k].superseded_by})`,
+    ),
+    ...Object.keys(RETIRED_IDENTITY).map(
+      (k) => `ALL ${k === "/profile" ? "/profile/:id" : k} on the legacy identity slice (410 -> ${RETIRED_IDENTITY[k].superseded_by})`,
+    ),
+  ];
 }
