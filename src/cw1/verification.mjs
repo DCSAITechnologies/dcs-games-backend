@@ -10,13 +10,26 @@ export function createVerificationStore() {
   const store = new Map();
   const key = (uid, ch) => `${uid}:${ch}`;
 
-  // issue a challenge. In prod the code is SENT (email/SMS) and NOT returned to the client.
-  // The mock returns _devCode so tests/dev can complete the loop without a real provider.
-  function issue(user_id, channel) {
+  // Issue a challenge. The code is NEVER returned by default.
+  //
+  // This used to return `_devCode` unconditionally, and every caller inherited
+  // that: any user could read their own code out of the response and verify an
+  // address they do not own. computeLevel treats a verification as a TRUST
+  // signal, so a verification you can grant yourself is not a verification.
+  // src/core/verification.mjs is the real implementation and never returns a
+  // code in any mode.
+  //
+  // The runnable development mock genuinely needs to complete the loop with no
+  // provider, so it OPTS IN explicitly and visibly at the call site. A dangerous
+  // default that one caller needed is now a safe default that one caller asks
+  // for by name.
+  function issue(user_id, channel, { returnCodeForMockOnly = false } = {}) {
     if (!["email", "phone"].includes(channel)) return { ok: false, reason: "bad_channel" };
     const code = String(Math.floor(100000 + Math.random() * 900000)); // 6-digit
     store.set(key(user_id, channel), { code, expires: Date.now() + CODE_TTL_MS, attempts: 0, verified: false });
-    return { ok: true, channel, sent: true, _devCode: code };  // _devCode mock-only
+    const out = { ok: true, channel, sent: true };
+    if (returnCodeForMockOnly) out._devCode = code;
+    return out;
   }
 
   // verify a submitted code. Enforces expiry + attempt cap.

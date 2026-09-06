@@ -203,7 +203,7 @@ const server = createServer(async (req, res) => {
     // ---- VERIFICATION (P2): email + phone → feeds computed level + publisher gate ----
     if (seg[0]==="verify" && seg[2]==="start" && m==="POST") {
       const me = who(req); const channel = seg[1]; // email | phone
-      const r = verifier.issue(me, channel);
+      const r = verifier.issue(me, channel, { returnCodeForMockOnly: true });
       if (!r.ok) return send(res, 400, r);
       // prod: code is sent via provider, never returned. mock returns _devCode for the loop.
       return send(res, 200, { ok:true, channel, sent:true, _devCode:r._devCode, note:"prod sends via email/SMS provider; _devCode is mock-only" });

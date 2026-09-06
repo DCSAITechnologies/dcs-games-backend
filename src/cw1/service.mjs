@@ -122,6 +122,20 @@ async function handler(req, res) {
 const server = createServer(handler);
 const PORT = process.env.PORT || 8788;
 if (process.argv[1] && process.argv[1].endsWith("service.mjs")) {
+  // Refuse to start unless someone says so deliberately, exactly as
+  // mock-server.mjs does. who() below reads the bearer token as a raw user id
+  // and verifies no signature — anyone can be anyone here. The file says so in
+  // its header, but a header does not stop a deploy script, and this listens on
+  // a port. The guard is what stops it.
+  if (process.env.NODE_ENV !== "development" && process.env.DCS_ALLOW_CW1_SERVICE !== "1") {
+    console.error(JSON.stringify({
+      level: "fatal",
+      detail: "Refusing to start src/cw1/service.mjs: its who() accepts an unverified bearer token as an identity, so any caller can act as any user.",
+      fix: "The estate's real identity surface is server.mts, which authenticates through src/core/principal.mjs. To run this anyway for local contract work, set DCS_ALLOW_CW1_SERVICE=1.",
+      ts: new Date().toISOString(),
+    }));
+    process.exit(78);
+  }
   // getDb() is awaited before listen so the in-memory warning (db.mjs) is on the
   // log BEFORE the "ready" line, rather than appearing later next to a request.
   getDb().then((db) => {

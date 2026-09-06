@@ -635,7 +635,7 @@ test("R3: a subscriptions dependency of the wrong shape is a startup error", asy
 });
 
 test("R3: a comped plan raises the ALLOWANCE and does not raise the LEVEL", async () => {
-  // computeLevel() takes dcs_plus and never reads it (src/cw1/identity-core.mjs:22).
+  // computeLevel() deliberately does NOT take dcs_plus: level is a trust axis and must not be purchasable (see src/cw1/identity-core.mjs).
   // This pins the behaviour: a plan buys credits, not trust. If someone makes a
   // level purchasable, this fails and they have to say so out loud.
   const env = tmp();
