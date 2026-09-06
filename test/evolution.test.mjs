@@ -681,3 +681,47 @@ test("B6 GATE: a fork carries no ownership across in any collection that can hol
     }
   }
 });
+
+// ------------------------------------------- a district can be added twice
+
+test("B5 GATE: the same kind of district can be added twice", async () => {
+  // The zone id carried the version the district was added in; nothing else
+  // did. So a creator could add a hospital district once and never again — the
+  // second attempt planned `struct_hospital_clinic_0` a second time and
+  // applyDelta refused the entire expansion with "an expansion must not
+  // overwrite an existing entity". That refusal is correct and must stay:
+  // overwriting the first hospital would silently destroy whatever a player
+  // had done in it. The collision is what was wrong. Wanting two market
+  // quarters is an ordinary thing.
+  let m = await world("A small nordic port town", "w_twice");
+  const versions = [];
+  for (const request of ["add a hospital district", "add a market quarter", "add a hospital district"]) {
+    const delta = planExpansion(m, { request, author: "u1" });
+    const applied = applyDelta(m, delta, emptyLiveState());
+    m = applied.manifest;
+    versions.push(m.world_version);
+    assert.ok(validateManifest(m).ok, `${request}: ${JSON.stringify(validateManifest(m).errors.slice(0, 3))}`);
+  }
+  assert.deepEqual(versions, [2, 3, 4], "every expansion must land");
+
+  const hospitals = m.zones.filter((z) => z.id.startsWith("zone_hospital_"));
+  assert.equal(hospitals.length, 2, `two hospital districts were asked for, got ${hospitals.map((z) => z.id).join(", ")}`);
+
+  // The second district must be its own place, not a rename of the first.
+  const [a, b] = hospitals;
+  const inA = m.structures.filter((s) => s.zone === a.id).map((s) => s.id);
+  const inB = m.structures.filter((s) => s.zone === b.id).map((s) => s.id);
+  assert.ok(inA.length && inB.length, "each district needs its own buildings");
+  assert.equal(inA.filter((id) => inB.includes(id)).length, 0, "the two districts must not share a structure id");
+});
+
+test("B5: replanning the same expansion at the same version produces the same ids", async () => {
+  // The version scoping must not become a source of churn: a gate rejection
+  // followed by a retry has to be a retry, not a second district.
+  const m = await world("A small nordic port town", "w_retry");
+  const a = planExpansion(m, { request: "add a hospital district", author: "u1" });
+  const b = planExpansion(m, { request: "add a hospital district", author: "u1" });
+  assert.deepEqual(a.add.structures.map((s) => s.id), b.add.structures.map((s) => s.id));
+  assert.deepEqual(a.add.npcs.map((n) => n.id), b.add.npcs.map((n) => n.id));
+  assert.deepEqual(a.add.zones.map((z) => z.id), b.add.zones.map((z) => z.id));
+});

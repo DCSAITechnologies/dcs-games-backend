@@ -92,7 +92,23 @@ export function planExpansion(manifest, { request, label = null, author = null, 
 
   const named = /(?:add|build|create)\s+(?:an?\s+)?([a-z][a-z\s]{2,30}?)\s*(?:district|area|zone|quarter|wing|region)?\s*$/.exec(text);
   const districtName = label || titleCase(named?.[1]?.trim() || key);
-  const zoneId = `zone_${slug(districtName)}_v${Number(manifest.world_version) + 1}`;
+  // Every entity in a district is named from ONE stem, and the stem carries the
+  // version the district was added in.
+  //
+  // The zone id alone used to carry the version and nothing else did, so a
+  // creator could add a hospital district once and never again: the second
+  // attempt planned `struct_hospital_clinic_0` a second time and applyDelta
+  // refused the whole expansion with "an expansion must not overwrite an
+  // existing entity" — correctly, since overwriting the first hospital would
+  // silently destroy whatever the player had done in it. The refusal was right;
+  // the collision was the bug. Two market quarters is an ordinary thing to
+  // want, and a repeated request must build a second district rather than fail.
+  //
+  // Stable WITHIN a version on purpose: replanning the same expansion after a
+  // gate rejection produces the same ids, so a retry is a retry and not a
+  // duplicate.
+  const stem = `${slug(districtName)}_v${Number(manifest.world_version) + 1}`;
+  const zoneId = `zone_${stem}`;
 
   const size = { w: 110 + Math.floor(r() * 60), h: 100 + Math.floor(r() * 60) };
   const region = findFreeRegion(manifest, size);
@@ -134,7 +150,7 @@ export function planExpansion(manifest, { request, label = null, author = null, 
     if (!ref) continue;
     const w = 8 + r() * 10, d = 8 + r() * 10, h = 5 + r() * 12;
     delta.add.structures.push({
-      id: `struct_${slug(districtName)}_${archetype}_${i}`,
+      id: `struct_${stem}_${archetype}_${i}`,
       zone: zoneId,
       asset_ref: ref,
       transform: {
@@ -160,7 +176,7 @@ export function planExpansion(manifest, { request, label = null, author = null, 
   bp.npcRoles.forEach((role, i) => {
     if (!npcRef) return;
     delta.add.npcs.push({
-      id: `npc_${slug(districtName)}_${slug(role)}`,
+      id: `npc_${stem}_${slug(role)}`,
       name: titleCase(role),
       role,
       zone: zoneId,
@@ -179,7 +195,7 @@ export function planExpansion(manifest, { request, label = null, author = null, 
   // ---- items + pickups ----------------------------------------------------
   const propRef = assetIdFor("well", "prop");
   for (const it of bp.items) {
-    delta.add.items.push({ id: `item_${slug(districtName)}_${slug(it)}`, name: titleCase(it), kind: it, asset_ref: propRef, stackable: false, effects: [] });
+    delta.add.items.push({ id: `item_${stem}_${slug(it)}`, name: titleCase(it), kind: it, asset_ref: propRef, stackable: false, effects: [] });
   }
 
   // ---- behaviours + interactions -----------------------------------------
@@ -205,7 +221,7 @@ export function planExpansion(manifest, { request, label = null, author = null, 
   // ---- a quest that uses the new district --------------------------------
   if (delta.add.npcs.length && delta.add.items.length) {
     delta.add.quests.push({
-      id: `quest_${slug(districtName)}_opening`,
+      id: `quest_${stem}_opening`,
       title: `Opening of the ${districtName} District`,
       giver_npc: delta.add.npcs[0].id,
       zone: zoneId,
