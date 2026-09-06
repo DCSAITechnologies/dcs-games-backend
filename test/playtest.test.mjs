@@ -6,7 +6,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createAssemblyRouter } from "../src/v3/router/assembly.mjs";
-import { simulatePlaythrough, simulateQuests, critique, repair, playtestAndRepair } from "../src/v3/playtest/agent.mjs";
+import { simulatePlaythrough, simulateQuests, critique, repair, playtestAndRepair, npcHasSpeech } from "../src/v3/playtest/agent.mjs";
 import { runAllValidators, validateStructure, validateNavigation, validateQuests, validateGameplayLoop, validateReferences } from "../src/v3/playtest/validators.mjs";
 
 const OFFLINE = { DCS_PROVIDERS_OFFLINE: "1" };
@@ -397,8 +397,10 @@ test("B4 GATE: an NPC with dialogue but no interaction is WIRED, and a mute one 
   // passed.
   const m = await goodWorld("Saltmarsh Reach", "w_wire");
   m.interactions = (m.interactions || []).filter((i) => !m.npcs.some((n) => n.id === i.target_ref));
-  m.npcs[0].dialogue = ["The tide is wrong today."];
-  const mute = { id: "npc_mute", name: "Silent Watcher", zone: m.zones[0].id, dialogue: [] };
+  // The canonical v3 shape. `lines` is empty on every generation path; the
+  // seed is what says this NPC is meant to be spoken to.
+  m.npcs[0].dialogue = { seed: "The tide is wrong today.", lines: [] };
+  const mute = { id: "npc_mute", name: "Silent Watcher", zone: m.zones[0].id, dialogue: { seed: null, lines: [] } };
   m.npcs.push(mute);
 
   const r = repair(m, [{ id: "npcs_not_interactive", severity: "major", fix: "add_interactions" }]);
@@ -414,9 +416,9 @@ test("B4 GATE: an NPC with dialogue but no interaction is WIRED, and a mute one 
   // The property, not a count: every NPC that HAS something to say became
   // reachable, and every NPC that has nothing to say was left exactly as it was.
   for (const n of r.manifest.npcs) {
-    const hasLines = Array.isArray(n.dialogue) && n.dialogue.filter(Boolean).length > 0;
-    assert.equal(talkable.has(n.id), hasLines,
-      `${n.id} has dialogue=${hasLines} but interactive=${talkable.has(n.id)}`);
+    const speaks = npcHasSpeech(n);
+    assert.equal(talkable.has(n.id), speaks,
+      `${n.id} has speech=${speaks} but interactive=${talkable.has(n.id)}`);
   }
 
   // The wiring must be real: the behaviour it points at has to exist.
@@ -426,4 +428,40 @@ test("B4 GATE: an NPC with dialogue but no interaction is WIRED, and a mute one 
   }
   assert.equal(runAllValidators(r.manifest).some((f) => f.id === "npcs_not_interactive"), false,
     "and the finding that prompted the repair is gone");
+});
+
+test("B4 GATE: speech is judged by the shape real manifests actually use", () => {
+  // The first version of add_interactions asked `Array.isArray(npc.dialogue)`.
+  // No generated world has ever had that shape — migrate.mjs, assembly.mjs and
+  // expansion/planner.mjs all build `{ seed, lines: [] }` — so every NPC in
+  // every real world counted as mute, and the repair reported success while
+  // wiring nothing. Reading `lines` alone is the same bug: lines are EMPTY at
+  // generation time on every path, and the seed is the intent.
+  assert.equal(npcHasSpeech({ dialogue: { seed: "old tides whisper", lines: [] } }), true,
+    "a seed with no lines yet is still an NPC the world means you to talk to");
+  assert.equal(npcHasSpeech({ dialogue: { seed: null, lines: [] } }), false, "genuinely mute");
+  assert.equal(npcHasSpeech({ dialogue: { seed: "   ", lines: [] } }), false, "whitespace is not speech");
+  assert.equal(npcHasSpeech({ dialogue: { seed: null, lines: ["Hello."] } }), true, "realised lines count");
+  assert.equal(npcHasSpeech({ dialogue: ["Hello."] }), true, "legacy array form still loads from disk");
+  assert.equal(npcHasSpeech({ dialogue: [] }), false);
+  assert.equal(npcHasSpeech({}), false);
+  assert.equal(npcHasSpeech(null), false);
+});
+
+test("B4 GATE: a manifest in the real generated shape is actually wired", async () => {
+  // The end-to-end version of the above, against a world whose NPCs carry
+  // exactly what a provider emits.
+  const m = await goodWorld("Tidebound Echoes", "w_realshape");
+  m.interactions = (m.interactions || []).filter((i) => !m.npcs.some((n) => n.id === i.target_ref));
+  for (const n of m.npcs) n.dialogue = { seed: `${n.name || n.id} has something to say`, lines: [] };
+
+  const r = repair(m, [{ id: "npcs_not_interactive", severity: "major", fix: "add_interactions" }]);
+  const talkable = new Set((r.manifest.interactions || []).map((i) => i.target_ref));
+
+  const applied = r.applied.find((a) => a.fix === "add_interactions");
+  assert.ok(applied, "the repair must run, not skip the whole world as mute");
+  assert.equal(applied.wired, m.npcs.length, "every NPC with a seed must be wired");
+  assert.equal(applied.left_mute, 0);
+  for (const n of m.npcs) assert.ok(talkable.has(n.id), `${n.id} was left unreachable`);
+  assert.equal(runAllValidators(r.manifest).some((f) => f.id === "npcs_not_interactive"), false);
 });

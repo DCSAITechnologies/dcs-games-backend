@@ -201,6 +201,31 @@ export function critique(m, { walk, quests } = {}) {
 // dangling reference — that would hide the defect rather than fix it. Where the
 // honest repair is removal, it removes and says so.
 
+/**
+ * Does this NPC have anything to say?
+ *
+ * The canonical v3 shape is `dialogue: { seed, lines: [] }` — and `lines` is
+ * EMPTY at generation time on every path (migrate.mjs, assembly.mjs,
+ * expansion/planner.mjs all construct it that way); the seed is what carries
+ * the intent, with lines realised later at runtime. A first version of this
+ * read `Array.isArray(npc.dialogue)`, which is true for no real manifest at
+ * all, so every NPC in a generated world counted as mute and the repair wired
+ * nothing while reporting success. Judging speech by `lines` alone is the same
+ * bug wearing a different hat.
+ *
+ * The legacy array form is still accepted because older stored manifests use
+ * it and this runs over worlds loaded from disk, not only fresh ones.
+ */
+export function npcHasSpeech(npc) {
+  const d = npc?.dialogue;
+  if (!d) return false;
+  if (Array.isArray(d)) return d.filter(Boolean).length > 0;
+  if (typeof d === "string") return d.trim() !== "";
+  const lines = Array.isArray(d.lines) ? d.lines.filter(Boolean) : [];
+  const seed = typeof d.seed === "string" ? d.seed.trim() : "";
+  return lines.length > 0 || seed !== "";
+}
+
 export function repair(manifest, findings) {
   const m = structuredClone(manifest);
   const applied = [];
@@ -323,8 +348,7 @@ export function repair(manifest, findings) {
         let added = 0;
         for (const npc of m.npcs || []) {
           if (wired.has(npc.id)) continue;
-          const lines = Array.isArray(npc.dialogue) ? npc.dialogue.filter(Boolean) : [];
-          if (!lines.length) { mute.push(npc.id); continue; }
+          if (!npcHasSpeech(npc)) { mute.push(npc.id); continue; }
           const bid = `behavior_talk_${npc.id}`;
           if (!byId(m.behaviors, bid)) {
             m.behaviors.push({ id: bid, kind: "npc_ai", spec: { npc: npc.id, mode: "dialogue" } });

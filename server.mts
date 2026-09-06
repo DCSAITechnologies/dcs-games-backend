@@ -34,6 +34,7 @@ import { createSubscriptionsService } from "./src/core/subscriptions.mjs";
 import path from "node:path";
 import { createCollection } from "./src/core/collection.mjs";                 // durable rows for the issued-receipt store
 import { createLiveStateService, mergeLiveState, cw5RuntimeStateSource, companionMemorySource } from "./src/core/livestate.mjs";
+import { readBuildInfo } from "./src/core/build-info.mjs";
 import { createPlayerProgressService, playerProgressSources } from "./src/core/playerprogress.mjs";  // what the SERVER observed a player do  // B2: the server reads player-held state instead of asking the client for it   // B15: subscriptions, built DARK — nothing is purchasable
 import { createWorldMemory } from "./src/v3/memory/world-memory.mjs";           // B7: factual world chronology
 import { createCompanionService } from "./src/v3/companion/companion.mjs";      // B5: personal AI companion
@@ -136,6 +137,7 @@ console.log("A3 world store:", repo.kind);
 
 // A2: when a direct Postgres DSN is configured, assert the schema BEFORE serving.
 // An unsupported schema must stop the process, not surface later as empty data.
+const BUILD_INFO = readBuildInfo();
 let SCHEMA_STATE: any = { checked: false, reason: "no DATABASE_URL configured" };
 if (process.env.DATABASE_URL) {
   try {
@@ -305,6 +307,7 @@ const server = http.createServer(async (req, res) => {
     if (method === "OPTIONS") return send(res, 204, {});
     if (url === "/health" && method === "GET") return send(res, 200, {
       ok: true, service: "dcs-games-backend", payments_live: PAYMENTS_LIVE,
+      build: BUILD_INFO,
       auth: auth.mode,
       auth_header_fallback_removed: true,      // A1: x-user-id impersonation path deleted 6 Sep 2026
       internal_testing_window_ends: "2026-09-30",
