@@ -31,7 +31,8 @@ import { applyDelta, verifyPreservation, emptyLiveState, newDelta } from "./src/
 import { planRollback, recordRollback } from "./src/v3/expansion/rollback.mjs";              // B6: rollback as a new version, never a rewind
 import { diffManifests } from "./src/v3/expansion/diff.mjs";                 // B6: what actually changed between two versions
 import { createSubscriptionsService } from "./src/core/subscriptions.mjs";
-import { createLiveStateService, mergeLiveState } from "./src/core/livestate.mjs";  // B2: the server reads player-held state instead of asking the client for it   // B15: subscriptions, built DARK — nothing is purchasable
+import { createLiveStateService, mergeLiveState, cw5RuntimeStateSource, companionMemorySource } from "./src/core/livestate.mjs";
+import { createPlayerProgressService, playerProgressSources } from "./src/core/playerprogress.mjs";  // what the SERVER observed a player do  // B2: the server reads player-held state instead of asking the client for it   // B15: subscriptions, built DARK — nothing is purchasable
 import { createWorldMemory } from "./src/v3/memory/world-memory.mjs";           // B7: factual world chronology
 import { createCompanionService } from "./src/v3/companion/companion.mjs";      // B5: personal AI companion
 import { createNpcMemory } from "./src/v3/companion/npc-memory.mjs";            // 9.5: NPC memory + procedural quests from RECORDED state
@@ -80,7 +81,19 @@ const npcMemory = createNpcMemory({ worldMemory });                          // 
 // Every route that can destroy content used to take this from the REQUEST BODY,
 // so the protection was opt-in by the caller it protects against: omitting
 // live_state left inventory, companion memory and quest progress unchecked.
-const liveStateSvc = createLiveStateService({ persistence, companions });
+const playerProgress = createPlayerProgressService();
+// The quest and NPC seams were null sources that refused rather than pretended.
+// They now read what the server itself OBSERVED — a spawn placement it performed
+// and a dialogue turn it served — never a claim a client sent. They report
+// PARTIAL, so those categories are still never counted as fully determined.
+const liveStateSvc = createLiveStateService({
+  persistence, companions,
+  sources: [
+    cw5RuntimeStateSource({ persistence }),
+    companionMemorySource({ companions }),
+    ...playerProgressSources({ progress: playerProgress }),
+  ],
+});
 const market = createMarketplaceService();                                   // B15: prepared, and dark at the schema level
 const verification = createVerificationService();                            // P2
 const jobsvc = createJobService();                                           // P1: async generation
@@ -295,6 +308,7 @@ const server = http.createServer(async (req, res) => {
       safety_persistence: safety.describe(),
       verification: verification.describe(),
       live_state: liveStateSvc.describe(),
+      player_progress: playerProgress.describe(),
       cross_product: {
         status: crossProductStatus,
         products: crossProductStatus === "AVAILABLE" ? ["games", "sports"] : ["games"],
@@ -817,8 +831,17 @@ const server = http.createServer(async (req, res) => {
         // Recording a play is what makes discovery honest: no row, no ranking.
         const me = await whoOrNull(req, cid);
         const b = await readBody(req);
-        await repo.get(mm[1], { requesterId: me?.id ?? null });
+        const rec = await repo.get(mm[1], { requesterId: me?.id ?? null });
         await social.recordPlay(mm[1], me?.id ?? null, b.seconds);
+        if (me) {
+          // The server placed this player at the world's spawn, so it can say so.
+          // optional(), not required(): a progress-store failure must never fail a
+          // play, and the degradation is honest — live state then reports the
+          // category unknown rather than empty.
+          const { manifest } = ensureV3(rec.manifest, { worldVersion: rec.version, creatorId: rec.owner_id });
+          await optional("player-progress-entry", () => playerProgress.recordWorldEntry({ principal: me, worldId: rec.world_id, manifest, worldVersion: rec.version }), cid);
+          await optional("player-progress-reconcile", () => playerProgress.reconcileQuests({ principal: me, worldId: rec.world_id, manifest, worldVersion: rec.version }), cid);
+        }
         return send(res, 201, { ok: true, stats: await social.worldStats(mm[1]) });
       }
     }
@@ -1243,7 +1266,16 @@ const server = http.createServer(async (req, res) => {
       if (mm && method === "GET") {
         const rec = await repo.get(mm[1], { requesterId: principal?.id ?? null });
         const { manifest } = ensureV3(rec.manifest, { worldVersion: rec.version, creatorId: rec.owner_id });
-        return send(res, 200, { ok: true, ...(await npcMemory.linesFor(rec.world_id, mm[2], manifest)) });
+        // This is the server conducting a dialogue turn with a named NPC for an
+        // authenticated principal — which is what "someone a player has met"
+        // means. The evidence recorded is the artefact the server produced, not
+        // a flag a caller set.
+        const lines = await npcMemory.linesFor(rec.world_id, mm[2], manifest);
+        if (principal) {
+          await optional("player-progress-npc", () => playerProgress.recordNpcDialogueServed({ principal, worldId: rec.world_id, npcId: mm[2], manifest, lines, worldVersion: rec.version }), cid);
+          await optional("player-progress-reconcile", () => playerProgress.reconcileQuests({ principal, worldId: rec.world_id, manifest, worldVersion: rec.version }), cid);
+        }
+        return send(res, 200, { ok: true, ...lines });
       }
 
       mm = url.match(/^\/v3\/worlds\/([^/]+)\/quests\/generate$/);
@@ -1326,6 +1358,9 @@ const server = http.createServer(async (req, res) => {
         // get permission to demolish. Manifest-recorded ownership is checked
         // independently inside planRollback, and the response says plainly how
         // far the live-state check reached so nobody reads silence as safety.
+        // Derive completions BEFORE they gate a deletion: a quest added since the
+        // evidence was gathered must still be reconciled against it.
+        await optional("player-progress-reconcile-world", () => playerProgress.reconcileWorld(rec.world_id, currentM, rec.version), cid);
         const ls = await liveStateFor(rec.world_id, b.live_state);
         const live = ls.live;
         const { manifest, record } = planRollback(currentM, targetM, {
@@ -1479,8 +1514,15 @@ const server = http.createServer(async (req, res) => {
         const saved = await repo.upsert({ worldId: m[1], ownerId: me.id, manifest: b.manifest, state: b.state || "draft", expected_version: b.expected_version ?? null });
         return send(res, 200, { ok: true, world_id: m[1], world_version: saved.version, manifest_hash: saved.manifest_hash, idempotent: saved.idempotent, persistence_degraded: saved._mirrored === false ? saved._mirror_error : undefined, correlation_id: cid });
       }
+      // The runtime-delta path. Two things must be true and neither was checked:
+      // the caller must be allowed to shape THIS world, and the delta must only
+      // act on the caller's own behalf. Without the first, any authenticated
+      // account could rewrite any world's runtime objects; without the second,
+      // a delta could set another player's inventory or hand itself ownership.
+      // Both feed livestate, which decides whether a rollback may delete things.
       const delta = b.delta || b; delta.world_id = m[1];
-      const r = await persistence.save(delta);                     // CW5 runtime-object delta path
+      await repo.get(m[1], { requesterId: me.id, requireOwner: true });
+      const r = await persistence.save(delta, { actorId: me.id });
       return send(res, 200, { ok: true, ...r, correlation_id: cid });
     }
     m = url.match(/^\/worlds\/([^/]+)\/load$/);

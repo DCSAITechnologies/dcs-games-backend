@@ -160,13 +160,28 @@ test("B2 livestate: the real CW5 persistence engine, when it can be loaded", asy
     world_id: "w_cw5",
     objects: [{ object_id: "struct_1", kind: "hall", transform: {}, owner_id: null }],
   });
-  await engine.save({
+  const delta = {
     world_id: "w_cw5", session_id: "s1", seq: 1, ts: new Date().toISOString(), actor_id: "u_player",
     ops: [
       { op: "place_object", object_id: "struct_shack", kind: "shack", transform: { x: 1, y: 0, z: 1 }, owner_id: "u_player" },
       { op: "set_inventory", player_id: "u_player", inventory: [{ item_id: "it_key", qty: 1 }] },
     ],
-  });
+  };
+  // save() now requires the principal a delta is attributed to, and refuses any
+  // op naming somebody else. These ops are u_player's own, so they apply.
+  await engine.save(delta, { actorId: "u_player" });
+
+  // The engine is where that binding lives, so it holds for every caller: an
+  // op naming another player is refused even with a well-formed delta.
+  await assert.rejects(
+    () => engine.save({ ...delta, seq: 2, ops: [{ op: "set_inventory", player_id: "u_victim", inventory: [{ item_id: "it_key", qty: 99 }] }] }, { actorId: "u_player" }),
+    /may not act on another player's behalf/,
+  );
+  await assert.rejects(
+    () => engine.save({ ...delta, seq: 3 }),
+    /an actor is required/,
+    "a delta on nobody's behalf is exactly what this refuses",
+  );
 
   const r = await createLiveStateService({ persistence: engine }).liveStateFor("w_cw5");
   assert.deepEqual(r.live_state.owned_entity_ids, ["struct_shack"]);

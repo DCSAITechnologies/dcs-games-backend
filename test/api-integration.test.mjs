@@ -825,3 +825,57 @@ test("a world made through the v3 stack is loadable by the CW5 runtime", async (
   assert.equal(b.world_id, rollbackWorldId);
   assert.ok(b.manifest, "the loaded world carries its manifest");
 });
+
+// ------------------------------------ a delta may only act on its own behalf
+//
+// POST /worlds/:id/save's runtime-delta path authenticated the caller and then
+// applied the delta exactly as sent. set_inventory carries its own player_id
+// and place_object its own owner_id, and neither was compared with the caller —
+// so any authenticated account could write any other player's inventory and
+// grant ownership of any object in any world. livestate reads exactly those two
+// fields as the evidence deciding whether a rollback may delete something, so a
+// forged hold freezes a creator's world and a stripped owner licenses deletion.
+
+test("A1 GATE: a save delta cannot set another player's inventory", async () => {
+  const r = await req(`/worlds/${rollbackWorldId}/save`, {
+    method: "POST", headers: json(MALLORY_TESTER),
+    body: JSON.stringify({ delta: { seq: 9001, ops: [
+      { op: "set_inventory", player_id: "user-alice", inventory: [{ item_id: "item_key", qty: 1 }] },
+    ] } }),
+  });
+  assert.ok(r.status >= 400, `forging another player's inventory must be refused, got ${r.status} ${await r.text()}`);
+});
+
+test("A1 GATE: a save delta cannot grant ownership to anyone, including its sender", async () => {
+  const r = await req(`/worlds/${rollbackWorldId}/save`, {
+    method: "POST", headers: json(MALLORY_TESTER),
+    body: JSON.stringify({ delta: { seq: 9002, ops: [
+      { op: "place_object", object_id: "struct_hall", kind: "structure", transform: {}, owner_id: "user-alice" },
+    ] } }),
+  });
+  assert.ok(r.status >= 400, `forging ownership must be refused, got ${r.status} ${await r.text()}`);
+});
+
+test("A1 GATE: a stranger cannot shape a world's runtime objects at all", async () => {
+  const r = await req(`/worlds/${rollbackWorldId}/save`, {
+    method: "POST", headers: json(MALLORY_TESTER),
+    body: JSON.stringify({ delta: { seq: 9003, ops: [
+      { op: "remove_object", object_id: "struct_hall" },
+    ] } }),
+  });
+  assert.equal(r.status, 403, await r.text());
+});
+
+test("A1: the owner can still save a delta on their own behalf", async () => {
+  // The guard must not have been built by refusing everything.
+  const r = await req(`/worlds/${rollbackWorldId}/save`, {
+    method: "POST", headers: json(ALICE),
+    body: JSON.stringify({ delta: { seq: 9101, ops: [
+      { op: "set_inventory", player_id: "user-alice", inventory: [{ item_id: "item_lantern", qty: 1 }] },
+      { op: "place_object", object_id: "struct_own", kind: "structure", transform: { x: 1, y: 0, z: 1 }, owner_id: "user-alice" },
+    ] } }),
+  });
+  const b = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(b));
+  assert.equal(b.seq, 9101);
+});

@@ -226,9 +226,51 @@ export class PersistenceEngine {
     await this.store.putBaseWorld(base);
   }
 
+  /**
+   * Every op that names a PERSON, and the field it names them in.
+   *
+   * A delta used to be applied exactly as sent: set_inventory carries its own
+   * player_id and place_object its own owner_id, and neither was ever compared
+   * with the caller. Any authenticated account could therefore write any other
+   * player's inventory and hand itself — or anyone — ownership of any object in
+   * any world. That is not only forgery of player property: livestate.mjs reads
+   * precisely these two fields as the evidence that decides whether a rollback
+   * may delete something, so a forged hold freezes a creator's world and a
+   * stripped owner_id licenses a deletion.
+   *
+   * The binding lives HERE rather than in the route, so a future caller cannot
+   * forget it.
+   */
+  static readonly ACTOR_BOUND_FIELDS: Record<string, string[]> = {
+    set_inventory: ['player_id'],
+    place_object: ['owner_id'],
+    move_object: ['owner_id'],
+  };
+
+  /**
+   * @param actorId  the authenticated principal this delta is attributed to.
+   *                 Required: passing null means "nobody in particular", and a
+   *                 delta from nobody in particular is exactly what this
+   *                 refuses. An op may leave an actor-bound field null (an
+   *                 unowned object), but it may never name someone else.
+   */
+  private assertActorBound(delta: SaveDelta, actorId: string | null): void {
+    if (!actorId) throw new Error('save: an actor is required; a delta cannot be applied on nobody\'s behalf');
+    for (const op of (delta as any).ops || []) {
+      const fields = PersistenceEngine.ACTOR_BOUND_FIELDS[(op as any).op] || [];
+      for (const f of fields) {
+        const v = (op as any)[f];
+        if (v != null && String(v) !== String(actorId)) {
+          throw new Error(`save: op '${(op as any).op}' sets ${f}='${v}' but the caller is '${actorId}' — a delta may not act on another player's behalf`);
+        }
+      }
+    }
+  }
+
   /** POST /worlds/:id/save — accept a delta → { ok, seq }. Append-only, idempotent, monotonic. */
-  async save(delta: SaveDelta): Promise<SaveAccepted> {
+  async save(delta: SaveDelta, opts: { actorId?: string | null } = {}): Promise<SaveAccepted> {
     if (!delta.world_id || delta.seq == null) throw new Error('save: world_id and seq required');
+    this.assertActorBound(delta, opts.actorId ?? null);
 
     if (await this.store.hasSeq(delta.world_id, delta.seq)) {
       return { ok: true, seq: delta.seq, duplicate: true };
