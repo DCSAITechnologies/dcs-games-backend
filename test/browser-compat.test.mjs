@@ -45,9 +45,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { serveStatic, launchChrome, Page, findChrome } from "./helpers/browser.mjs";
+import { resolveSite } from "./helpers/site.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const SITE = path.resolve(HERE, "../../../dcs-games-LIVE");
+const SITE = resolveSite(HERE);   // throws loudly if the frontend is absent
 const WORLD = "w_compat_1";
 
 /** The five V3 document pages, and the query each one needs to reach its work. */

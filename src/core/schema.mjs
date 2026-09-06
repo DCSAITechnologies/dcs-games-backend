@@ -187,9 +187,22 @@ export async function assertSchema(dsn, { required = REQUIRED_SCHEMA_VERSION, ta
  * Reproducibility proof: build the schema from scratch in a throwaway database
  * and confirm it lands on the same table set and version.
  */
-export async function proveReproducible(adminDsn, dbName, { dir = MIGRATIONS_DIR } = {}) {
+export async function proveReproducible(adminDsn, dbName, { dir = MIGRATIONS_DIR, allowDrop = true } = {}) {
   const base = adminDsn.replace(/\/[^/]*$/, "");
   const target = `${base}/${dbName}`;
+  // This DROPS the named database. The name defaults to `dcs_games_staging`
+  // everywhere, so two people on one host — or two CI jobs on one runner —
+  // destroy each other's staging without being asked. Callers that want a
+  // throwaway should pass a unique name; `allowDrop:false` refuses instead.
+  if (!allowDrop) {
+    const exists = await psqlScalar(adminDsn, `select 1 from pg_database where datname = '${dbName}';`).catch(() => null);
+    if (exists) {
+      throw Errors.conflict(
+        `database '${dbName}' already exists and allowDrop is false; ` +
+        `pass a unique name for a throwaway, or drop it deliberately`
+      );
+    }
+  }
   await psqlExec(adminDsn, `drop database if exists ${dbName};`).catch(() => {});
   await psqlExec(adminDsn, `create database ${dbName};`);
   const r = await migrate(target, { dir, log: () => {} });

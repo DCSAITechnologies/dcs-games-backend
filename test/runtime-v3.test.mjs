@@ -12,11 +12,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { serveStatic, launchChrome, Page, findChrome } from "./helpers/browser.mjs";
+import { resolveSite } from "./helpers/site.mjs";
 import { createAssemblyRouter } from "../src/v3/router/assembly.mjs";
 import { playtestAndRepair } from "../src/v3/playtest/agent.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const SITE = path.resolve(HERE, "../../../dcs-games-LIVE");
+const SITE = resolveSite(HERE);   // throws loudly if the frontend is absent
 const EVIDENCE = path.resolve(HERE, "../../../DCS_GAMES_SPRINT_SEP2026/evidence/screenshots");
 
 const haveSite = fs.existsSync(path.join(SITE, "play-v3.html"));

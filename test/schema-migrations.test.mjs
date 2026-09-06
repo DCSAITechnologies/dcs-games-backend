@@ -337,3 +337,26 @@ test("A2 GATE: every table the code talks to actually exists in the migration ch
   const fixed = KNOWN_GHOSTS.filter((k) => !names.includes(k));
   assert.deepEqual(fixed, [], "these are no longer ghosts — remove them from KNOWN_GHOSTS so the list keeps shrinking");
 });
+
+dbTest("A2: rebuilding does not silently destroy a database somebody else is using", async () => {
+  // proveReproducible DROPS the database it is given, and the name defaults to
+  // `dcs_games_staging` in migrate.mjs, staging.sh and everywhere else — so two
+  // people on one host, or two CI jobs on one runner, destroy each other's
+  // staging without being asked. The reproducibility harness now uses a unique
+  // name; anything that must not clobber can say so.
+  const existing = rnd();
+  try {
+    await proveReproducible(ADMIN, existing);                       // creates it
+    await assert.rejects(
+      () => proveReproducible(ADMIN, existing, { allowDrop: false }),
+      (e) => e.httpStatus === 409 && /already exists/.test(e.detail),
+      "an existing database must not be dropped when the caller said not to",
+    );
+    // And the database is still there, with its schema intact.
+    const { dsn } = { dsn: ADMIN.replace(/\/[^/]*$/, "") + "/" + existing };
+    assert.equal(Number(await psqlScalar(dsn, "select count(*) from public.dcsgames_schema_migrations;")) > 0, true,
+      "the refusal must leave the database untouched, not half-dropped");
+  } finally {
+    await psqlExec(ADMIN, `drop database if exists ${existing};`).catch(() => {});
+  }
+});
