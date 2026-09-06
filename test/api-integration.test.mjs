@@ -374,3 +374,76 @@ test("B15: a studio split must total 100% and settles nothing", async () => {
   assert.equal(ok.status, 200);
   assert.equal((await ok.json()).payments_live, false);
 });
+
+// -------------------------------------------------------- P1 async generation
+
+test("P1 GATE: async generation returns 202 immediately with a job to poll", async () => {
+  const t0 = Date.now();
+  const r = await req("/v3/worlds/generate/async", { method: "POST", headers: json(ALICE), body: JSON.stringify({ prompt: "A jungle expedition camp" }) });
+  const b = await r.json();
+  assert.equal(r.status, 202, JSON.stringify(b));
+  assert.ok(Date.now() - t0 < 3000, "the request must return before the work finishes");
+  assert.ok(b.job_id);
+  assert.equal(b.poll, "/v3/jobs/" + b.job_id);
+  // The whole stage list arrives up front, so a client can render it immediately.
+  assert.ok(b.stages.length >= 6);
+  assert.ok(b.stages.some((s) => s.id === "world_architect"));
+  asyncJobId = b.job_id;
+  asyncWorldId = b.world_id;
+});
+
+let asyncJobId, asyncWorldId;
+
+test("P1 GATE: the job completes, and its progress came from real stages", async () => {
+  let job = null;
+  for (let i = 0; i < 100; i++) {
+    job = (await (await req(`/v3/jobs/${asyncJobId}`, { headers: auth(ALICE) })).json()).job;
+    if (["succeeded", "failed", "interrupted"].includes(job.state)) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.equal(job.state, "succeeded", JSON.stringify(job.error || job.progress));
+  assert.equal(job.progress.basis, "completed stages, not elapsed time");
+  assert.equal(job.progress.fraction, 1);
+
+  // Every non-skipped stage records the provider that actually answered.
+  const architect = job.stages.find((s) => s.id === "world_architect");
+  assert.equal(architect.state, "done");
+  assert.match(architect.detail, /FALLBACK|AVAILABLE/, "the stage detail must name what answered");
+
+  // Optional stages nobody asked for are skipped with a reason, not left pending.
+  assert.equal(job.stages.find((s) => s.id === "vision").state, "skipped");
+  assert.match(job.stages.find((s) => s.id === "vision").detail, /no reference image/);
+
+  assert.equal(job.result.world_id, asyncWorldId);
+  assert.ok(job.result.counts.zones >= 3);
+  assert.equal(job.result.playtest.verdict, "PASSED");
+});
+
+test("P1: the asynchronously generated world is really there and loads", async () => {
+  const r = await req(`/v3/worlds/${asyncWorldId}/manifest`, { headers: auth(ALICE) });
+  const b = await r.json();
+  assert.equal(r.status, 200);
+  assert.equal(b.manifest.manifest_version, "3.0.0");
+  assert.ok(b.manifest.zones.length >= 3);
+});
+
+test("P1: a job is private, and listing shows only your own", async () => {
+  assert.equal((await req(`/v3/jobs/${asyncJobId}`, { headers: auth(MALLORY) })).status, 403);
+  assert.equal((await req(`/v3/jobs/${asyncJobId}`)).status, 401);
+  const mine = await (await req("/v3/jobs", { headers: auth(ALICE) })).json();
+  assert.ok(mine.jobs.some((j) => j.id === asyncJobId));
+  const theirs = await (await req("/v3/jobs", { headers: auth(MALLORY) })).json();
+  assert.equal(theirs.jobs.length, 0);
+});
+
+test("P1: async generation is still gated to internal testers", async () => {
+  const r = await req("/v3/worlds/generate/async", { method: "POST", headers: json(MALLORY), body: JSON.stringify({ prompt: "x" }) });
+  assert.equal(r.status, 403);
+});
+
+test("P1: health reports the async job runner and what it reconciled at boot", async () => {
+  const b = await (await req("/health")).json();
+  assert.equal(b.jobs.async_generation, true);
+  assert.ok(b.jobs.boot_id);
+  assert.equal(typeof b.jobs.interrupted_on_boot, "number");
+});

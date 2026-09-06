@@ -67,10 +67,23 @@ export function createAssemblyRouter(env = process.env) {
       let visualReading = null;
       let conditioning = { conditioned: false, reason: "no reference image was supplied" };
 
+      // Optional progress callback. It reports the lane that ACTUALLY finished
+      // and which provider answered — never a timer.
+      const onLane = typeof req.onLane === "function" ? req.onLane : null;
+      const announce = async (phase, lane, detail) => { if (onLane) await onLane(phase, lane, detail); };
+
       const record = (r) => {
         provenance.push(r.provenance);
         for (const a of r.attempts || []) degraded.push({ lane: r.provenance.lane, provider: a.provider, reason: a.reason });
         return r.value;
+      };
+
+      /** Run a lane with start/finish progress reporting around it. */
+      const runLane = async (laneName, request) => {
+        await announce("start", laneName);
+        const r = await lanes[laneName].run(request);
+        await announce("finish", laneName, `${r.provenance.provider} (${r.provenance.status}) ${r.provenance.latency_ms}ms`);
+        return record(r);
       };
 
       // ---- 0. vision (9.1): read a reference image into a description ----
@@ -78,7 +91,9 @@ export function createAssemblyRouter(env = process.env) {
       let constraints = req.constraints || null;
       if (req.image) {
         validateImage(req.image);                       // throws before a byte is sent
+        await announce("start", VISION_LANE);
         const v = await lanes[VISION_LANE].run({ dataUrl: req.image.dataUrl, prompt });
+        await announce("finish", VISION_LANE, `${v.provenance.provider} (${v.provenance.status})`);
         provenance.push(v.provenance);
         visualReading = v.value;
         conditioning = conditionPrompt(prompt, visualReading);
@@ -88,13 +103,13 @@ export function createAssemblyRouter(env = process.env) {
       }
 
       // ---- 1. world architect ------------------------------------------
-      const plan = record(await lanes[LANES.WORLD_ARCHITECT].run({ prompt: effectivePrompt, seed, style: req.style, constraints }));
+      const plan = await runLane(LANES.WORLD_ARCHITECT, { prompt: effectivePrompt, seed, style: req.style, constraints });
 
       // ---- 2. fast inference: metadata -----------------------------------
-      const meta = record(await lanes[LANES.FAST_INFERENCE].run({ prompt, title: plan.title, zones: plan.zones }));
+      const meta = await runLane(LANES.FAST_INFERENCE, { prompt, title: plan.title, zones: plan.zones });
 
       // ---- 3. spatial: terrain + navigation ------------------------------
-      const spatial = record(await lanes[LANES.SPATIAL].run({ seed, size: plan.size, zones: plan.zones, roads: plan.roads, structures: plan.structures, style: plan.style }));
+      const spatial = await runLane(LANES.SPATIAL, { seed, size: plan.size, zones: plan.zones, roads: plan.roads, structures: plan.structures, style: plan.style });
 
       // ---- 4. assets: one entry per archetype, referenced many times ------
       const assetReq = {
@@ -106,19 +121,20 @@ export function createAssemblyRouter(env = process.env) {
           ...(plan.items || []).map((i) => ({ archetype: i.kind, kindHint: "prop" })),
         ],
       };
-      const assetResult = record(await lanes[LANES.ASSET_3D].run(assetReq));
+      const assetResult = await runLane(LANES.ASSET_3D, assetReq);
 
       // ---- 5. gameplay behaviour -----------------------------------------
-      const gameplay = record(await lanes[LANES.GAMEPLAY].run({
+      const gameplay = await runLane(LANES.GAMEPLAY, {
         seed, genre: meta.genre || plan.genre,
         zones: plan.zones, structures: plan.structures, npcs: plan.npcs, items: plan.items,
-      }));
+      });
 
       // ---- compose ------------------------------------------------------
       const manifest = compose({ req, plan, meta, spatial, assets: assetResult.assets, gameplay, seed, provenance });
 
       // ---- 6. media (optional, never blocking) ---------------------------
       if (req.media) {
+        await announce("start", LANES.MEDIA);
         const m = await lanes[LANES.MEDIA].run({
           kind: "image",
           label: manifest.meta.title,
@@ -126,6 +142,7 @@ export function createAssemblyRouter(env = process.env) {
           width: 1024, height: 576,
         });
         provenance.push(m.provenance);
+        await announce("finish", LANES.MEDIA, `${m.provenance.provider} (${m.provenance.status})`);
         if (m.value?.uri) {
           manifest.assets.push({
             id: "asset_thumbnail",

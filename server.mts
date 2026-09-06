@@ -31,6 +31,7 @@ import { applyDelta, verifyPreservation, emptyLiveState, newDelta } from "./src/
 import { createWorldMemory } from "./src/v3/memory/world-memory.mjs";           // B7: factual world chronology
 import { createCompanionService } from "./src/v3/companion/companion.mjs";      // B5: personal AI companion
 import { createNpcMemory } from "./src/v3/companion/npc-memory.mjs";            // 9.5: NPC memory + procedural quests from RECORDED state
+import { createJobService } from "./src/core/jobs.mjs";                        // P1: asynchronous world generation
 import { createMarketplaceService } from "./src/core/marketplace.mjs";        // B15: marketplace backend, money DARK
 import { createProgressionService } from "./src/core/progression.mjs";        // B15: retention from measured data only
 import { createSocialService } from "./src/core/social.mjs";                    // B15: durable profiles, friends, parties, teams, studios, discovery
@@ -68,6 +69,12 @@ let progression: any = null;                                                 // 
 const social = createSocialService();                                        // B15: replaces the in-memory fixture users
 progression = createProgressionService({ social, worldMemory });
 const market = createMarketplaceService();                                   // B15: prepared, and dark at the schema level
+const jobsvc = createJobService();                                           // P1: async generation
+// A job left "running" by a previous process is marked interrupted here. Without
+// this it would report "running" forever, which the UI would faithfully repeat.
+const BOOT_ID = crypto.randomUUID();
+const bootReconcile = await jobsvc.reconcileOnBoot(BOOT_ID);
+if (bootReconcile.interrupted) console.warn("P1 jobs marked interrupted on boot:", bootReconcile.interrupted);
 const safety = createSafetyService();                                        // A5: real persistence, so moderation output can never be faked
 const repo = createWorldRepository();                                        // A3: replaces the process-local Map + swallowed best-effort insert
 console.log("A3 world store:", repo.kind);
@@ -179,6 +186,7 @@ const server = http.createServer(async (req, res) => {
       social: { profiles: true, friends: true, parties: true, teams: true, studios: true, discovery: true, ...social.describe() },
       safety_persistence: safety.describe(),
       marketplace: market.describe(),
+      jobs: { async_generation: true, boot_id: BOOT_ID, interrupted_on_boot: bootReconcile.interrupted },
       v3: { assembly_router: true, playtest_gate: true, expansion_delta: true, world_memory: true, companion: true, chat_edit: true },
       safety: { age_gating: true, report_block: true, parental_consent: true, media_consent: true, automated_content_moderation: false, minor_onboarding_enabled: false },
       netcode: "ws-separate-service", ts: new Date().toISOString(),
@@ -557,6 +565,93 @@ const server = http.createServer(async (req, res) => {
     if (url === "/v3/providers" && method === "GET") {
       // Honest provider status. Never claims a vendor that is not reachable.
       return send(res, 200, { ok: true, ...(await v3.describe()) });
+    }
+
+    // ---- P1 asynchronous generation -------------------------------------
+    //
+    // A premium-lane generation takes ~147s. Holding the request open times out
+    // behind proxies and tells the creator nothing about which stage is running.
+    if (url === "/v3/worlds/generate/async" && method === "POST") {
+      const me = await mustBeInternalTester(req, cid);
+      await safety.requireCapability(me.id, "create");
+      const b = await readBody(req);
+      if (!b.prompt || typeof b.prompt !== "string") throw Errors.validation("prompt is required", { correlationId: cid });
+
+      const worldId = "w3_" + crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+      const job = await jobsvc.create({
+        kind: "world_generate",
+        principalId: me.id,
+        bootId: BOOT_ID,
+        input: { prompt: b.prompt, world_id: worldId, style: b.style, media: b.media === true, image_data_url: b.image_data_url },
+      });
+
+      jobsvc.run(job.id, BOOT_ID, async (ctx) => {
+        const built = await v3.assemble({
+          prompt: b.prompt, worldId, creatorId: me.id, seed: b.seed, style: b.style,
+          media: b.media === true,
+          image: b.image_data_url ? { dataUrl: b.image_data_url, mime: b.image_mime } : undefined,
+          // Each lane reports the moment it ACTUALLY finishes, with the provider
+          // that answered. Nothing here advances on a timer.
+          onLane: async (phase, lane, detail) => {
+            if (phase === "start") await ctx.startStage(lane, detail);
+            else await ctx.finishStage(lane, detail);
+          },
+        });
+        if (!b.image_data_url) await ctx.skipStage("vision", "no reference image was supplied");
+        if (b.media !== true) await ctx.skipStage("media", "key art was not requested");
+        if (!built.validation.ok) {
+          throw Errors.internal("the assembled world did not satisfy WorldManifestV3", { meta: { errors: built.validation.errors.slice(0, 8) } });
+        }
+
+        await ctx.startStage("playtest");
+        const gate = await playtestAndRepair(built.manifest);
+        await ctx.finishStage("playtest", `${gate.verdict}${gate.repairs.length ? ` after ${gate.repairs.length} repair(s)` : ""}`);
+        if (!gate.passed) {
+          throw Errors.validation("the generated world did not pass the playtest gate and was not saved", {
+            meta: { verdict: gate.verdict, findings: gate.rounds.at(-1).findings.slice(0, 10) },
+          });
+        }
+
+        await ctx.startStage("save");
+        const saved = await repo.upsert({ worldId, ownerId: me.id, manifest: gate.manifest, state: "draft", title: gate.manifest.meta.title });
+        await worldMemory.record(worldId, { kind: "created", summary: `"${gate.manifest.meta.title}" was generated from a prompt`, worldVersion: 1, actorId: me.id, detail: { prompt: b.prompt } });
+        await social.ensureProfile(me);
+        await social.recordWorldCreated(me.id);
+        await ctx.finishStage("save", `world version ${saved.version}`);
+
+        return {
+          world_id: worldId, title: gate.manifest.meta.title, world_version: saved.version,
+          manifest_hash: saved.manifest_hash,
+          counts: {
+            zones: gate.manifest.zones.length, structures: gate.manifest.structures.length,
+            npcs: gate.manifest.npcs.length, items: gate.manifest.items.length,
+            quests: gate.manifest.quests.length, behaviors: gate.manifest.behaviors.length,
+            interactions: gate.manifest.interactions.length, assets: gate.manifest.assets.length,
+          },
+          playtest: { verdict: gate.verdict, repairs: gate.repairs.length },
+          provenance: built.provenance,
+          manifest_url: "/v3/worlds/" + worldId + "/manifest",
+        };
+      });
+
+      // 202: accepted, not finished. The client polls the job.
+      return send(res, 202, { ok: true, job_id: job.id, world_id: worldId, state: job.state, stages: job.stages.map((s: any) => ({ id: s.id, label: s.label, optional: !!s.optional })), poll: "/v3/jobs/" + job.id, correlation_id: cid });
+    }
+
+    if (url === "/v3/jobs" && method === "GET") {
+      const me = await mustBe(req, cid);
+      return send(res, 200, { ok: true, jobs: await jobsvc.listFor(me.id) });
+    }
+    {
+      let mm = url.match(/^\/v3\/jobs\/([^/]+)$/);
+      if (mm && method === "GET") {
+        const me = await mustBe(req, cid);
+        return send(res, 200, { ok: true, job: await jobsvc.get(mm[1], me.id) });
+      }
+      if (mm && method === "DELETE") {
+        const me = await mustBe(req, cid);
+        return send(res, 200, { ok: true, job: await jobsvc.cancel(mm[1], me.id) });
+      }
     }
 
     if (url === "/v3/worlds/generate" && method === "POST") {
