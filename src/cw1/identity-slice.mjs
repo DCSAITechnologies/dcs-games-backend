@@ -87,8 +87,17 @@ export async function handleIdentity(req, res, ctx) {
   if (path==="/subscriptions"&&m==="POST") { send(res,200,{status:"dark",note:"written by CW8 payments; DARK until DK flips",_shadow:true}); return true; }
 
   // verification (P2) → feeds level
-  if (seg[0]==="verify"&&seg[2]==="start"&&m==="POST") { const me=who(req); const r=verifier.issue(me,seg[1]); send(res,r.ok?200:400,r.ok?{ok:true,channel:seg[1],sent:true,_devCode:r._devCode,note:"prod sends via provider; _devCode mock-only"}:r); return true; }
-  if (seg[0]==="verify"&&seg[2]==="confirm"&&m==="POST") { const me=who(req); const b=await body(req); const r=verifier.verify(me,seg[1],b.code); if(!r.ok){send(res,400,r);return true;} const u=db.users.get(me); const before=computeLevel(u); if(seg[1]==="email")u.email_verified=true; if(seg[1]==="phone")u.phone_verified=true; const after=computeLevel(u); u.level_cache=after; send(res,200,{ok:true,channel:seg[1],level_before:before,level_after:after,promoted:before!==after}); return true; }
+  // SECURITY (6 Sep 2026): this route returned the verification code in its own
+  // response body as `_devCode`. Any authenticated user could therefore verify
+  // their own address without receiving anything, and computeLevel treats
+  // email_verified as a TRUST signal that unlocks the `publisher` level and its
+  // publish credits. A verification you can grant yourself is not a
+  // verification. Both routes now refuse and point at the replacement, which
+  // never returns a code in any mode.
+  if (seg[0]==="verify"&&(seg[2]==="start"||seg[2]==="confirm")&&m==="POST") {
+    send(res,410,{ok:false,error:"gone",detail:"this endpoint returned the verification code to the caller and has been removed; use POST /verify/"+seg[1]+"/{start,confirm} on the current service",superseded_by:"/verify/:channel/start"});
+    return true;
+  }
 
   // publish gate (M-P3) + portable identity (P9) + invite
   if (path==="/publish/check"&&m==="POST") { const me=who(req); const u=db.users.get(me); const level=computeLevel(u); send(res,200,{...canPublish({level,dcs_plus:u.dcs_plus,published_count:u.published_count}),level,credits:publishCredits({level,dcs_plus:u.dcs_plus})}); return true; }

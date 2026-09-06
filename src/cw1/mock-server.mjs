@@ -1,3 +1,12 @@
+// ############################################################################
+// DEVELOPMENT MOCK ONLY -- NEVER DEPLOY OR EXPOSE THIS.
+//
+// It returns verification codes in its own responses (`_devCode`), serves seeded
+// fixture users, and has no authentication. It is NOT imported by server.mts and
+// is not an npm script; it exists so contract consumers can build against the
+// shapes. It refuses to start unless NODE_ENV is development or
+// DCS_ALLOW_MOCK_SERVER=1 is set explicitly.
+// ############################################################################
 // CW1 Identity — runnable mock server. node src/mock-server.mjs  (default port 8787)
 // Implements every C4 contract from CW1_IDENTITY_FULL.md so CW3/CW6/CW7 build Day-one.
 // In-memory store, zero deps. The production service implements the same shapes against Supabase.
@@ -246,6 +255,13 @@ const server = createServer(async (req, res) => {
 
 const PORT = process.env.PORT || 8787;
 if (process.argv[1] && process.argv[1].endsWith("mock-server.mjs")) {
+
+// Refuse to run anywhere that is not explicitly a development machine.
+if (process.env.NODE_ENV === "production" || (process.env.NODE_ENV && process.env.NODE_ENV !== "development" && process.env.DCS_ALLOW_MOCK_SERVER !== "1")) {
+  console.error("REFUSING TO START: mock-server.mjs is a development fixture that returns verification codes and serves seeded users. Set DCS_ALLOW_MOCK_SERVER=1 if you really mean it.");
+  process.exit(78);
+}
+
   server.listen(PORT, () => console.log("CW1 identity mock on :" + PORT));
 }
 export { server, db };

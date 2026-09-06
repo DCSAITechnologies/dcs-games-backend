@@ -126,6 +126,22 @@ export function createSocialService(env = process.env) {
       return await principals.update((p) => p.principal_id === principal.id, (p) => ({ ...p, ...changes, updated_at: new Date().toISOString() }));
     },
 
+    /**
+     * Record a verification signal. A DEV-MODE verification is stored separately
+     * and never counts towards the trust signals computeLevel reads: nobody
+     * received anything, so it is not evidence of address ownership.
+     */
+    async setVerification(principalId, channel, isVerified, devMode = false) {
+      await svc.ensureProfile({ id: principalId });
+      const field = channel === "email" ? "email_verified" : "phone_verified";
+      return await principals.update((p) => p.principal_id === principalId, (p) => ({
+        ...p,
+        [field]: isVerified && !devMode,
+        [`${field}_dev_mode`]: isVerified && devMode ? true : false,
+        updated_at: new Date().toISOString(),
+      }));
+    },
+
     async publicProfile(username) {
       const p = await principals.one((x) => x.username === String(username).toLowerCase());
       if (!p) throw Errors.notFound(`profile ${username}`);

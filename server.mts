@@ -31,6 +31,7 @@ import { applyDelta, verifyPreservation, emptyLiveState, newDelta } from "./src/
 import { createWorldMemory } from "./src/v3/memory/world-memory.mjs";           // B7: factual world chronology
 import { createCompanionService } from "./src/v3/companion/companion.mjs";      // B5: personal AI companion
 import { createNpcMemory } from "./src/v3/companion/npc-memory.mjs";            // 9.5: NPC memory + procedural quests from RECORDED state
+import { createVerificationService } from "./src/core/verification.mjs";       // P2: email/phone verification with a real provider seam
 import { createJobService } from "./src/core/jobs.mjs";                        // P1: asynchronous world generation
 import { createMarketplaceService } from "./src/core/marketplace.mjs";        // B15: marketplace backend, money DARK
 import { createProgressionService } from "./src/core/progression.mjs";        // B15: retention from measured data only
@@ -69,6 +70,7 @@ let progression: any = null;                                                 // 
 const social = createSocialService();                                        // B15: replaces the in-memory fixture users
 progression = createProgressionService({ social, worldMemory });
 const market = createMarketplaceService();                                   // B15: prepared, and dark at the schema level
+const verification = createVerificationService();                            // P2
 const jobsvc = createJobService();                                           // P1: async generation
 // A job left "running" by a previous process is marked interrupted here. Without
 // this it would report "running" forever, which the UI would faithfully repeat.
@@ -185,6 +187,7 @@ const server = http.createServer(async (req, res) => {
       manifest_version: MANIFEST_VERSION,
       social: { profiles: true, friends: true, parties: true, teams: true, studios: true, discovery: true, ...social.describe() },
       safety_persistence: safety.describe(),
+      verification: verification.describe(),
       marketplace: market.describe(),
       jobs: { async_generation: true, boot_id: BOOT_ID, interrupted_on_boot: bootReconcile.interrupted },
       v3: { assembly_router: true, playtest_gate: true, expansion_delta: true, world_memory: true, companion: true, chat_edit: true },
@@ -390,6 +393,39 @@ const server = http.createServer(async (req, res) => {
       // A public, checkable statement that no money exists anywhere in here.
       const r = await market.assertDark();
       return send(res, r.dark ? 200 : 500, { ok: r.dark, ...r, payments_live: PAYMENTS_LIVE });
+    }
+
+    // ---- P2 verification. The code is never returned, in any mode. --------
+    if (url === "/verify/status" && method === "GET") {
+      const me = await mustBe(req, cid);
+      return send(res, 200, { ok: true, ...(await verification.statusFor(me.id)), providers: verification.describe() });
+    }
+    {
+      let mm = url.match(/^\/verify\/([^/]+)\/start$/);
+      if (mm && method === "POST") {
+        const me = await mustBe(req, cid);
+        const b = await readBody(req);
+        const dest = b.destination || (mm[1] === "email" ? me.email : null);
+        if (!dest) throw Errors.validation(`a ${mm[1]} destination is required`, { correlationId: cid });
+        return send(res, 200, { ok: true, ...(await verification.start(me.id, mm[1], dest)), correlation_id: cid });
+      }
+      mm = url.match(/^\/verify\/([^/]+)\/confirm$/);
+      if (mm && method === "POST") {
+        const me = await mustBe(req, cid);
+        const b = await readBody(req);
+        const r = await verification.confirm(me.id, mm[1], b.code);
+        // Verification changes a trust signal, so the recomputed level is
+        // returned with it and the profile picks it up on the next read.
+        await social.setVerification(me.id, mm[1], true, r.dev_mode);
+        return send(res, 200, { ok: true, ...r, profile: await social.me(me), correlation_id: cid });
+      }
+      mm = url.match(/^\/verify\/([^/]+)$/);
+      if (mm && method === "DELETE") {
+        const me = await mustBe(req, cid);
+        const r = await verification.revoke(me.id, mm[1]);
+        await social.setVerification(me.id, mm[1], false, false);
+        return send(res, 200, { ok: true, ...r });
+      }
     }
 
     // ---- B15 retention and the creator dashboard, from measured data only ----
