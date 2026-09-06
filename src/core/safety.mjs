@@ -7,11 +7,10 @@
 //
 // Reuses the moderation state machine already built in src/cw1/trust-safety.mjs
 // rather than writing a second one.
-import fs from "node:fs";
-import fsp from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
 import { Errors } from "./errors.mjs";
+import { createCollection, describeCollections } from "./collection.mjs";
 import { applyModeration, REPORT_STATES, MOD_ACTIONS } from "../cw1/trust-safety.mjs";
 
 export const AGE_TIERS = ["unknown", "under13", "13_15", "16_17", "adult"];
@@ -59,64 +58,27 @@ export function capabilitiesFor(tier, { internalTestingWindow = true } = {}) {
   }
 }
 
-// ------------------------------------------------------------------- storage
-
-class JsonCollection {
-  constructor(dir, name) {
-    this.file = path.join(dir, name + ".json");
-    fs.mkdirSync(dir, { recursive: true });
-  }
-  async _read() {
-    try { return JSON.parse(await fsp.readFile(this.file, "utf8")); }
-    catch (e) { if (e.code === "ENOENT") return []; throw e; }
-  }
-  async _write(rows) {
-    const tmp = this.file + ".tmp-" + crypto.randomBytes(4).toString("hex");
-    await fsp.writeFile(tmp, JSON.stringify(rows));
-    await fsp.rename(tmp, this.file);
-  }
-  async all() { return await this._read(); }
-  async insert(row) {
-    const rows = await this._read();
-    rows.push(row);
-    await this._write(rows);
-    return row;
-  }
-  async update(pred, mut) {
-    const rows = await this._read();
-    const i = rows.findIndex(pred);
-    if (i < 0) return null;
-    rows[i] = mut(rows[i]);
-    await this._write(rows);
-    return rows[i];
-  }
-  async upsert(pred, row) {
-    const rows = await this._read();
-    const i = rows.findIndex(pred);
-    if (i >= 0) rows[i] = { ...rows[i], ...row };
-    else rows.push(row);
-    await this._write(rows);
-    return row;
-  }
-  async find(pred) { return (await this._read()).filter(pred); }
-  async one(pred) { return (await this._read()).find(pred) || null; }
-}
-
 // -------------------------------------------------------------------- service
 
 export function createSafetyService(env = process.env) {
   const dir = path.join(env.DCS_DATA_DIR || path.join(process.cwd(), ".dcs-data"), "safety");
-  const ages = new JsonCollection(dir, "age_assurance");
-  const consents = new JsonCollection(dir, "parental_consent");
-  const reports = new JsonCollection(dir, "reports");
-  const blocks = new JsonCollection(dir, "blocks");
-  const actions = new JsonCollection(dir, "moderation_actions");
-  const media = new JsonCollection(dir, "media_consent");
+  // Supabase primary when configured, atomic local file always. A safety record
+  // that only survives until the next redeploy is not a safety record.
+  const mk = (name, table, primaryKey) => createCollection({ dir, name, table, primaryKey, env });
+  const ages = mk("age_assurance", "dcsgames_age_assurance", ["principal_id"]);
+  const consents = mk("parental_consent", "dcsgames_parental_consent", ["id"]);
+  const reports = mk("reports", "dcsgames_reports", ["id"]);
+  const blocks = mk("blocks", "dcsgames_blocks", ["blocker_id", "blocked_id"]);
+  const actions = mk("moderation_actions", "dcsgames_moderation_actions", ["id"]);
+  const media = mk("media_consent", "dcsgames_media_consent", ["id"]);
+  const collections = { ages, consents, reports, blocks, actions, media };
 
   const id = () => crypto.randomUUID();
 
   return {
     dir,
+    /** Where this service is actually persisting, and whether it is degraded. */
+    describe: () => describeCollections(collections),
 
     // ------------------------------------------------------------ age gating
     /**
@@ -267,7 +229,7 @@ export function createSafetyService(env = process.env) {
     },
     async unblock(blockerId, blockedId) {
       const rows = (await blocks.all()).filter((b) => !(b.blocker_id === blockerId && b.blocked_id === blockedId));
-      await blocks._write(rows);
+      await blocks.write(rows);
       return { blocked: false };
     },
     async isBlocked(a, b) {

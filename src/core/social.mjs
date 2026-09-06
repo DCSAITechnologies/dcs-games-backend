@@ -12,68 +12,39 @@
 // restart. Money stays dark: a studio may record a revenue split, and that split
 // never settles anything.
 import crypto from "node:crypto";
-import fs from "node:fs";
-import fsp from "node:fs/promises";
 import path from "node:path";
 import { Errors } from "./errors.mjs";
+import { createCollection, describeCollections } from "./collection.mjs";
 import { computeLevel, publishCredits, canPublish } from "../cw1/identity-core.mjs";
 
 const FRIEND_STATES = ["requested", "accepted", "blocked"];
 const TEAM_ROLES = ["owner", "admin", "member"];
 const STUDIO_ROLES = ["owner", "admin", "creator", "member"];
 
-/** Durable JSON table with atomic writes. */
-class Table {
-  constructor(dir, name) {
-    fs.mkdirSync(dir, { recursive: true });
-    this.file = path.join(dir, name + ".json");
-  }
-  async all() {
-    try { return JSON.parse(await fsp.readFile(this.file, "utf8")); }
-    catch (e) { if (e.code === "ENOENT") return []; throw e; }
-  }
-  async write(rows) {
-    const tmp = this.file + ".tmp-" + crypto.randomBytes(4).toString("hex");
-    await fsp.writeFile(tmp, JSON.stringify(rows));
-    await fsp.rename(tmp, this.file);
-    return rows;
-  }
-  async find(pred) { return (await this.all()).filter(pred); }
-  async one(pred) { return (await this.all()).find(pred) || null; }
-  async insert(row) { const rows = await this.all(); rows.push(row); await this.write(rows); return row; }
-  async update(pred, mut) {
-    const rows = await this.all();
-    const i = rows.findIndex(pred);
-    if (i < 0) return null;
-    rows[i] = mut(rows[i]);
-    await this.write(rows);
-    return rows[i];
-  }
-  async remove(pred) {
-    const rows = await this.all();
-    const kept = rows.filter((r) => !pred(r));
-    await this.write(kept);
-    return rows.length - kept.length;
-  }
-}
-
 const id = (p) => p + "_" + crypto.randomBytes(6).toString("hex");
 
 export function createSocialService(env = process.env) {
   const dir = path.join(env.DCS_DATA_DIR || path.join(process.cwd(), ".dcs-data"), "social");
-  const principals = new Table(dir, "principals");
-  const friends = new Table(dir, "friends");           // user_id / friend_id — the canonical columns
-  const parties = new Table(dir, "parties");
-  const partyMembers = new Table(dir, "party_members");
-  const teams = new Table(dir, "teams");
-  const teamMembers = new Table(dir, "team_members");
-  const studios = new Table(dir, "studios");
-  const studioMembers = new Table(dir, "studio_members");
-  const plays = new Table(dir, "world_plays");
-  const ratings = new Table(dir, "world_ratings");
+  // Supabase primary when configured, atomic local file always. Without this the
+  // data survived a restart but not a redeploy, because a container disk is
+  // ephemeral unless a volume is mounted.
+  const mk = (name, table, primaryKey) => createCollection({ dir, name, table, primaryKey, env });
+  const principals = mk("principals", "dcsgames_principals", ["principal_id"]);
+  const friends = mk("friends", "dcsgames_principal_friends", ["user_id", "friend_id"]);   // the canonical columns
+  const parties = mk("parties", "dcsgames_parties", ["id"]);
+  const partyMembers = mk("party_members", "dcsgames_party_members", ["party_id", "member_id"]);
+  const teams = mk("teams", "dcsgames_teams", ["id"]);
+  const teamMembers = mk("team_members", "dcsgames_team_members", ["team_id", "member_id"]);
+  const studios = mk("studios", "dcsgames_studios", ["id"]);
+  const studioMembers = mk("studio_members", "dcsgames_studio_members", ["studio_id", "member_id"]);
+  const plays = mk("world_plays", "dcsgames_world_plays", ["id"]);
+  const ratings = mk("world_ratings", "dcsgames_world_ratings", ["world_id", "principal_id"]);
+  const collections = { principals, friends, parties, partyMembers, teams, teamMembers, studios, studioMembers, plays, ratings };
 
   const svc = {
     dir,
+    /** Where this service is actually persisting, and whether it is degraded. */
+    describe: () => describeCollections(collections),
 
     // ================================================================ profile
     /** Create the profile row on first sight. Idempotent. */
