@@ -26,9 +26,10 @@ import { ensureV3 } from "./src/v3/manifest/migrate.mjs";                       
 import { playtestAndRepair } from "./src/v3/playtest/agent.mjs";                // B4: playtest -> critic -> repair
 import { planExpansion, planEdit } from "./src/v3/expansion/planner.mjs";       // B6/B8: expansion + chat editing
 import { forkWorld, attributionChain, forkPolicyOf, FORK_POLICIES } from "./src/v3/expansion/fork.mjs"; // remix/fork with provenance
-import { applyDelta, verifyPreservation, emptyLiveState } from "./src/v3/expansion/delta.mjs";
+import { applyDelta, verifyPreservation, emptyLiveState, newDelta } from "./src/v3/expansion/delta.mjs";
 import { createWorldMemory } from "./src/v3/memory/world-memory.mjs";           // B7: factual world chronology
 import { createCompanionService } from "./src/v3/companion/companion.mjs";      // B5: personal AI companion
+import { createNpcMemory } from "./src/v3/companion/npc-memory.mjs";            // 9.5: NPC memory + procedural quests from RECORDED state
 import { createMarketplaceService } from "./src/core/marketplace.mjs";        // B15: marketplace backend, money DARK
 import { createProgressionService } from "./src/core/progression.mjs";        // B15: retention from measured data only
 import { createSocialService } from "./src/core/social.mjs";                    // B15: durable profiles, friends, parties, teams, studios, discovery
@@ -61,6 +62,7 @@ const econRouter: any = createEconomyRouter({}); // CW6 v3.0: DARK; supabase + s
 const v3 = createAssemblyRouter();                                           // B1
 const worldMemory = createWorldMemory();                                     // B7
 const companions = createCompanionService({ worldMemory });                  // B5
+const npcMemory = createNpcMemory({ worldMemory });                          // 9.5
 let progression: any = null;                                                 // B15, constructed after social below
 const social = createSocialService();                                        // B15: replaces the in-memory fixture users
 progression = createProgressionService({ social, worldMemory });
@@ -780,6 +782,39 @@ const server = http.createServer(async (req, res) => {
         const rec = await repo.get(mm[1], { requesterId: principal?.id ?? null });
         const { manifest } = ensureV3(rec.manifest, { worldVersion: rec.version, creatorId: rec.owner_id });
         return send(res, 200, { ok: true, world_id: rec.world_id, fork_policy: forkPolicyOf(manifest), policies: FORK_POLICIES, ...attributionChain(manifest) });
+      }
+
+      // ---- 9.5 NPC memory: only what was actually recorded --------------
+      mm = url.match(/^\/v3\/worlds\/([^/]+)\/npcs\/([^/]+)\/memory$/);
+      if (mm && method === "GET") {
+        const rec = await repo.get(mm[1], { requesterId: principal?.id ?? null });
+        const { manifest } = ensureV3(rec.manifest, { worldVersion: rec.version, creatorId: rec.owner_id });
+        return send(res, 200, { ok: true, ...(await npcMemory.linesFor(rec.world_id, mm[2], manifest)) });
+      }
+
+      mm = url.match(/^\/v3\/worlds\/([^/]+)\/quests\/generate$/);
+      if (mm && method === "POST") {
+        const me = await mustBeInternalTester(req, cid);
+        const b = await readBody(req);
+        const rec = await repo.get(mm[1], { requesterId: me.id, requireOwner: true });
+        const { manifest } = ensureV3(rec.manifest, { worldVersion: rec.version, creatorId: rec.owner_id });
+        const gen = await npcMemory.proceduralQuest(rec.world_id, manifest, { giverNpcId: b.giver_npc_id, seed: b.seed });
+
+        if (b.apply === true) {
+          // Applying it goes through the SAME delta path as any other change, so
+          // the playtest gate still decides whether it ships.
+          const delta = newDelta({ label: gen.quest.title, author: me.id, reason: "procedural quest" });
+          delta.add.quests.push(gen.quest);
+          const applied = applyDelta(manifest, delta, emptyLiveState());
+          const gate = await playtestAndRepair(applied.manifest);
+          if (!gate.passed) {
+            return send(res, 422, { ok: false, error: "quest_failed_playtest", detail: "the generated quest did not pass the playtest gate and was not saved", verdict: gate.verdict, quest: gen.quest, correlation_id: cid });
+          }
+          const saved = await repo.upsert({ worldId: rec.world_id, ownerId: me.id, manifest: gate.manifest, state: rec.state, title: gate.manifest.meta.title });
+          await worldMemory.record(rec.world_id, { kind: "edited", summary: `a quest was added: ${gen.quest.title}`, worldVersion: gate.manifest.world_version, actorId: me.id });
+          return send(res, 200, { ok: true, applied: true, ...gen, world_version: gate.manifest.world_version, record_version: saved.version, playtest: gate.verdict, correlation_id: cid });
+        }
+        return send(res, 200, { ok: true, applied: false, ...gen, correlation_id: cid });
       }
 
       mm = url.match(/^\/v3\/worlds\/([^/]+)\/memory$/);
