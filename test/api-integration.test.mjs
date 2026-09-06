@@ -812,3 +812,16 @@ test("B6 GATE: another creator cannot roll back your world", async () => {
   });
   assert.equal(r.status, 403, await r.text());
 });
+
+test("a world made through the v3 stack is loadable by the CW5 runtime", async () => {
+  // GET /worlds/:id/load answered 500 "base world not found" for every world
+  // made via POST /v3/worlds/generate, because only the legacy generate route
+  // registered a base world with the persistence engine. Found incidentally by
+  // a load pass, and fixed by the same registration that made player ownership
+  // checkable for v3 worlds — so it is pinned here rather than left to chance.
+  const r = await req(`/worlds/${rollbackWorldId}/load`, { headers: auth(ALICE) });
+  const b = await r.json();
+  assert.equal(r.status, 200, `a v3 world must be loadable: ${JSON.stringify(b).slice(0, 300)}`);
+  assert.equal(b.world_id, rollbackWorldId);
+  assert.ok(b.manifest, "the loaded world carries its manifest");
+});
