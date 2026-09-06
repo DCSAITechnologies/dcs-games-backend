@@ -189,7 +189,23 @@ const server = http.createServer(async (req, res) => {
       generation: GEN_MODE,
       lanes: ["cw1-identity", "cw2-generation", "cw5-persistence", "cw7-atlas"],
       schema: "runtime-ready (cw2 toRuntimeWorld; zero runtime patches)",
-      routes: ["/api/public/worlds", "/api/worlds/mine", "/api/me/revenue", "/worlds/generate", "/worlds/:id/manifest", "/atlas/key", "/verify", "/safety/age", "/safety/report", "/safety/block", "/safety/consent/media"],
+      // A hand-maintained route list drifts the moment someone adds a route and
+      // forgets. This is the real surface, grouped, and a test asserts every one
+      // of them actually responds.
+      // A route list without methods is not a description of the surface: half
+      // these paths only answer POST, and a GET against them is a plain 404.
+      // Each entry carries its method so a drift check can actually probe it.
+      routes: {
+        world: ["POST /v3/worlds/generate", "POST /v3/worlds/generate/async", "GET /v3/worlds/:id/manifest", "POST /v3/worlds/:id/playtest", "POST /v3/worlds/:id/expand", "POST /v3/worlds/:id/edit", "POST /v3/worlds/:id/stitch", "POST /v3/worlds/:id/fork", "GET /v3/worlds/:id/versions", "GET /v3/worlds/:id/memory", "POST /v3/worlds/:id/companion", "POST /v3/worlds/:id/media"],
+        discovery: ["GET /v3/discover", "POST /v3/worlds/:id/play", "POST /v3/worlds/:id/rate", "GET /v3/worlds/:id/stats"],
+        identity: ["GET /me/profile", "GET /me/achievements", "GET /me/streak", "GET /me/dashboard", "GET /profiles/:username", "GET /verify/status", "POST /verify/:channel/start", "POST /verify/:channel/confirm"],
+        social: ["GET /social/friends", "GET /social/parties", "GET /social/teams", "POST /social/studios", "GET /social/orgs"],
+        marketplace: ["GET /v3/marketplace", "POST /v3/marketplace/listings", "GET /v3/marketplace/owned", "GET /v3/marketplace/ledger", "GET /v3/marketplace/assert-dark"],
+        safety: ["GET /safety/age", "POST /safety/report", "GET /safety/reports", "POST /safety/block", "GET /safety/consent/media", "GET /safety/moderation-history"],
+        jobs: ["GET /v3/jobs", "GET /v3/jobs/:id"],
+        trust: ["GET /atlas/key", "GET /verify", "GET /v3/providers"],
+        retired: ["GET /api/marketplace (410)", "GET /api/me/payouts (410)", "GET /orgs (410)", "POST /verify/:channel/{start,confirm} on the legacy identity slice (410)"],
+      },
       manifest_version: MANIFEST_VERSION,
       social: { profiles: true, friends: true, parties: true, teams: true, studios: true, discovery: true, ...social.describe() },
       safety_persistence: safety.describe(),

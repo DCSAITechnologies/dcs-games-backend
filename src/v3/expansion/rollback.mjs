@@ -23,6 +23,7 @@
 import crypto from "node:crypto";
 import { COLLECTIONS, deltaHash, emptyLiveState, verifyPreservation } from "./delta.mjs";
 import { diffManifests } from "./diff.mjs";
+import { manifestHash } from "../../core/worldstore.mjs";
 import { Errors } from "../../core/errors.mjs";
 
 /** How live state can hold on to an entity, and how to say so to a creator. */
@@ -166,6 +167,11 @@ export function planRollback(currentManifest, targetManifest, { actorId, toVersi
     from_version: fromVersion,
     to_version: toV,
     kind: "rollback",
+    // The hashes identify the exact retained versions this rollback moved
+    // between, so a caller can prove afterwards that it restored the snapshot it
+    // meant to and not a different one that happened to carry the same number.
+    from_manifest_hash: manifestHash(current),
+    to_manifest_hash: manifestHash(target),
     label: label || `rollback to v${toV}`,
     delta_id: "rollback_" + crypto.randomBytes(8).toString("hex"),
     delta_hash: deltaHash({ kind: "rollback", world_id: current.world_id, from_version: fromVersion, to_version: toV }),
@@ -183,7 +189,9 @@ export function planRollback(currentManifest, targetManifest, { actorId, toVersi
   next.expansion = {
     ...expansion,
     compatibility: expansion.compatibility || { min_runtime: "3.0.0", migrated_from: null },
-    history: [...historyNow.map((h) => structuredClone(h)), record],
+    // The chronology holds its own copy of every entry, the new one included, so
+    // nothing a caller does with the returned record can edit the record.
+    history: [...historyNow.map((h) => structuredClone(h)), structuredClone(record)],
   };
 
   // The chronicle of what produced this world is append-only too: the providers
@@ -221,6 +229,8 @@ export function rollbackHistoryOf(manifest) {
       version: h.version,
       from_version: h.from_version,
       to_version: h.to_version,
+      from_manifest_hash: h.from_manifest_hash ?? null,
+      to_manifest_hash: h.to_manifest_hash ?? null,
       label: h.label,
       author: h.author ?? null,
       reason: h.reason ?? null,

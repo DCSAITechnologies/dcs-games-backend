@@ -60,15 +60,42 @@ function load() {
   }
 }
 
+/**
+ * Every signed field, and the unsigned spellings that may stand in for it.
+ *
+ * A receipt is signed over five fields, but callers historically wrote some of
+ * them under other names (`world_id` for `subject_id`, `builder_id` for
+ * `attested_by`, `action` for `attestation`). Each alias is a place where a
+ * signer and a reader can disagree about what the receipt says — and every such
+ * disagreement is a forgery primitive. They are enumerated ONCE, here, so that
+ * resolution, conflict detection and display cannot drift apart again.
+ */
+export const SIGNED_FIELDS = {
+  attestation:  { aliases: ["action"],      fallback: "create" },
+  attested_by:  { aliases: ["builder_id"],  fallback: null },
+  prev_hash:    { aliases: [],              fallback: null },
+  subject_type: { aliases: [],              fallback: "world" },
+  subject_id:   { aliases: ["world_id", "asset_id"], fallback: null },
+};
+
+/**
+ * The exact object that gets signed. This is the ONE reading of a receipt:
+ * anything that signs, verifies, hashes or DISPLAYS one must go through here,
+ * so that what a viewer is shown is by construction what the key attested.
+ */
+export function signedFields(r) {
+  const out = {};
+  for (const [name, { aliases, fallback }] of Object.entries(SIGNED_FIELDS)) {
+    let v = r?.[name];
+    for (const a of aliases) { if (v == null) v = r?.[a]; }
+    out[name] = v ?? fallback;
+  }
+  return out;
+}
+
 // canonical signed body (sorted keys) from a receipt-or-body object
 export function canonicalBody(r) {
-  const b = {
-    attestation:  r.attestation ?? r.action ?? "create",
-    attested_by:  r.attested_by ?? r.builder_id ?? null,
-    prev_hash:    r.prev_hash ?? null,
-    subject_type: r.subject_type ?? "world",
-    subject_id:   canonicalSubjectId(r),
-  };
+  const b = signedFields(r);
   return JSON.stringify(b, Object.keys(b).sort());
 }
 
@@ -93,7 +120,7 @@ export function signReceipt(body) {
  * DISPLAYED as a verified receipt for B. Two canonicalisations is one too many.
  */
 export function canonicalSubjectId(r) {
-  return r?.subject_id ?? r?.world_id ?? null;
+  return signedFields(r).subject_id;
 }
 
 /**
@@ -102,7 +129,13 @@ export function canonicalSubjectId(r) {
  */
 export function hasConflictingAlias(receipt) {
   if (!receipt) return false;
-  if (receipt.world_id != null && receipt.subject_id != null && String(receipt.world_id) !== String(receipt.subject_id)) return true;
+  for (const [name, { aliases }] of Object.entries(SIGNED_FIELDS)) {
+    const canonical = receipt[name];
+    if (canonical == null) continue;
+    for (const a of aliases) {
+      if (receipt[a] != null && String(receipt[a]) !== String(canonical)) return true;
+    }
+  }
   return false;
 }
 
@@ -112,6 +145,10 @@ export function verifyReceipt(receipt) {
   // An unsigned alias that contradicts the signed subject is a forgery attempt,
   // even though the signature over the canonical body is intact.
   if (hasConflictingAlias(receipt)) return false;
+  // receipt_hash is derivable from the signed body, so a value that disagrees
+  // with it is either corruption or a forged identifier. It is the field a
+  // third party cross-references, so it must not be free to be anything.
+  if (receipt.receipt_hash != null && String(receipt.receipt_hash) !== receiptHash(receipt)) return false;
   try { return crypto.verify(null, Buffer.from(canonicalBody(receipt), "utf8"), _pub, Buffer.from(receipt.sig, "base64")); }
   catch (e) { return false; }
 }

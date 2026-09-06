@@ -5,7 +5,7 @@
 // "trusted"; history shows real events only, nothing fabricated.
 
 import { computeWorldReputation, computeBuilderScore, filterGamedEvents } from './atlas-trust.mjs';
-import { canonicalSubjectId } from './atlas-local-sign.mjs';
+import { signedFields, receiptHash } from './atlas-local-sign.mjs';
 
 // ---- (a) Public receipt verify view ----
 // Given a receipt (+ injected verify), return a public, human-readable verification result.
@@ -21,16 +21,25 @@ export function publicVerifyReceipt(receipt, deps = {}) {
     status: valid ? 'VERIFIED' : 'INVALID',
     reason: valid ? 'signature verified against the Atlas public key' : 'signature did not verify',
     // public, non-sensitive fields only — what the receipt attests:
-    receipt: {
-      subject_type: receipt.subject_type ?? 'world',
-      // Shared canonicalisation: identical precedence to the signer. Resolving
-      // this differently is what let a receipt display a world it was not signed for.
-      subject_id: canonicalSubjectId(receipt),
-      attested_by: receipt.builder_id ?? receipt.attested_by,
-      action: receipt.action ?? receipt.attestation,
-      receipt_hash: receipt.receipt_hash ?? receipt.receipt_id ?? null,
-      ts: receipt.ts ?? null,
-    },
+    // Displayed straight from the SIGNED body, never from the raw receipt. A
+    // viewer must be shown what the key attested, not what the document claims:
+    // reading an unsigned alias here is what let a receipt display a world, a
+    // creator and an action it was never signed for.
+    receipt: (() => {
+      const b = signedFields(receipt);
+      return {
+        subject_type: b.subject_type,
+        subject_id: b.subject_id,
+        attested_by: b.attested_by,
+        action: b.attestation,
+        // Recomputed, not echoed, so the identifier a third party cross-references
+        // is the one the signature actually covers.
+        receipt_hash: valid ? receiptHash(receipt) : null,
+        // Outside the signed body by design, so it is never presented as attested.
+        ts: receipt.ts ?? null,
+        ts_signed: false,
+      };
+    })(),
     // a verifier can independently re-check via GET /api/atlas/key + the canonical body
     independently_verifiable: true,
   };

@@ -472,3 +472,53 @@ test("retained world versions are queryable, and are what a rollback would targe
   assert.ok(first.manifest, "the retained manifest itself is available");
   assert.equal((await req(`/v3/worlds/${generatedId}/versions/999`, { headers: auth(ALICE) })).status, 404);
 });
+
+test("INTEGRATION: every route health advertises actually responds", async () => {
+  // A hand-maintained route list drifts the moment someone adds a route and
+  // forgets. This walks what /health claims and proves each one is real: a 404
+  // means the surface and the advertisement have diverged.
+  const h = await (await req("/health")).json();
+  const groups = Object.entries(h.routes).filter(([g]) => g !== "retired");
+  const missing = [];
+
+  for (const [group, entries] of groups) {
+    for (const entry of entries) {
+      const [method, p] = entry.split(" ");
+      const concrete = p
+        .replace(":id", generatedId)
+        .replace(":username", "alice")
+        .replace(":channel", "email");
+      const r = await req(concrete, {
+        method,
+        headers: method === "POST" ? json(ALICE) : auth(ALICE),
+        body: method === "POST" ? "{}" : undefined,
+      });
+      // A handler that answers "no such job" for a made-up id HAS been reached;
+      // only the router's catch-all means the advertisement is a lie. The two
+      // are told apart by the catch-all's `path` field, which no handler sets.
+      if (r.status === 405) missing.push(`${group}: ${entry} -> 405`);
+      else if (r.status === 404) {
+        const b = await r.json().catch(() => ({}));
+        if (b.path) missing.push(`${group}: ${entry} -> router catch-all 404`);
+      }
+    }
+  }
+  assert.deepEqual(missing, [], "health advertises routes that do not exist");
+});
+
+test("INTEGRATION: every retired route really is retired", async () => {
+  for (const path of ["/api/marketplace", "/api/me/payouts"]) {
+    assert.equal((await req(path, { headers: auth(ALICE) })).status, 410, `${path} should be 410`);
+  }
+});
+
+test("INTEGRATION: health never leaks a secret or a credential", async () => {
+  const raw = await (await req("/health")).text();
+  for (const pattern of [/eyJ[A-Za-z0-9_-]{20,}\./, /csk-[A-Za-z0-9]{10,}/, /sk-[A-Za-z0-9]{10,}/, /tgp_v1_/, /SERVICE_ROLE/]) {
+    assert.ok(!pattern.test(raw), `health output matches ${pattern}`);
+  }
+  // It should describe capabilities, not configuration values.
+  const h = JSON.parse(raw);
+  assert.equal(h.payments_live, false);
+  assert.equal(h.auth_header_fallback_removed, true);
+});

@@ -8,7 +8,7 @@
     "start": "tsx server.mts",
     "dev": "tsx server.mts",
     "test": "npm run test:unit && npm run test:api && npm run test:browser && npm run test:e2e",
-    "test:unit": "node --test test/auth-principal.test.mjs test/world-persistence.test.mjs test/safety.test.mjs test/schema-migrations.test.mjs test/manifest-v3.test.mjs test/assembly-router.test.mjs test/playtest.test.mjs test/evolution.test.mjs test/social-discovery.test.mjs test/collection.test.mjs test/progression.test.mjs test/marketplace.test.mjs test/fork.test.mjs test/npc-memory.test.mjs test/vision.test.mjs test/stitch.test.mjs test/jobs.test.mjs test/verification.test.mjs",
+    "test:unit": "node --test test/auth-principal.test.mjs test/world-persistence.test.mjs test/safety.test.mjs test/schema-migrations.test.mjs test/manifest-v3.test.mjs test/assembly-router.test.mjs test/playtest.test.mjs test/evolution.test.mjs test/social-discovery.test.mjs test/collection.test.mjs test/progression.test.mjs test/marketplace.test.mjs test/fork.test.mjs test/npc-memory.test.mjs test/vision.test.mjs test/stitch.test.mjs test/jobs.test.mjs test/verification.test.mjs test/world-rollback.test.mjs test/world-diff.test.mjs test/subscriptions.test.mjs test/atlas-provenance.test.mjs test/security-regression.test.mjs",
     "test:api": "node --import tsx --test test/api-integration.test.mjs",
     "test:browser": "node --test --test-concurrency=1 test/frontend-truth.test.mjs test/runtime-v3.test.mjs",
     "test:ci": "npm run test:unit && npm run test:api",
@@ -18,7 +18,8 @@
     "secret-scan": "node scripts/secret-scan.mjs . ../../dcs-games-LIVE",
     "release-manifest": "node scripts/release-manifest.mjs",
     "providers": "node tools/live-provider-check.mjs",
-    "test:e2e": "node --import tsx --test --test-concurrency=1 test/flagship-e2e.test.mjs"
+    "test:e2e": "node --import tsx --test --test-concurrency=1 test/flagship-e2e.test.mjs",
+    "verify-release": "node scripts/verify-release.mjs"
   },
   "dependencies": {
     "tsx": "^4.22.4"

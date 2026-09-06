@@ -12,13 +12,15 @@
 //   ts, receipt_id  -> CW7 metadata (unsigned)
 
 // Map one CW7 receipt to the canonical signed payload. prevHashOf resolves prev_receipt_id→prev_hash.
+import { signedFields } from './atlas-local-sign.mjs';
+
 export function toCanonicalPayload(cw7Receipt, prevHashOf = () => null) {
+  // Resolved by the shared reader rather than re-spelled here. This function
+  // used to resolve `world_id ?? asset_id` on its own — a third canonicalisation,
+  // and the same shape of divergence that produced the 6 Sep alias forgery.
   return {
-    attestation: cw7Receipt.action,                 // 'create' | 'update' (world) etc.
-    attested_by: cw7Receipt.builder_id,
+    ...signedFields(cw7Receipt),
     prev_hash: cw7Receipt.prev_receipt_id ? prevHashOf(cw7Receipt.prev_receipt_id) : null,
-    subject_type: cw7Receipt.subject_type || 'world',
-    subject_id: cw7Receipt.world_id ?? cw7Receipt.asset_id,
   };
 }
 
