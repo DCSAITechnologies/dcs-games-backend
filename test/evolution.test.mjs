@@ -10,7 +10,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createAssemblyRouter } from "../src/v3/router/assembly.mjs";
-import { newDelta, applyDelta, checkCompatibility, verifyPreservation, emptyLiveState, deltaHash } from "../src/v3/expansion/delta.mjs";
+import { newDelta, applyDelta, checkCompatibility, verifyPreservation, emptyLiveState, deltaHash, COLLECTIONS, OWNABLE_COLLECTIONS } from "../src/v3/expansion/delta.mjs";
+import { forkWorld, OWNABLE_COLLECTIONS as FORK_OWNABLE_COLLECTIONS } from "../src/v3/expansion/fork.mjs";
 import { planExpansion, planEdit } from "../src/v3/expansion/planner.mjs";
 import { playtestAndRepair } from "../src/v3/playtest/agent.mjs";
 import { createWorldMemory } from "../src/v3/memory/world-memory.mjs";
@@ -632,4 +633,51 @@ test("B7: adding rolled_back did not change how any existing kind is recorded", 
     assert.equal("from_version" in row, false, `${kind} rows must keep the shape their consumers already read`);
   }
   assert.equal((await mem.chronology("w1")).length, 7);
+});
+
+// ================================================== ownership, in every place
+// ================================================== a player can hold something
+//
+// "Ownership must be untouched" was proved for structures alone. A player can
+// also be given an item and assigned an NPC, and an entity that SURVIVES a
+// change carrying the wrong owner is the quiet version of the same loss: it is
+// still in the world, it is simply no longer theirs.
+
+test("B6 GATE: OWNABLE_COLLECTIONS names only collections the manifest actually has", () => {
+  for (const c of OWNABLE_COLLECTIONS) {
+    assert.ok(COLLECTIONS.includes(c), `'${c}' is not a manifest collection, so listing it protects nothing`);
+  }
+  assert.ok(!OWNABLE_COLLECTIONS.includes("vehicles"), "WorldManifestV3 has no vehicles collection");
+  assert.ok(OWNABLE_COLLECTIONS.includes("structures") && OWNABLE_COLLECTIONS.includes("items") && OWNABLE_COLLECTIONS.includes("npcs"));
+  // One list, not two that can drift apart: the fork's export is the same array.
+  assert.equal(FORK_OWNABLE_COLLECTIONS, OWNABLE_COLLECTIONS);
+});
+
+test("B6 GATE: a change of owner is caught on an item and an NPC, not only on a structure", async () => {
+  const m = await world();
+  for (const [collection, id] of [["structures", m.structures[0].id], ["items", m.items[0].id], ["npcs", m.npcs[0].id]]) {
+    const after = structuredClone(m);
+    after.world_version = m.world_version + 1;
+    after[collection].find((e) => e.id === id).owner_id = "someone-else";
+    const { problems } = verifyPreservation(m, after);
+    const found = problems.find((p) => p.code === "ownership_changed" && p.entity === id);
+    assert.ok(found, `a change of owner on a ${collection} entry was not reported: ${JSON.stringify(problems)}`);
+    assert.equal(found.collection, collection);
+  }
+});
+
+test("B6 GATE: a fork carries no ownership across in any collection that can hold it", async () => {
+  const m = await world();
+  m.meta.fork_policy = "allow";
+  for (const key of OWNABLE_COLLECTIONS) if ((m[key] || []).length) m[key][0].owner_id = "u_player";
+
+  const { manifest: forked } = forkWorld(
+    { world_id: "w_evo", owner_id: "u1", state: "published", version: m.world_version, manifest: m },
+    { forkerId: "u2", newWorldId: "w_evo_fork" },
+  );
+  for (const key of OWNABLE_COLLECTIONS) {
+    for (const e of forked[key] || []) {
+      assert.notEqual(e.owner_id, "u_player", `a ${key} entry travelled to the forker still owned by a player`);
+    }
+  }
 });

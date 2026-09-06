@@ -29,6 +29,27 @@ const COLLECTIONS = ["zones", "structures", "npcs", "items", "quests", "behavior
 const SINGULAR = { zones: "zone", structures: "structure", npcs: "npc", items: "item", quests: "quest", behaviors: "behavior", interactions: "interaction", assets: "asset" };
 
 /**
+ * Every manifest collection whose entries can carry an `owner_id`. A player can
+ * buy a structure, be given an item, or be assigned an NPC, and each of those is
+ * a claim that must not travel to a forker, be silently dropped by a rollback,
+ * or be changed by an expansion.
+ *
+ * It lives HERE, beside COLLECTIONS, because it is a statement about the
+ * manifest rather than about forking, and because a subset of a list is only
+ * checkable next to the list it is a subset of. It listed "vehicles", which is
+ * not a manifest collection at all (WorldManifestV3 has no such array — a
+ * vehicle is an asset kind and a behaviour kind, never a collection), so a fifth
+ * of the list read as coverage while iterating nothing. The guard below is what
+ * stops that recurring: a name that is not a collection fails at import.
+ */
+const OWNABLE_COLLECTIONS = ["structures", "items", "npcs", "behaviors"];
+for (const c of OWNABLE_COLLECTIONS) {
+  if (!COLLECTIONS.includes(c)) {
+    throw new Error(`OWNABLE_COLLECTIONS names '${c}', which is not a manifest collection: ${COLLECTIONS.join(", ")}`);
+  }
+}
+
+/**
  * Entity references that live INSIDE a behaviour's `spec` rather than in a
  * `target_ref` / `behavior_ref`.
  *
@@ -534,11 +555,23 @@ export function verifyPreservation(before, after, liveState = emptyLiveState()) 
     }
   }
 
-  // Ownership must be untouched.
-  const ownerBefore = new Map((before.structures || []).map((s) => [s.id, s.owner_id ?? null]));
-  for (const s of after.structures || []) {
-    if (ownerBefore.has(s.id) && ownerBefore.get(s.id) !== (s.owner_id ?? null)) {
-      problems.push({ code: "ownership_changed", detail: `ownership of '${s.id}' changed during an expansion`, entity: s.id });
+  // Ownership must be untouched — in EVERY collection that can carry it. This
+  // read `before.structures` alone, so a change of owner on a player's item or
+  // NPC was invisible to the verifier: an entity that survived the change came
+  // out the other side with `owner_id: undefined` and nothing objected. A
+  // player's house was proved safe while their sword and their companion NPC
+  // were not.
+  for (const key of OWNABLE_COLLECTIONS) {
+    const ownerBefore = new Map((before[key] || []).map((e) => [e.id, e.owner_id ?? null]));
+    for (const e of after[key] || []) {
+      if (ownerBefore.has(e.id) && ownerBefore.get(e.id) !== (e.owner_id ?? null)) {
+        problems.push({
+          code: "ownership_changed",
+          detail: `ownership of '${e.id}' (${key}) changed during an expansion: '${ownerBefore.get(e.id)}' became '${e.owner_id ?? null}'`,
+          entity: e.id,
+          collection: key,
+        });
+      }
     }
   }
 
@@ -565,4 +598,4 @@ export function verifyPreservation(before, after, liveState = emptyLiveState()) 
   return { ok: problems.length === 0, problems };
 }
 
-export { COLLECTIONS, MODIFIABLE, SPEC_REFS };
+export { COLLECTIONS, OWNABLE_COLLECTIONS, MODIFIABLE, SPEC_REFS };

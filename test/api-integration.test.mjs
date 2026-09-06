@@ -803,7 +803,7 @@ test("B6 GATE: a target that no longer passes the playtest gate is refused, not 
   });
   const b = await r.json();
   assert.equal(r.status, 422, JSON.stringify(b));
-  assert.equal(b.error, "rollback_failed_playtest");
+  assert.equal(b.error, "rollback_failed_playtest", JSON.stringify(b));
   assert.ok(b.findings.length > 0, "the refusal must say what was wrong");
   assert.match(b.detail, /was not changed/);
 

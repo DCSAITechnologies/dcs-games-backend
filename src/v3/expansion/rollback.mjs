@@ -21,11 +21,11 @@
 // (that would produce a version that matches neither v1 nor v3 and that nobody
 // asked for), and it does not quietly drop them.
 import crypto from "node:crypto";
-import { COLLECTIONS, deltaHash, emptyLiveState, verifyPreservation } from "./delta.mjs";
+import { COLLECTIONS, OWNABLE_COLLECTIONS, deltaHash, emptyLiveState, verifyPreservation } from "./delta.mjs";
 import { diffManifests } from "./diff.mjs";
+import { namespacedCounts } from "./stitch.mjs";
 import { manifestHash } from "../../core/worldstore.mjs";
 import { Errors } from "../../core/errors.mjs";
-import { OWNABLE_COLLECTIONS } from "./fork.mjs";
 
 /**
  * Fields on meta that express a creator's DECISION rather than the world's
@@ -138,16 +138,133 @@ function assertChronologyMatchesVersion(manifest, which) {
 }
 
 /**
+ * A manifest has to be able to run on the runtime it says it needs.
+ *
+ * `manifest_version` (what format this content is) and
+ * `expansion.compatibility.min_runtime` (what format a runtime must speak to
+ * load it) describe the same thing from two directions, so a manifest declaring
+ * itself older than its own minimum is incoherent whichever half is the lie. It
+ * is a refusal rather than a repair: picking one of the two numbers to overwrite
+ * would be guessing which of them the world is.
+ */
+const semver = (v) => String(v ?? "0.0.0").split(".").map((n) => Number.parseInt(n, 10) || 0);
+function assertFormatCoherent(manifest, which) {
+  const declared = manifest?.manifest_version;
+  const demanded = manifest?.expansion?.compatibility?.min_runtime;
+  if (!declared || !demanded) return;
+  const [dMaj, dMin, dPatch] = semver(declared);
+  const [rMaj, rMin, rPatch] = semver(demanded);
+  const meets = dMaj > rMaj || (dMaj === rMaj && (dMin > rMin || (dMin === rMin && dPatch >= rPatch)));
+  if (!meets) {
+    throw Errors.conflict(
+      `the ${which} manifest declares manifest_version ${declared} while its own compatibility demands a ${demanded} runtime`,
+      { meta: { manifest_version: declared, min_runtime: demanded, migrated_from: manifest.expansion.compatibility.migrated_from ?? null } }
+    );
+  }
+}
+
+/**
+ * Which counter a caller's `toVersion` is written in.
+ *
+ * There are two, and they are not the same number:
+ *
+ *   "manifest"  the world's own `world_version`, which only applyDelta and the
+ *               migrator advance — it moves when the CONTENT changes;
+ *   "record"    the repository's retained-version number, which advances on
+ *               every accepted save (WorldRepository._upsert), a state-only
+ *               save included — so publishing a world advances it while the
+ *               manifest's own version stands still.
+ *
+ * `GET /v3/worlds/:id/versions` lists RECORD numbers, so a caller that rolls
+ * back to a version the history offered it is speaking the record counter while
+ * the manifest it fetched answers in the other one. Comparing the two as if
+ * they were one number is how a rollback to a version the server itself just
+ * offered came back as "the manifest supplied is v2, not the v3 that was asked
+ * for" — a refusal blaming the caller for the server's own numbering.
+ */
+export const VERSION_COUNTERS = ["manifest", "record"];
+
+/**
+ * Check the caller's assertion about WHICH VERSION IT FETCHED, in the counter it
+ * wrote that assertion in. Returns the counter the assertion was read in, so the
+ * record can say so.
+ *
+ * The relationship between the counters is the only thing that makes a
+ * record-counter assertion checkable at all: the record number advances at least
+ * as often as the manifest's own version, so the manifest retained under record
+ * number N has `world_version <= N`, never more. That is a real constraint (it
+ * still catches a caller that fetched a LATER snapshot than it asked for) but it
+ * is weaker than equality, which is why `toManifestHash` exists: a hash names
+ * the exact snapshot and belongs to no counter at all.
+ */
+function assertTargetIsWhatWasAskedFor(target, { toVersion, versionCounter, toManifestHash, toV, fromVersion }) {
+  if (toManifestHash !== null && toManifestHash !== undefined) {
+    const actual = manifestHash(target);
+    if (String(toManifestHash) !== actual) {
+      throw Errors.validation(
+        "the manifest supplied is not the snapshot that was asked for",
+        { meta: { asked_for_manifest_hash: String(toManifestHash), supplied_manifest_hash: actual } }
+      );
+    }
+  }
+  if (!VERSION_COUNTERS.includes(versionCounter)) {
+    throw Errors.validation(`versionCounter must be one of: ${VERSION_COUNTERS.join(", ")}`);
+  }
+  if (toVersion === null || toVersion === undefined) return versionCounter;
+
+  const asked = Number(toVersion);
+  if (!Number.isInteger(asked) || asked < 1) throw Errors.validation("the version asked for is not a version number");
+
+  // The counter is the caller's to declare, and it is inferred in exactly one
+  // place: a number EQUAL to the current manifest's own version.
+  //
+  // Such a number cannot be a manifest-counter rollback target — a rollback only
+  // goes backwards, so a manifest-counter target is strictly earlier than the
+  // present — and it is precisely the number a retained-version list produces
+  // after a single state-only save: publish a world and the retained version
+  // that holds the manifest calling itself v2 is numbered 3, alongside a present
+  // that is still manifest v3. Refusing it means refusing a rollback to a
+  // version the server itself just offered.
+  //
+  // The inference stops there. A number ABOVE the current version cannot be
+  // bounded by anything this function can see: "roll back to v7 of a world that
+  // has only ever had two versions" is a caller asking for something that does
+  // not exist, and reading it as a retained-record number would silently restore
+  // v1 instead of refusing. A number BELOW it is a perfectly good manifest
+  // version, so it is held to the manifest exactly, and a caller that asked for
+  // v2 and fetched v1 is still told so. Anything else — a deeper skew, a
+  // republished world, a retained number that collides with a real earlier
+  // manifest version — must be DECLARED with versionCounter:"record" or, better,
+  // asserted with toManifestHash, because it cannot be told apart from a mistake.
+  const counter = versionCounter === "manifest" && asked === fromVersion ? "record" : versionCounter;
+
+  if (counter === "manifest") {
+    if (asked !== toV) {
+      throw Errors.validation(`the manifest supplied is v${toV}, not the v${asked} that was asked for`);
+    }
+  } else if (toV > asked) {
+    // The retained record number can only run AHEAD of the manifest version it
+    // holds. A manifest that is LATER than the record number asked for is not
+    // the snapshot that number names, whichever counter the caller meant.
+    throw Errors.validation(
+      `the manifest supplied is v${toV}, which is later than the v${asked} that was asked for`,
+      { meta: { asked_for: asked, supplied_world_version: toV, counter } }
+    );
+  }
+  return counter;
+}
+
+/**
  * Roll a world back to an earlier version.
  *
  * @param {object} currentManifest the world as it stands now
  * @param {object} targetManifest  the earlier version's manifest, as it was saved
- * @param {{actorId:string, toVersion?:number, liveState?:object, label?:string, reason?:string}} opts
+ * @param {{actorId:string, toVersion?:number, versionCounter?:"manifest"|"record", toManifestHash?:string, liveState?:object, label?:string, reason?:string}} opts
  * @returns {{manifest:object, record:object, memory_event:object}} the new
  *   version, the history entry it gained, and the world-memory event to record
  *   for it
  */
-export function planRollback(currentManifest, targetManifest, { actorId, toVersion = null, liveState = emptyLiveState(), label = null, reason = null } = {}) {
+export function planRollback(currentManifest, targetManifest, { actorId, toVersion = null, versionCounter = "manifest", toManifestHash = null, liveState = emptyLiveState(), label = null, reason = null } = {}) {
   if (!actorId) throw Errors.unauthenticated("a rollback must be attributed to a principal");
   if (!currentManifest || typeof currentManifest !== "object") throw Errors.validation("a rollback needs the current manifest");
   if (!targetManifest || typeof targetManifest !== "object") throw Errors.validation("a rollback needs the manifest of the version to roll back to");
@@ -164,10 +281,9 @@ export function planRollback(currentManifest, targetManifest, { actorId, toVersi
   }
   // toVersion is an assertion about what the caller believes it fetched. If it
   // disagrees with the manifest, the caller has the wrong snapshot and rolling
-  // back to it would silently restore the wrong world.
-  if (toVersion !== null && Number(toVersion) !== toV) {
-    throw Errors.validation(`the manifest supplied is v${toV}, not the v${toVersion} that was asked for`);
-  }
+  // back to it would silently restore the wrong world. Which "disagrees" means
+  // depends on the counter the assertion is written in — see VERSION_COUNTERS.
+  const assertedIn = assertTargetIsWhatWasAskedFor(target, { toVersion, versionCounter, toManifestHash, toV, fromVersion });
   if (toV >= fromVersion) {
     throw Errors.validation(`v${toV} is not earlier than the current v${fromVersion}; a rollback only goes backwards`);
   }
@@ -237,18 +353,86 @@ export function planRollback(currentManifest, targetManifest, { actorId, toVersi
     else delete next.meta[key];
   }
 
-  // Ownership is a player's ledger, not the creator's content. A structure that
-  // existed at the target version and has since been bought stays bought; the
-  // restoration is listed in the record rather than done quietly.
-  const ownerNow = new Map((current.structures || []).map((s) => [s.id, s.owner_id ?? null]));
+  // Ownership is a player's ledger, not the creator's content. An entity that
+  // existed at the target version and has since been bought, given or assigned
+  // stays that way; the restoration is listed in the record rather than done
+  // quietly.
+  //
+  // Read from EVERY collection that can carry an owner, not from structures
+  // alone. The refusal above covers an owned entity the rollback would DELETE;
+  // this covers the one it keeps. Restoring `next` from the target and then
+  // reinstating owners on structures only meant a player's item or NPC — present
+  // at both versions, so never in the way of anything — came back carrying the
+  // target's `owner_id`, which is to say `undefined`: the entity survived and
+  // its owner did not. Worse, `record.ownership_preserved` then affirmatively
+  // reported the house as preserved while saying nothing about the sword, so the
+  // record read as a positive assurance that ownership had been handled.
   const ownershipPreserved = [];
-  for (const s of next.structures || []) {
-    if (!ownerNow.has(s.id)) continue;
-    const owner = ownerNow.get(s.id);
-    if ((s.owner_id ?? null) === owner) continue;
-    s.owner_id = owner;
-    ownershipPreserved.push({ id: s.id, owner_id: owner });
+  for (const key of OWNABLE_COLLECTIONS) {
+    const ownerNow = new Map((current[key] || []).map((e) => [e.id, e.owner_id ?? null]));
+    for (const e of next[key] || []) {
+      if (!ownerNow.has(e.id)) continue;
+      const owner = ownerNow.get(e.id);
+      if ((e.owner_id ?? null) === owner) continue;
+      e.owner_id = owner;
+      // { id, owner_id } and nothing else: the shape callers and the chronicle
+      // already read. Ids are unique across collections, so the entry is not
+      // ambiguous without naming one.
+      ownershipPreserved.push({ id: e.id, owner_id: owner });
+    }
   }
+
+  // ---- the FORMAT travels with the content it describes ------------------
+  //
+  // `manifest_version` is part of the restored content (next is a clone of the
+  // target), and `expansion.compatibility` says which runtime that format needs.
+  // Rebuilding `expansion` wholesale from the CURRENT version took the two from
+  // different versions, so a world generated at 3.0.0 and migrated to 3.1.0 at
+  // v2, rolled back to v1, came out declaring:
+  //     manifest_version: "3.0.0"
+  //     compatibility:    { min_runtime: "3.1.0", migrated_from: "3.0.0" }
+  // a manifest claiming to be the very version it records being migrated FROM,
+  // demanding a runtime newer than itself. validateManifest has nothing to say
+  // about it, so nothing downstream noticed.
+  const currentExpansion = structuredClone(current.expansion || {});
+  const compatibility =
+    structuredClone(target.expansion?.compatibility ?? null) ||
+    structuredClone(currentExpansion.compatibility ?? null) ||
+    { min_runtime: String(next.manifest_version || "3.0.0"), migrated_from: null };
+
+  // A rollback across a migration moves the world's FORMAT backwards as well as
+  // its content. That is legitimate — the restored content really is 3.0.0
+  // content — but it must not happen silently: the repository stores the
+  // manifest_version on the record, and a version that went backwards with
+  // nothing recording it is a regression no later reader can account for.
+  const formatFrom = current.manifest_version ?? null;
+  const formatTo = next.manifest_version ?? null;
+  const manifestVersionRestored = formatFrom === formatTo
+    ? null
+    : { from: formatFrom, to: formatTo, min_runtime: compatibility?.min_runtime ?? null };
+
+  // ---- a count of entities is a claim about content ----------------------
+  //
+  // `expansion.stitched_from` survived a rollback untouched, `counts` block and
+  // all — "this guest contributed 6 zones, 14 structures, 9 npcs" — about
+  // entities the rollback had just deleted. This is NOT the "credit is not
+  // content" rule that keeps meta.stitched_attribution: a name in an
+  // attribution list is a credit, a per-collection count of entities is a claim
+  // about the content and it is now false. So the credit stays and the counts
+  // are recounted from the restored manifest, with what arrived on the day kept
+  // under a name that says that is what it is.
+  const stitchedFrom = (currentExpansion.stitched_from || []).map((part) => {
+    const held = namespacedCounts(next, part.namespace);
+    const claimed = part.counts || {};
+    if (JSON.stringify(held) === JSON.stringify(claimed)) return part;
+    return {
+      ...part,
+      counts: held,
+      counts_at_stitch: part.counts_at_stitch ?? claimed,
+      content_present: Object.values(held).some((n) => n > 0),
+      counts_corrected: { by: "rollback", to_version: toV, at_version: next.world_version },
+    };
+  });
 
   // Counted from the manifests themselves rather than from what the caller
   // expected, so the record cannot overstate what the rollback did.
@@ -265,6 +449,15 @@ export function planRollback(currentManifest, targetManifest, { actorId, toVersi
     from_manifest_hash: manifestHash(current),
     to_manifest_hash: manifestHash(target),
     label: label || `rollback to v${toV}`,
+    // What the caller asked for and in which counter, whenever that number is
+    // not the manifest's own — so a response saying "rolled_back_to: 3" and a
+    // chronicle saying "to_version: 2" can be reconciled by a later reader
+    // instead of looking like a contradiction.
+    ...(toVersion !== null && Number(toVersion) !== toV
+      ? { to_version_asked: Number(toVersion), to_version_counter: assertedIn }
+      : {}),
+    // The format the world went back to, when the rollback crossed a migration.
+    ...(manifestVersionRestored ? { manifest_version_restored: manifestVersionRestored } : {}),
     delta_id: "rollback_" + crypto.randomBytes(8).toString("hex"),
     delta_hash: deltaHash({ kind: "rollback", world_id: current.world_id, from_version: fromVersion, to_version: toV }),
     author: actorId,
@@ -277,10 +470,11 @@ export function planRollback(currentManifest, targetManifest, { actorId, toVersi
     ...(ownershipPreserved.length ? { ownership_preserved: ownershipPreserved } : {}),
   };
 
-  const expansion = structuredClone(current.expansion || {});
   next.expansion = {
-    ...expansion,
-    compatibility: expansion.compatibility || { min_runtime: "3.0.0", migrated_from: null },
+    ...currentExpansion,
+    // Taken from the same version as the content whose format it describes.
+    compatibility,
+    ...(currentExpansion.stitched_from ? { stitched_from: stitchedFrom } : {}),
     // The chronology holds its own copy of every entry, the new one included, so
     // nothing a caller does with the returned record can edit the record.
     history: [...historyNow.map((h) => structuredClone(h)), structuredClone(record)],
@@ -303,6 +497,11 @@ export function planRollback(currentManifest, targetManifest, { actorId, toVersi
   // of its inputs. If it does not, the bug is here, and shipping the manifest
   // anyway would put the inconsistency into the permanent record.
   assertChronologyMatchesVersion(next, "restored");
+  // And the format it declares has to be one it can actually run under. If the
+  // two halves disagree here the target itself was incoherent, and shipping the
+  // manifest anyway would put a world that cannot state its own format into the
+  // permanent record.
+  assertFormatCoherent(next, "restored");
 
   const preservation = verifyPreservation(current, next, liveState);
   if (!preservation.ok) {
@@ -360,6 +559,11 @@ export function rollbackMemoryEvent(record) {
       removed: record.removed ?? 0,
       change_summary: record.summary ?? null,
       ...(record.ownership_preserved ? { ownership_preserved: detailOf(record.ownership_preserved) } : {}),
+      // A rollback that crossed a migration took the world's FORMAT back too.
+      ...(record.manifest_version_restored ? { manifest_version_restored: detailOf(record.manifest_version_restored) } : {}),
+      ...(record.to_version_asked !== undefined
+        ? { to_version_asked: record.to_version_asked, to_version_counter: record.to_version_counter ?? null }
+        : {}),
     },
   };
 }
@@ -397,6 +601,7 @@ export function rollbackHistoryOf(manifest) {
       removed: h.removed ?? 0,
       summary: h.summary ?? null,
       ownership_preserved: h.ownership_preserved || [],
+      manifest_version_restored: h.manifest_version_restored ?? null,
     }));
 }
 

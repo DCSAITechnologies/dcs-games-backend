@@ -435,13 +435,44 @@ export function recordStitch(manifest, stitch) {
   return m;
 }
 
-/** What a joined world is made of. Reads only what is recorded. */
+/**
+ * How much of a guest's content a manifest ACTUALLY holds right now, by
+ * collection, counted by the namespace every stitched entity carries.
+ *
+ * Zero counts are dropped, so the shape matches the `counts` block planStitch
+ * records and an absent collection reads the same way in both.
+ */
+export function namespacedCounts(manifest, namespace) {
+  if (!manifest || !namespace) return {};
+  const ns = String(namespace);
+  return Object.fromEntries(
+    COLLECTIONS
+      .map((c) => [c, (manifest[c] || []).filter((e) => String(e?.id ?? "").startsWith(ns)).length])
+      .filter(([, n]) => n > 0)
+  );
+}
+
+const totalOf = (counts) => Object.values(counts || {}).reduce((a, b) => a + (Number(b) || 0), 0);
+
+/**
+ * What a joined world is made of.
+ *
+ * `contributed` is counted from the MANIFEST, not from the stitch record. The
+ * record says what arrived on the day; a rollback past the stitch, or any later
+ * delta that removes the guest's entities, deletes that content while leaving
+ * the record's `counts` block behind — and a summary built from the record then
+ * tells a dashboard, a marketplace listing or an Atlas provenance view that a
+ * third creator's work is in this world when none of it is.
+ *
+ * A count of entities is a claim ABOUT THE CONTENT, so it is answered by the
+ * content. The credit is not: the part stays listed, with its creator, its title
+ * and what it contributed at the time, because the stitch really did happen.
+ */
 export function stitchSummary(manifest) {
   const parts = manifest?.expansion?.stitched_from || [];
-  return {
-    is_stitched: parts.length > 0,
-    part_count: parts.length + (parts.length ? 1 : 0),   // the host counts as a part once anything joined it
-    parts: parts.map((p) => ({
+  const rows = parts.map((p) => {
+    const held = namespacedCounts(manifest, p.namespace);
+    return {
       world_id: p.guest_world_id,
       title: p.guest_title,
       creator: p.guest_creator,
@@ -449,8 +480,20 @@ export function stitchSummary(manifest) {
       namespace: p.namespace,
       attribution_required: !!p.attribution_required,
       stitched_at: p.stitched_at,
-      contributed: p.counts,
+      contributed: held,
+      // What arrived when it was stitched, kept as the historical fact it is and
+      // named as such, so nobody has to read `contributed` as one.
+      contributed_at_stitch: p.counts_at_stitch ?? p.counts ?? {},
+      content_present: totalOf(held) > 0,
       dropped: p.dropped,
-    })),
+    };
+  });
+  // The host counts as a part once anything joined it — and only while
+  // something of that join is still here to count.
+  const present = rows.filter((r) => r.content_present).length;
+  return {
+    is_stitched: parts.length > 0,
+    part_count: present ? present + 1 : 0,
+    parts: rows,
   };
 }

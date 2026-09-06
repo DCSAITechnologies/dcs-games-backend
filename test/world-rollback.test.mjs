@@ -14,6 +14,7 @@ import { applyDelta, emptyLiveState, verifyPreservation } from "../src/v3/expans
 import { planExpansion, planEdit } from "../src/v3/expansion/planner.mjs";
 import { planRollback, rollbackHistoryOf, rollbackMemoryEvent, recordRollback } from "../src/v3/expansion/rollback.mjs";
 import { diffManifests } from "../src/v3/expansion/diff.mjs";
+import { planStitch, recordStitch, stitchSummary } from "../src/v3/expansion/stitch.mjs";
 import { validateManifest } from "../src/v3/manifest/schema.mjs";
 import { playtestAndRepair } from "../src/v3/playtest/agent.mjs";
 import { manifestHash } from "../src/core/worldstore.mjs";
@@ -844,4 +845,241 @@ test("B2 rollback: a world with no recorded activity is still rolled back, and s
   assert.equal(determined.complete, false);
   assert.deepEqual(determined.undetermined.map((u) => u.category).sort(), ["completed_quest_ids", "known_npc_ids", "visited_zone_ids"]);
   assert.match(determined.note, /not evidence that nothing is held/);
+});
+
+// ============================================ what a rollback must not strip,
+// ============================================ claim, or contradict
+//
+// Everything above is about content the rollback DELETES. This section is about
+// what it keeps: an entity that exists at both versions comes back, and the
+// facts attached to it — who owns it, what format it is in, whose work is in
+// the world — have to come back with it, or not be claimed at all.
+
+test("B6 rollback: a player's item and NPC keep their owner, not just their house", async () => {
+  const v1 = await world();
+  const v2 = expand(v1, "add a hospital district");
+  // Three v1 entities the player acquired AFTER the expansion. All three exist
+  // in the target, so none of them is in the rollback's way — which is exactly
+  // why losing their owner was silent.
+  const house = v1.structures[0].id, sword = v1.items[0].id, companion = v1.npcs[0].id;
+  v2.structures.find((s) => s.id === house).owner_id = "u_player";
+  v2.items.find((i) => i.id === sword).owner_id = "u_player";
+  v2.npcs.find((n) => n.id === companion).owner_id = "u_player";
+
+  const live = { ...emptyLiveState(), owned_entity_ids: [house], inventory_item_ids: [sword], known_npc_ids: [companion] };
+  const { manifest: v3, record } = planRollback(v2, v1, { actorId: "u1", toVersion: 1, liveState: live });
+
+  assert.equal(v3.structures.find((s) => s.id === house).owner_id, "u_player", "a rollback must not repossess a house");
+  assert.equal(v3.items.find((i) => i.id === sword).owner_id, "u_player", "nor confiscate an item");
+  assert.equal(v3.npcs.find((n) => n.id === companion).owner_id, "u_player", "nor reassign an NPC");
+
+  assert.deepEqual(
+    record.ownership_preserved.map((o) => o.id).sort(),
+    [house, sword, companion].sort(),
+    "and the record must not affirm the house while saying nothing about the other two",
+  );
+  assert.deepEqual([...new Set(record.ownership_preserved.map((o) => o.owner_id))], ["u_player"]);
+  assert.equal(verifyPreservation(v2, v3, live).ok, true, JSON.stringify(verifyPreservation(v2, v3, live).problems));
+});
+
+test("B6 rollback: an owner erased on a surviving entity is caught by the preservation check", async () => {
+  // Belt and braces: if the restoration above were ever dropped, this is the
+  // check that has to refuse rather than ship a world with an owner missing.
+  const v1 = await world();
+  const v2 = expand(v1, "add a hospital district");
+  const sword = v1.items[0].id;
+  v2.items.find((i) => i.id === sword).owner_id = "u_player";
+
+  const { manifest: v3 } = planRollback(v2, v1, { actorId: "u1", toVersion: 1 });
+  const stripped = structuredClone(v3);
+  stripped.items.find((i) => i.id === sword).owner_id = undefined;
+
+  const { ok, problems } = verifyPreservation(v2, stripped);
+  assert.equal(ok, false, "a rollback that returned an item with no owner must not verify");
+  assert.ok(problems.some((p) => p.code === "ownership_changed" && p.entity === sword));
+});
+
+// ---------------------------------------------------------- the two counters
+
+test("B6 rollback: a version number from the repository's counter is not refused as a wrong snapshot", async () => {
+  // The repository advances its RECORD version on every accepted save, a
+  // state-only save (publishing) included, while the manifest's own
+  // world_version only moves on a content change. Save, expand, publish, expand
+  // and the two are permanently one apart: the version GET /versions offers as
+  // 3 holds a manifest that calls itself v2. Comparing the caller's 3 against
+  // the manifest's 2 as if they were one number refused a rollback to a version
+  // the server itself had just offered — a 422 blaming the caller for the
+  // server's own numbering.
+  //
+  // The counter is declared, never guessed: "roll back to v7 of a world that
+  // has only ever had two versions" is indistinguishable from a retained-record
+  // number, and must keep being refused.
+  const v1 = await world();
+  const v2 = expand(v1, "add a hospital district");     // record 3 after a publish in between
+  const v3 = expand(v2, "add an airport");              // record 4
+
+  const { manifest: v4, record } = planRollback(v3, v2, { actorId: "u1", toVersion: 3, versionCounter: "record" });
+  // And undeclared, because a number equal to the version the world is already
+  // at cannot be naming an earlier one: it can only have come from the counter
+  // that runs ahead.
+  const undeclared = planRollback(v3, v2, { actorId: "u1", toVersion: 3 }).record;
+  assert.equal(undeclared.to_version, 2);
+  assert.equal(undeclared.to_version_counter, "record");
+
+  assert.equal(v4.world_version, 4);
+  assert.equal(record.to_version, 2, "the chronicle records the version the manifest actually is");
+  assert.equal(record.to_version_asked, 3, "and the number the caller asked for, so the two can be reconciled");
+  assert.equal(record.to_version_counter, "record");
+  assert.equal(record.to_manifest_hash, manifestHash(v2), "and the snapshot itself, which belongs to no counter");
+});
+
+test("B6 rollback: an undeclared counter is the manifest's own, and is still held to it exactly", async () => {
+  // A caller that asked for v2 and fetched v1 is wrong, and a caller that asked
+  // for a version this world has never had is wrong. Neither is quietly reread
+  // as a number from the other counter.
+  const v1 = await world();
+  const v2 = expand(v1, "add a hospital district");
+  const v3 = expand(v2, "add an airport");
+  assert.throws(
+    () => planRollback(v3, v1, { actorId: "u1", toVersion: 2 }),
+    (e) => e.httpStatus === 422 && /is v1, not the v2 that was asked for/.test(e.detail),
+  );
+  assert.throws(
+    () => planRollback(v3, v1, { actorId: "u1", toVersion: 7 }),
+    (e) => e.httpStatus === 422 && /is v1, not the v7 that was asked for/.test(e.detail),
+  );
+});
+
+test("B6 rollback: an assertion in the repository's counter refuses a manifest later than the number asked for", async () => {
+  // The record counter runs AHEAD of the manifest's own, never behind, so a
+  // manifest whose world_version exceeds the retained number it was fetched by
+  // is not the snapshot that number names.
+  const v1 = await world();
+  const v2 = expand(v1, "add a hospital district");
+  const v3 = expand(v2, "add an airport");
+  assert.throws(
+    () => planRollback(v3, v2, { actorId: "u1", toVersion: 1, versionCounter: "record" }),
+    (e) => e.httpStatus === 422 && /is v2, which is later than the v1 that was asked for/.test(e.detail),
+  );
+});
+
+test("B6 rollback: the snapshot can be asserted by hash, which belongs to neither counter", async () => {
+  const v1 = await world();
+  const v2 = expand(v1, "add a hospital district");
+  const v3 = expand(v2, "add an airport");
+
+  const { record } = planRollback(v3, v2, { actorId: "u1", toVersion: 3, versionCounter: "record", toManifestHash: manifestHash(v2) });
+  assert.equal(record.to_manifest_hash, manifestHash(v2));
+
+  assert.throws(
+    () => planRollback(v3, v2, { actorId: "u1", toManifestHash: manifestHash(v1) }),
+    (e) => e.httpStatus === 422 && /not the snapshot that was asked for/.test(e.detail),
+  );
+  assert.throws(
+    () => planRollback(v3, v2, { actorId: "u1", versionCounter: "retained" }),
+    (e) => e.httpStatus === 422 && /versionCounter must be one of/.test(e.detail),
+  );
+});
+
+// ------------------------------------------------- the format of the content
+
+test("B6 rollback: crossing a manifest migration restores the format with the content, and records it", async () => {
+  const v1 = await world();
+  v1.manifest_version = "3.0.0";
+  v1.expansion.compatibility = { min_runtime: "3.0.0", migrated_from: "1.0.0" };
+  const v2 = expand(v1, "add a hospital district");
+  v2.manifest_version = "3.1.0";                                              // migrated at v2
+  v2.expansion.compatibility = { min_runtime: "3.1.0", migrated_from: "3.0.0" };
+
+  const { manifest: v3, record } = planRollback(v2, v1, { actorId: "u1", toVersion: 1 });
+
+  assert.equal(v3.manifest_version, "3.0.0", "the restored content is 3.0.0 content");
+  assert.deepEqual(
+    v3.expansion.compatibility, { min_runtime: "3.0.0", migrated_from: "1.0.0" },
+    "so it must not carry a compatibility block demanding a newer runtime and naming itself as what it migrated FROM",
+  );
+  assert.equal(validateManifest(v3).ok, true);
+
+  // And the format regression is on the record, not silent.
+  assert.deepEqual(record.manifest_version_restored, { from: "3.1.0", to: "3.0.0", min_runtime: "3.0.0" });
+  assert.deepEqual(rollbackHistoryOf(v3).at(-1).manifest_version_restored, { from: "3.1.0", to: "3.0.0", min_runtime: "3.0.0" });
+  assert.deepEqual(rollbackMemoryEvent(record).detail.manifest_version_restored, { from: "3.1.0", to: "3.0.0", min_runtime: "3.0.0" });
+});
+
+test("B6 rollback: a rollback that crosses no migration says nothing about the format", async () => {
+  const v1 = await world();
+  const v2 = expand(v1, "add a hospital district");
+  const { manifest: v3, record } = planRollback(v2, v1, { actorId: "u1", toVersion: 1 });
+  assert.equal("manifest_version_restored" in record, false, "there was no format change to report");
+  assert.equal(v3.manifest_version, v1.manifest_version);
+  assert.deepEqual(v3.expansion.compatibility, v1.expansion.compatibility);
+});
+
+test("B6 rollback: a target whose own format contradicts itself is refused, not repaired", async () => {
+  const v1 = await world();
+  v1.manifest_version = "3.0.0";
+  v1.expansion.compatibility = { min_runtime: "3.2.0", migrated_from: null };   // incoherent on its own terms
+  const v2 = expand(v1, "add a hospital district");
+
+  assert.throws(
+    () => planRollback(v2, v1, { actorId: "u1", toVersion: 1 }),
+    (e) => e.httpStatus === 409 && /declares manifest_version 3\.0\.0 while its own compatibility demands a 3\.2\.0 runtime/.test(e.detail),
+  );
+});
+
+// ----------------------------------------------------- credit is not content
+
+test("B6 rollback: past a stitch the counts go with the content, and the credit stays", async () => {
+  const v1 = await world();
+  const guest = await world("A neon city", "w_rollback_guest");
+  const { delta, stitch } = planStitch(
+    { world_id: "w_rollback", owner_id: "u1", state: "draft", version: 1, manifest: v1 },
+    { world_id: "w_rollback_guest", owner_id: "u2", state: "published", version: 1, manifest: guest },
+    { stitcherId: "u1" },
+  );
+  const v2 = recordStitch(applyDelta(v1, delta).manifest, stitch);
+  const contributed = Object.values(stitch.counts).reduce((a, b) => a + b, 0);
+  assert.ok(contributed > 0, "the fixture needs the guest to have contributed something");
+  assert.equal(stitchSummary(v2).part_count, 2);
+
+  const { manifest: v3 } = planRollback(v2, v1, { actorId: "u1", toVersion: 1 });
+
+  const leftBehind = ["zones", "structures", "npcs", "items", "quests", "behaviors", "interactions", "assets"]
+    .reduce((n, c) => n + (v3[c] || []).filter((e) => String(e.id).startsWith(stitch.namespace)).length, 0);
+  assert.equal(leftBehind, 0, "precondition: the rollback removed every guest entity");
+
+  // The claim about CONTENT goes with the content, in the manifest itself...
+  assert.deepEqual(v3.expansion.stitched_from[0].counts, {}, "a count of entities must not outlive the entities");
+  assert.equal(v3.expansion.stitched_from[0].content_present, false);
+  assert.deepEqual(v3.expansion.stitched_from[0].counts_at_stitch, stitch.counts, "what arrived on the day is still recorded, named as such");
+
+  // ...and in what any dashboard, listing or provenance view reads.
+  const summary = stitchSummary(v3);
+  assert.equal(Object.values(summary.parts[0].contributed).reduce((a, b) => a + b, 0), 0);
+  assert.equal(summary.part_count, 0, "nothing of the guest is left for the world to be made of");
+
+  // The CREDIT survives: the stitch happened, and u2's name stays on it.
+  assert.equal(summary.is_stitched, true);
+  assert.equal(summary.parts[0].creator, "u2");
+  assert.deepEqual(summary.parts[0].contributed_at_stitch, stitch.counts);
+  assert.deepEqual(v3.meta.stitched_attribution, v2.meta.stitched_attribution, "attribution is credit, and credit is not content");
+  assert.equal(validateManifest(v3).ok, true);
+});
+
+test("B6 rollback: a stitch whose content is still there keeps its counts untouched", async () => {
+  // The correction is a recount, not a purge: rolling back to a version that
+  // still contains the guest must leave the record exactly as it was.
+  const v1 = await world();
+  const guest = await world("A neon city", "w_rollback_guest2");
+  const { delta, stitch } = planStitch(
+    { world_id: "w_rollback", owner_id: "u1", state: "draft", version: 1, manifest: v1 },
+    { world_id: "w_rollback_guest2", owner_id: "u1", state: "draft", version: 1, manifest: guest },
+    { stitcherId: "u1" },
+  );
+  const v2 = recordStitch(applyDelta(v1, delta).manifest, stitch);
+  const v3 = expand(v2, "add an airport");
+
+  const { manifest: v4 } = planRollback(v3, v2, { actorId: "u1", toVersion: 2 });
+  assert.deepEqual(v4.expansion.stitched_from, v2.expansion.stitched_from, "the guest's content is still here, so its record is untouched");
+  assert.equal(stitchSummary(v4).part_count, 2);
 });

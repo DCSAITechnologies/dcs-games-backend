@@ -14,14 +14,22 @@
 //   - forking is refused when the original forbids it
 import crypto from "node:crypto";
 import { validateManifest } from "../manifest/schema.mjs";
+import { OWNABLE_COLLECTIONS } from "./delta.mjs";
 import { Errors } from "../../core/errors.mjs";
 
 /**
  * Every manifest collection whose entries can carry an owner. A player can buy
  * a structure, be given an item, or be assigned an NPC, and each of those is a
  * claim that must not travel to a forker or survive a rollback.
+ *
+ * Defined in delta.mjs beside COLLECTIONS, which is the list it has to be a
+ * subset of, and re-exported here for the callers that already import it from
+ * the fork. It used to be spelled out here as
+ * ["structures", "items", "npcs", "vehicles", "behaviors"] — and "vehicles" is
+ * not a manifest collection, so that entry cleared nothing, protected nothing
+ * and read as coverage of something the schema has never had.
  */
-export const OWNABLE_COLLECTIONS = ["structures", "items", "npcs", "vehicles", "behaviors"];
+export { OWNABLE_COLLECTIONS };
 
 /** A world's own statement about whether it may be remixed. */
 export const FORK_POLICIES = ["allow", "allow_with_attribution", "deny"];

@@ -1413,6 +1413,20 @@ const server = http.createServer(async (req, res) => {
         const live = ls.live;
         const { manifest, record } = planRollback(currentM, targetM, {
           actorId: me.id, toVersion, liveState: live, reason: b.reason ?? null,
+          // The number the caller sent came from GET /versions, which lists the
+          // REPOSITORY's counter. The manifest keeps its own, and the two skew
+          // whenever a state-only save (a publish) bumps the record without
+          // touching the manifest — so a rollback refused with "the manifest
+          // supplied is v2, not the v3 that was asked for", blaming the caller
+          // for a version the server itself had just offered. Saying which
+          // counter the number is in removes the guess entirely.
+          versionCounter: "record",
+          // Deliberately NOT passing toManifestHash. That assertion exists for a
+          // caller who SUPPLIES a manifest and must prove it is the snapshot it
+          // claims to be. This route fetches the version from the store by
+          // number and then migrates and stamps it, so its hash legitimately
+          // differs from the stored one — asserting equality here would refuse
+          // every rollback whose target predates the current manifest format.
         });
 
         const gate = await playtestAndRepair(manifest);

@@ -390,8 +390,8 @@ test("a draft world is readable only by its creator", async () => {
   // Prevents the return of: an unreleased world readable by anyone with its id.
   const repo = repoIn("dcs-sec-world-");
   await repo.upsert({ worldId: "w1", ownerId: "victim", manifest: { meta: { title: "unreleased" } }, state: "draft" });
-  await assert.rejects(() => repo.get("w1", { requesterId: "attacker" }), (e) => e.httpStatus === 403);
-  await assert.rejects(() => repo.get("w1", { requesterId: null }), (e) => e.httpStatus === 403);
+  await assert.rejects(() => repo.get("w1", { requesterId: "attacker" }), (e) => e.httpStatus === 404);
+  await assert.rejects(() => repo.get("w1", { requesterId: null }), (e) => e.httpStatus === 404);
   await assert.rejects(() => repo.get("w1", { requesterId: "attacker", requireOwner: true }), (e) => e.httpStatus === 403);
   assert.equal((await repo.get("w1", { requesterId: "victim" })).state, "draft");
   // Publishing changes who may read it, and nothing else about who owns it.
@@ -922,7 +922,11 @@ test("publishing a world does not retroactively expose the drafts it passed thro
 
   await assert.rejects(
     () => repo.getVersion("w", 1, { requesterId: "stranger" }),
-    (e) => e.httpStatus === 403,
+    // 404, not 403: a 403 said "version 1 exists and was private", which tells
+    // a stranger which version numbers a world passed through — the world-level
+    // existence oracle one level down. The refusal is now indistinguishable
+    // from a version that never existed.
+    (e) => e.httpStatus === 404,
     "version 1 was written while the world was private and must stay private",
   );
   const v2 = await repo.getVersion("w", 2, { requesterId: "stranger" });
@@ -941,7 +945,7 @@ test("a version with no recorded state is treated as private, not as published",
   fs.writeFileSync(repo.versions._p("w", 1), JSON.stringify(raw));
   await assert.rejects(
     () => repo.getVersion("w", 1, { requesterId: "stranger" }),
-    (e) => e.httpStatus === 403,
+    (e) => e.httpStatus === 404,
     "a version whose state is unknown must not be served to a stranger",
   );
 });

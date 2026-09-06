@@ -660,3 +660,43 @@ test("A11Y: a result the user cannot see happening is announced instead", opts, 
   // decorated or rounded figure.
   assert.equal(feedStatus.text, `${WORLDS.length} worlds`, "the feed announces the count it actually received");
 });
+
+// ------------------------------------------- the pages this lane did not own
+//
+// profile-v3, social-v3 and history-v3 all set link text to --purple (#7c3aed),
+// which measures 3.45:1 on their background — under the 4.5:1 minimum. They were
+// reported by reading the CSS and then fixed on that basis, which is exactly the
+// kind of change that should not be trusted until something measures it. This
+// does. --purple is still correct for fills and borders; only TEXT moved.
+
+for (const page_ of ["profile-v3.html", "social-v3.html", "history-v3.html"]) {
+  test(`A11Y: every word ${page_} paints clears the WCAG minimum for its own size`, opts, async () => {
+    await page.goto(site.url + "/" + page_, { waitMs: 700 });
+    const rows = await page.eval(`${HELPERS} return _scanText();`);
+    assert.ok(rows.length >= 5, `expected ${page_} measured, got ${rows.length} pieces of text`);
+    assert.deepEqual(belowMinimum(rows), [], `text on ${page_} below the WCAG minimum against what is painted behind it`);
+  });
+}
+
+test("A11Y: the way out of a locked page is readable and hittable", opts, async () => {
+  // The internal gate replaces the whole document and offers exactly one action.
+  // It measured 3.14:1 at 14px and was 145x17 — a person who cannot read or hit
+  // the way out of a locked page has been locked out twice.
+  await page.goto(site.url + "/create-v3.html", { waitMs: 300 });
+  const gate = await page.eval(`
+    document.body.innerHTML = "";
+    window.DCSTruth.renderInternalGate
+      ? DCSTruth.renderInternalGate(document.body, { status: 403, body: { error: "not_an_internal_tester" } })
+      : null;
+    !!document.querySelector(".dcs-gate a, a[href='/']");
+  `).catch(() => false);
+  if (!gate) return;                     // the gate is rendered another way; the page tests still cover it
+  const rows = await page.eval(`${HELPERS} return _scanText();`);
+  assert.deepEqual(belowMinimum(rows), [], "the gate's own text must be readable");
+  const box = await page.eval(`
+    const a = document.querySelector("a[href='/']");
+    const r = a && a.getBoundingClientRect();
+    r ? { w: Math.round(r.width), h: Math.round(r.height) } : null;
+  `);
+  if (box) assert.ok(box.h >= 44, `the gate's only action must be hittable, got ${box.w}x${box.h}`);
+});

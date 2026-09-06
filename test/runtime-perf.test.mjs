@@ -120,10 +120,27 @@ after(async () => {
 });
 
 async function openWorld(worldId, extra = "") {
-  await page.send("Page.addScriptToEvaluateOnNewDocument", { source: `window.DCS_API_BASE = "http://127.0.0.1:${api.port}";` });
-  await page.goto(`${site.url}/play-v3.html?world=${worldId}&stats=1${extra}`, { waitMs: 2500 });
-  const ready = await page.waitFor("window.__rt && document.getElementById('boot').style.display === 'none'", { timeout: 40000 });
-  assert.ok(ready, `${worldId} did not finish loading: ` + JSON.stringify(page.realErrors().slice(0, 2)));
+  // One retry, and only for the PAGE LOAD.
+  //
+  // These tests drive a real headless browser doing real WebGL through
+  // SwiftShader. On a machine already running several other browsers and test
+  // servers, a load can genuinely exceed any timeout that is short enough to be
+  // useful — observed here as "did not finish loading" after 40s while five
+  // suites ran at once. A single retry distinguishes "this page never loads",
+  // which must fail, from "the machine was momentarily saturated", which is not
+  // a fact about the product. If the second attempt also fails, so does the test.
+  //
+  // Deliberately NOT a retry around the assertions: a measurement that needs
+  // retrying to pass is a measurement that did not hold.
+  let lastErrors = [];
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    await page.send("Page.addScriptToEvaluateOnNewDocument", { source: `window.DCS_API_BASE = "http://127.0.0.1:${api.port}";` });
+    await page.goto(`${site.url}/play-v3.html?world=${worldId}&stats=1${extra}`, { waitMs: 2500 });
+    const ready = await page.waitFor("window.__rt && document.getElementById('boot').style.display === 'none'", { timeout: 40000 });
+    if (ready) return;
+    lastErrors = page.realErrors().slice(0, 2);
+  }
+  assert.fail(`${worldId} did not finish loading in two attempts: ` + JSON.stringify(lastErrors));
 }
 
 /** Put the player somewhere, let the runtime settle, and read the numbers. */
@@ -723,3 +740,57 @@ async function pressKey(key, code, text) {
   await page.send("Input.dispatchKeyEvent", { type: "keyUp", ...base });
   await new Promise((r) => setTimeout(r, 120));
 }
+
+test("PERF: the instance budget SETTLES, instead of oscillating around itself", opts, async () => {
+  // The single-sample budget check above was intermittently failing, and it was
+  // read as machine flake. It was not. The adaptive scale never converged: on
+  // this world it swung between scale 0.55 rendering 51 instances and scale 1.00
+  // rendering 499, against a budget of 200, forever. Instance count is a STEP
+  // function of the scale — a dense cluster crosses a tier boundary all at once
+  // — so there was no scale that landed in the controller's deadband, and a
+  // controller trying to fill the budget oscillated instead of settling. On a
+  // real device that is the whole world's detail visibly flipping several times
+  // a second, which no single sample would ever have shown.
+  //
+  // One sample cannot tell a settled system from a swinging one. This watches.
+  await openWorld("w_perf_big");
+  const cz = (CLUSTER.z0 + CLUSTER.z1) / 2;
+  await page.eval(`
+    const rt = window.__rt;
+    rt.teleport(131, ${cz + 120}); rt.player.yaw = 0;
+    rt.setLodScale(null); rt.resetPerf(); return true;
+  `);
+
+  const series = [];
+  for (let i = 0; i < 8; i++) {
+    await new Promise((r) => setTimeout(r, 400));
+    const st = await page.eval("return window.__rt.stats();");
+    series.push({ rendered: st.instances_rendered, scale: st.lod_scale, budget: st.instance_budget });
+  }
+
+  // What distinguishes converging from oscillating is DIRECTION, not stillness:
+  // a scale that steps 0.34 -> 0.352 and stops has converged, while one that
+  // goes 0.55 -> 1.00 -> 0.63 -> 1.00 has not, however long you watch. So the
+  // assertion is that the scale never REVERSES, and that what the player
+  // actually sees — the instance count — is constant and inside the budget.
+  const settled = series.slice(2);
+  const dirs = [];
+  for (let i = 1; i < settled.length; i++) {
+    const d = Math.sign(settled[i].scale - settled[i - 1].scale);
+    if (d !== 0) dirs.push(d);
+  }
+  const reversed = dirs.some((d, i) => i > 0 && d !== dirs[i - 1]);
+  assert.equal(reversed, false,
+    `the LOD scale oscillated instead of converging: ${JSON.stringify(settled.map((s) => s.scale))}`);
+
+  const counts = [...new Set(settled.map((s) => s.rendered))];
+  assert.equal(counts.length, 1,
+    `what the player sees must stop changing: rendered ${JSON.stringify(settled.map((s) => s.rendered))} at scales ${JSON.stringify(settled.map((s) => s.scale))}`);
+
+  for (const s of settled) {
+    assert.ok(s.rendered <= s.budget, `a settled world must be INSIDE its budget, got ${s.rendered} of ${s.budget}`);
+  }
+  // And it must not have settled by giving up and drawing almost nothing.
+  assert.ok(settled[0].rendered > settled[0].budget * 0.25,
+    `settling must not mean abandoning the budget: ${settled[0].rendered} of ${settled[0].budget}`);
+});
