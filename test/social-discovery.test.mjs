@@ -162,7 +162,7 @@ test("B15: a party round-trips and enforces its size", async () => {
   const p = await s.createParty("u1", { maxSize: 2 });
   assert.deepEqual(p.members, ["u1"]);
   await s.joinParty("u2", p.id);
-  assert.equal((await s.getParty(p.id)).size, 2);
+  assert.equal((await s.getParty(p.id, "u1")).size, 2);
   await assert.rejects(() => s.joinParty("u3", p.id), (e) => e.httpStatus === 409 && /full/.test(e.detail));
 });
 
@@ -486,7 +486,7 @@ test("R3 GATE: party join refuses when a member is blocked, in either direction"
   const a = withBlocks([["A", "B"]]);               // A blocked B
   const p1 = await a.createParty("A", {});
   await assert.rejects(() => a.joinParty("B", p1.id), (e) => e.httpStatus === 403 && /blocked/.test(e.detail));
-  assert.deepEqual((await a.getParty(p1.id)).members, ["A"]);
+  assert.deepEqual((await a.getParty(p1.id, "A")).members, ["A"]);
 
   const b = withBlocks([["B", "A"]]);               // B blocked A
   const p2 = await b.createParty("A", {});
@@ -663,4 +663,318 @@ test("a client cannot award itself an achievement with an absurd play duration",
   const honest = await social.recordPlay("w1", "u1", 120);
   assert.equal(honest.seconds, 120, "a plausible duration is still recorded exactly");
   assert.equal(honest.seconds_clamped, false);
+});
+
+// =============================================================================
+// Round-4 — CHECK-THEN-WRITE. Lane J's sweep measured the class: a rule decided
+// from an unlocked read and then written by a locked write is not enforced at
+// all, because every concurrent caller reads the same "there is room" and all of
+// them pass. Measured before the fix: a party with max_size 2 held 9 members
+// after 8 concurrent joins, a 2-seat org held 9, and 16 concurrent friend
+// requests wrote 16 rows for one pair.
+//
+// EVERY test in this section runs its operations with Promise.all (really
+// concurrently, not in sequence) and asserts the STORED STATE on disk rather
+// than the return values — the return values all said "success" while the data
+// was wrong, so a test that trusts them proves nothing.
+// =============================================================================
+
+/** The rows actually on disk for one collection of a service. */
+const stored = (s, name) => {
+  const f = path.join(s.dir, name + ".json");
+  return fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8")) : [];
+};
+const nofail = (results) => results.filter((r) => r.status === "fulfilled").length;
+
+test("R4 GATE: a party's size limit holds against 8 concurrent joins", async () => {
+  // The reproduction from test/regression-sweep.test.mjs, asserted against the
+  // file rather than the responses.
+  const s = svc();
+  const p = await s.createParty("leader", { maxSize: 2 });
+  const r = await Promise.allSettled(Array.from({ length: 8 }, (_, i) => s.joinParty("member-" + i, p.id)));
+
+  const rows = stored(s, "party_members").filter((m) => m.party_id === p.id);
+  assert.equal(rows.length, 2, `max_size 2 must mean 2 rows on disk, got ${rows.length}`);
+  assert.equal(new Set(rows.map((m) => m.member_id)).size, 2, "and no duplicate member rows");
+  assert.equal(nofail(r), 1, "exactly one joiner may be told it succeeded");
+  assert.equal((await s.getParty(p.id, "leader")).size, 2);
+  // The refusals are honest 409s, not swallowed.
+  for (const x of r.filter((y) => y.status === "rejected")) {
+    assert.equal(x.reason.httpStatus, 409);
+    assert.match(x.reason.detail, /full/);
+  }
+});
+
+test("R4: 40 concurrent joins on a 5-seat party store exactly 5 members", async () => {
+  const s = svc();
+  const p = await s.createParty("leader", { maxSize: 5 });
+  await Promise.all(Array.from({ length: 40 }, (_, i) => s.joinParty("m" + i, p.id).catch(() => null)));
+  assert.equal(stored(s, "party_members").filter((m) => m.party_id === p.id).length, 5);
+});
+
+test("R4: the same principal joining a party 12 times concurrently is one member", async () => {
+  const s = svc();
+  const p = await s.createParty("leader", { maxSize: 8 });
+  await Promise.all(Array.from({ length: 12 }, () => s.joinParty("u2", p.id).catch(() => null)));
+  const rows = stored(s, "party_members").filter((m) => m.party_id === p.id);
+  assert.equal(rows.length, 2, "(party_id, member_id) is the primary key; a repeat join is idempotent");
+});
+
+test("R4 GATE: an org's seat limit holds against 8 concurrent adds, and stays recoverable", async () => {
+  const s = svc();
+  const o = await s.createOrg("owner", { name: "Acme Interactive", seats: 2 });
+  const r = await Promise.allSettled(Array.from({ length: 8 }, (_, i) => s.addOrgMember("owner", o.id, "u" + i)));
+
+  const rows = stored(s, "org_members").filter((m) => m.org_id === o.id);
+  assert.equal(rows.length, 2, `2 seats must mean 2 rows on disk, got ${rows.length}`);
+  assert.equal(nofail(r), 1);
+  assert.equal((await s.getOrg(o.id, "owner")).seats_used, 2);
+  // The overflow used to be unrecoverable through the API: setOrgSeats refuses
+  // to shrink below the member count, so an org that overshot could never be
+  // brought back. With the limit actually held, the owner can still resize.
+  assert.equal((await s.setOrgSeats("owner", o.id, 4)).seats, 4);
+  assert.equal((await s.setOrgSeats("owner", o.id, 2)).seats, 2);
+});
+
+test("R4: a seat shrink racing a seat fill never lands an org above its seats", async () => {
+  const s = svc();
+  const o = await s.createOrg("owner", { name: "Org", seats: 6 });
+  await Promise.all([
+    ...Array.from({ length: 5 }, (_, i) => s.addOrgMember("owner", o.id, "u" + i).catch(() => null)),
+    s.setOrgSeats("owner", o.id, 3).catch(() => null),
+  ]);
+  const after = await s.getOrg(o.id, "owner");
+  assert.ok(after.seats_used <= after.seats,
+    `an org must never hold more members than seats, got ${after.seats_used}/${after.seats}`);
+});
+
+test("R4 GATE: 16 concurrent friend requests write ONE row for one relationship", async () => {
+  const s = svc();
+  await Promise.all(Array.from({ length: 16 }, () => s.requestFriend("alice", "bob").catch(() => null)));
+
+  // Against the DECLARED primary key: locally every duplicate survived, while
+  // Supabase upserts on (user_id, friend_id) and would have kept one — so the
+  // two backings held genuinely different data.
+  const rows = stored(s, "friends");
+  assert.equal(rows.length, 1, `16 concurrent requests must write 1 row, got ${rows.length}`);
+  assert.equal(rows[0].status, "requested");
+  assert.equal((await s.friendList("alice")).outgoing.length, 1);
+  assert.equal((await s.friendList("bob")).incoming.length, 1);
+
+  // And acceptFriend, which only ever rewrote the FIRST matching row, now
+  // leaves nothing behind still claiming to be pending.
+  await s.acceptFriend("bob", "alice");
+  assert.equal(stored(s, "friends").filter((f) => f.status === "requested").length, 0);
+  assert.equal(await s.areFriends("alice", "bob"), true);
+});
+
+test("R4: two people requesting each other at the same moment become friends once", async () => {
+  const s = svc();
+  await Promise.all([
+    s.requestFriend("alice", "bob").catch(() => null),
+    s.requestFriend("bob", "alice").catch(() => null),
+  ]);
+  const rows = stored(s, "friends");
+  assert.equal(rows.length, 1, "a crossing request must not write a second row for the same pair");
+  const l = await s.friendList("alice");
+  assert.equal(l.friends.length + l.outgoing.length, 1);
+});
+
+test("R4: concurrent accepts of one request do not error and do not duplicate", async () => {
+  const s = svc();
+  await s.requestFriend("alice", "bob");
+  const r = await Promise.allSettled(Array.from({ length: 4 }, () => s.acceptFriend("bob", "alice")));
+  assert.equal(nofail(r), 4, "losing an accept race is not an error: the friendship exists either way");
+  const rows = stored(s, "friends");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].status, "accepted");
+});
+
+test("R4: 8 concurrent adds of the same team member write one membership row", async () => {
+  const s = svc();
+  const t = await s.createTeam("u1", "Harbour Crew");
+  await Promise.all(Array.from({ length: 8 }, () => s.addTeamMember("u1", t.id, "u2").catch(() => null)));
+  const rows = stored(s, "team_members").filter((m) => m.team_id === t.id);
+  assert.equal(rows.length, 2, `(team_id, member_id) is the primary key, got ${rows.length} rows`);
+  assert.equal(rows.filter((m) => m.member_id === "u2").length, 1);
+});
+
+test("R4: 8 concurrent adds of the same studio member write one row and do not dilute the split", async () => {
+  const s = svc();
+  const st = await s.createStudio("u1", "NovaStudio");
+  await Promise.all(Array.from({ length: 8 }, () => s.addStudioMember("u1", st.id, "u2", "creator").catch(() => null)));
+  const rows = stored(s, "studio_members").filter((m) => m.studio_id === st.id);
+  assert.equal(rows.length, 2);
+  assert.equal((await s.getStudio(st.id)).split_total_bps, 10000, "a duplicate row would have shown up as a broken total");
+});
+
+test("R4: two concurrent splits cannot land a total that is neither of them", async () => {
+  // setStudioSplit validates "exactly 10000 bps" from a read and then writes the
+  // members one row at a time, so two interleaved calls could write A's share of
+  // one and B's share of the other: 6000 + 7000 = 13000, breaking the only rule
+  // the method exists to enforce.
+  const s = svc();
+  const st = await s.createStudio("u1", "NovaStudio");
+  await s.addStudioMember("u1", st.id, "u2", "creator");
+  await Promise.all([
+    s.setStudioSplit("u1", st.id, [{ member_id: "u1", split_bps: 6000 }, { member_id: "u2", split_bps: 4000 }]).catch(() => null),
+    s.setStudioSplit("u1", st.id, [{ member_id: "u1", split_bps: 3000 }, { member_id: "u2", split_bps: 7000 }]).catch(() => null),
+  ]);
+  const after = await s.getStudio(st.id);
+  assert.equal(after.split_total_bps, 10000, `a split must always total 100%, got ${after.split_total_bps}`);
+  assert.equal(after.payments_live, false, "and none of it moves any money");
+});
+
+test("R4: a split that does not name a member zeroes them rather than leaving a stale share", async () => {
+  const s = svc();
+  const st = await s.createStudio("u1", "NovaStudio");
+  await s.addStudioMember("u1", st.id, "u2", "creator");
+  await s.setStudioSplit("u1", st.id, [{ member_id: "u1", split_bps: 5000 }, { member_id: "u2", split_bps: 5000 }]);
+  await s.setStudioSplit("u1", st.id, [{ member_id: "u1", split_bps: 10000 }]);
+  const after = await s.getStudio(st.id);
+  assert.equal(after.split_total_bps, 10000, "leaving u2's old 5000 standing would have totalled 15000");
+  assert.equal(after.members.find((m) => m.member_id === "u2").split_bps, 0);
+});
+
+test("R4: 12 concurrent ratings from one player are one rating", async () => {
+  // rating_avg is what discover() ranks on, so a double-click that wrote two
+  // rows counted one person twice.
+  const s = svc();
+  await Promise.all(Array.from({ length: 12 }, (_, i) => s.rateWorld("p1", "w1", (i % 5) + 1)));
+  assert.equal(stored(s, "world_ratings").filter((r) => r.world_id === "w1").length, 1);
+  const st = await s.worldStats("w1");
+  assert.equal(st.rating_count, 1, "one player, one rating, however fast they click");
+  await s.rateWorld("p2", "w1", 5);
+  assert.equal((await s.worldStats("w1")).rating_count, 2);
+});
+
+test("R4: concurrent leaves never hand a party to someone who has left it", async () => {
+  const s = svc();
+  const p = await s.createParty("u1", { maxSize: 4 });
+  await s.joinParty("u2", p.id);
+  await s.joinParty("u3", p.id);
+  await Promise.all([s.leaveParty("u1", p.id), s.leaveParty("u2", p.id)]);
+  const after = await s.getParty(p.id, "u3");
+  assert.deepEqual(after.members, ["u3"]);
+  assert.ok(after.members.includes(after.leader_id),
+    `the leader must be someone who is still in the party, got ${after.leader_id}`);
+});
+
+test("R4: the counters that were already atomic stay atomic — 60 concurrent creates", async () => {
+  // AUDITED AND SAFE, pinned so it stays that way: recordWorldCreated and
+  // recordWorldPublished increment inside collection.update()'s mutator, which
+  // runs under the write lock, so the read and the write are already one step.
+  // This is the check-then-write shape they are NOT.
+  const s = svc();
+  await s.ensureProfile(P("u1"));
+  await Promise.all([
+    ...Array.from({ length: 60 }, () => s.recordWorldCreated("u1")),
+    ...Array.from({ length: 20 }, () => s.recordWorldPublished("u1")),
+  ]);
+  const me = await s.me(P("u1"));
+  assert.equal(me.worlds_created, 60, "a lost increment here would understate a real counter");
+  assert.equal(me.worlds_published, 20);
+  assert.equal(me.xp, 60 * 25 + 20 * 100);
+});
+
+test("R4: concurrent plays all survive — an append has no rule to race", async () => {
+  const s = svc();
+  await Promise.all(Array.from({ length: 30 }, () => s.recordPlay("w1", "p1", 60)));
+  assert.equal(stored(s, "world_plays").length, 30);
+  assert.equal((await s.worldStats("w1")).plays, 30);
+});
+
+// =============================================================================
+// Round-4 — the open reads. getParty and getTeam took no requester and checked
+// nothing, so an anonymous caller holding an id received the full member list,
+// the leader/owner principal id and the world — invite-only parties included.
+// getOrg had already been given a requesterId; these match it.
+// =============================================================================
+
+test("R4 GATE: an invite-only party is not readable without a requester, or by a stranger", async () => {
+  const s = svc();
+  const p = await s.createParty("leader", { worldId: "w-secret", maxSize: 4, open: false });
+  await assert.rejects(() => s.getParty(p.id), (e) => e.httpStatus === 403 && /invite-only/.test(e.detail));
+  await assert.rejects(() => s.getParty(p.id, "stranger"), (e) => e.httpStatus === 403);
+  const seen = await s.getParty(p.id, "leader");
+  assert.deepEqual(seen.members, ["leader"]);
+  assert.equal(seen.world_id, "w-secret");
+});
+
+test("R4 GATE: an open party tells a stranger its capacity and nobody's identity", async () => {
+  // An open party is one anyone may join, so "does it have room" is public —
+  // that is what a join button needs. WHO is in it is not.
+  const s = svc();
+  const p = await s.createParty("leader", { worldId: "w-secret", maxSize: 3 });
+  await s.joinParty("u2", p.id);
+
+  const anon = await s.getParty(p.id);
+  assert.equal(anon.size, 2);
+  assert.equal(anon.full, false);
+  assert.equal(anon.redacted, true);
+  assert.equal("members" in anon, false, "a stranger must not receive the member list");
+  assert.equal("leader_id" in anon, false, "nor the leader's principal id");
+  assert.equal("world_id" in anon, false, "nor the world the party is in");
+
+  const member = await s.getParty(p.id, "u2");
+  assert.deepEqual(member.members, ["leader", "u2"]);
+  assert.equal(member.leader_id, "leader");
+  assert.equal(member.world_id, "w-secret");
+  assert.equal(member.redacted, undefined);
+});
+
+test("R4 GATE: a team's membership is visible only to its members", async () => {
+  const s = svc();
+  const t = await s.createTeam("owner", "Secret Team");
+  await assert.rejects(() => s.getTeam(t.id), (e) => e.httpStatus === 403 && /only to its members/.test(e.detail));
+  await assert.rejects(() => s.getTeam(t.id, "stranger"), (e) => e.httpStatus === 403);
+  assert.equal((await s.getTeam(t.id, "owner")).name, "Secret Team");
+
+  // A member added later can read it; one removed again cannot.
+  await s.addTeamMember("owner", t.id, "u2");
+  assert.equal((await s.getTeam(t.id, "u2")).members.length, 2);
+  await s.removeTeamMember("owner", t.id, "u2");
+  await assert.rejects(() => s.getTeam(t.id, "u2"), (e) => e.httpStatus === 403);
+  assert.equal((await s.myTeams("u2")).length, 0);
+});
+
+test("R4: an org with no requester at all is refused, not waved through", async () => {
+  // getOrg's check read `if (requesterId && ...)`, so the anonymous case — the
+  // one that most needs it — skipped it entirely.
+  const s = svc();
+  const o = await s.createOrg("u1", { name: "DCS Studios" });
+  await assert.rejects(() => s.getOrg(o.id), (e) => e.httpStatus === 403 && /only to its members/.test(e.detail));
+  assert.equal((await s.getOrg(o.id, "u1")).id, o.id);
+});
+
+test("R4: leaving a party or a team still answers the person who left", async () => {
+  // They are no longer a member, so the permission check would refuse them the
+  // result of their own request. Same rule removeOrgMember already applied.
+  const s = svc();
+  const p = await s.createParty("u1", { maxSize: 4 });
+  await s.joinParty("u2", p.id);
+  const leftParty = await s.leaveParty("u2", p.id);
+  assert.deepEqual(leftParty.members, ["u1"]);
+
+  const t = await s.createTeam("u1", "Crew");
+  await s.addTeamMember("u1", t.id, "u2");
+  const leftTeam = await s.removeTeamMember("u2", t.id, "u2");
+  assert.equal(leftTeam.members.length, 1);
+});
+
+test("R4: a revoked role cannot be used by a call that was already in flight", async () => {
+  // The role check is a read too. It is re-taken inside the atomic step, so an
+  // admin removed while their add is in flight cannot complete it.
+  const s = svc();
+  const o = await s.createOrg("u1", { name: "Org", seats: 10 });
+  await s.addOrgMember("u1", o.id, "u2", "admin");
+  await Promise.all([
+    s.removeOrgMember("u1", o.id, "u2").catch(() => null),
+    s.addOrgMember("u2", o.id, "u3").catch(() => null),
+  ]);
+  const after = await s.getOrg(o.id, "u1");
+  const ids = after.members.map((m) => m.member_id);
+  assert.ok(!ids.includes("u2"), "the admin was removed");
+  assert.ok(!ids.includes("u3") || ids.includes("u2"),
+    "an add may only have landed while its author still held the role");
 });

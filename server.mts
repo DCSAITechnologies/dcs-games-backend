@@ -753,7 +753,13 @@ const server = http.createServer(async (req, res) => {
     }
     {
       let mm = url.match(/^\/social\/parties\/([^/]+)$/);
-      if (mm && method === "GET") return send(res, 200, { ok: true, party: await social.getParty(mm[1]) });
+      if (mm && method === "GET") {
+        // A party's membership is not public. An invite-only party is refused
+        // outright; an open one returns size and room, which is what a join
+        // button needs — never the member list, the leader or the world.
+        const me = await mustBe(req, cid);
+        return send(res, 200, { ok: true, party: await social.getParty(mm[1], me.id) });
+      }
       mm = url.match(/^\/social\/parties\/([^/]+)\/join$/);
       if (mm && method === "POST") {
         const me = await mustBe(req, cid);
@@ -777,7 +783,10 @@ const server = http.createServer(async (req, res) => {
     }
     {
       let mm = url.match(/^\/social\/teams\/([^/]+)$/);
-      if (mm && method === "GET") return send(res, 200, { ok: true, team: await social.getTeam(mm[1]) });
+      if (mm && method === "GET") {
+        const me = await mustBe(req, cid);
+        return send(res, 200, { ok: true, team: await social.getTeam(mm[1], me.id) });
+      }
       mm = url.match(/^\/social\/teams\/([^/]+)\/members$/);
       if (mm && method === "POST") {
         const me = await mustBe(req, cid);

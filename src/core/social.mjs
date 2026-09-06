@@ -24,10 +24,25 @@
 //     is now an injected, optional dependency — and the entitlement fact
 //     (dcs_plus_effective) is kept strictly apart from the money fact
 //     (dcs_plus_paid, always false).
+//
+// Round-4 closed two more, both of them a CLASS rather than an instance:
+//
+//   * CHECK-THEN-WRITE. Every capacity and uniqueness rule in here was decided
+//     from an unlocked read and then written by a locked write, so the lock
+//     protected the write and nothing protected the decision. Measured: a party
+//     with max_size 2 held 9 members after 8 concurrent joins, a 2-seat org held
+//     9, and 16 concurrent friend requests wrote 16 rows for one pair. See the
+//     note on the locks below for how each shape is now closed and why.
+//
+//   * OPEN READS. getParty and getTeam took no requester and checked nothing, so
+//     anyone holding an id — with no credential at all — got the full member
+//     list, the owner's principal id and the world, invite-only parties
+//     included. They now take a requesterId, as getOrg already did.
 import crypto from "node:crypto";
 import path from "node:path";
 import { Errors } from "./errors.mjs";
 import { createCollection, describeCollections } from "./collection.mjs";
+import { createKeyedMutex } from "./mutex.mjs";
 import { createSafetyService } from "./safety.mjs";
 import { computeLevel, publishCredits, canPublish } from "../cw1/identity-core.mjs";
 
@@ -74,6 +89,42 @@ export function createSocialService(env = process.env, deps = {}) {
   const collections = { principals, friends, parties, partyMembers, teams, teamMembers, studios, studioMembers, orgs, orgMembers, plays, ratings };
 
   const has = (k) => deps != null && Object.prototype.hasOwnProperty.call(deps, k);
+
+  // ==================================================== check-then-write, ended
+  //
+  // Round-4 (Lane J's sweep) measured the class this module was full of: a rule
+  // is decided from an UNLOCKED read and then written by a locked write, so the
+  // lock protects the write and nothing protects the decision. Every concurrent
+  // caller reads the same "there is room" / "there is no row yet" and all of
+  // them proceed. Measured: a party with max_size 2 held 9 members after 8
+  // concurrent joins, an org with 2 seats held 9, and 16 concurrent friend
+  // requests wrote 16 rows for a pair whose primary key is (user_id, friend_id).
+  //
+  // Two tools close it, and which one applies depends on where the rule lives:
+  //
+  //   * WITHIN ONE COLLECTION — "is this row already here, and is there room for
+  //     it?" — createCollection.ensure(pred, build) is exactly right and needs no
+  //     help. build() runs while the collection's write lock is HELD, and reads
+  //     are never locked, so a count taken inside build() sees the rows ensure()
+  //     is about to append to and no concurrent insert can land between the two.
+  //     A capacity test IS expressible as an ensure(): throw from build() when
+  //     the count is at the limit. That is not a narrowed window — it is the same
+  //     critical section.
+  //
+  //   * ACROSS TWO COLLECTIONS — "members of THIS party against max_size on the
+  //     PARTY row", "members against seats while the owner is resizing the org" —
+  //     ensure() alone cannot serialise, because the two rows live under two
+  //     different locks. Those paths take a per-object lock as well, keyed by the
+  //     party/org/studio id, so the pair of writes is one critical section.
+  //
+  // Lock ORDER is always object lock -> collection lock, never the reverse, so
+  // the two can never deadlock against each other. The scope is the same one
+  // mutex.mjs states plainly: one process. Two server instances sharing a
+  // directory still need the database to hold these constraints.
+  const withObjectLock = createKeyedMutex();
+  const partyLock = (partyId, fn) => withObjectLock("party:" + partyId, fn);
+  const orgLock = (orgId, fn) => withObjectLock("org:" + orgId, fn);
+  const studioLock = (studioId, fn) => withObjectLock("studio:" + studioId, fn);
 
   // ============================================================ the block check
   //
@@ -233,6 +284,29 @@ export function createSocialService(env = process.env, deps = {}) {
     // A username collision must not fail a first login.
     if (await principals.one((p) => p.username === row.username)) row.username = row.username + "_" + crypto.randomBytes(2).toString("hex");
     return row;
+  }
+
+  /**
+   * The unredacted party and team records.
+   *
+   * These are INTERNAL. Every path that hands one to a caller goes through
+   * svc.getParty / svc.getTeam, which decide what that caller may see. They
+   * exist because the service itself legitimately needs the full record for a
+   * caller who is NOT yet (or no longer) a member — joinParty must read the
+   * membership to run the block check before the joiner is in it, and
+   * leaveParty must read it after the leaver is out.
+   */
+  async function readParty(partyId) {
+    const p = await parties.one((x) => x.id === partyId);
+    if (!p) throw Errors.notFound(`party ${partyId}`);
+    const members = (await partyMembers.find((m) => m.party_id === partyId)).map((m) => m.member_id);
+    return { ...p, members, size: members.length };
+  }
+
+  async function readTeam(teamId) {
+    const t = await teams.one((x) => x.id === teamId);
+    if (!t) throw Errors.notFound(`team ${teamId}`);
+    return { ...t, members: await teamMembers.find((m) => m.team_id === teamId) };
   }
 
   const svc = {
@@ -403,15 +477,31 @@ export function createSocialService(env = process.env, deps = {}) {
       // through a block check now.
       await refuseIfBlocked(meId, otherId, "request_friend");
 
-      const existing = await friends.one((f) =>
-        (f.user_id === meId && f.friend_id === otherId) || (f.user_id === otherId && f.friend_id === meId));
-      if (existing) {
-        if (existing.status === "blocked") throw Errors.forbidden("this relationship is blocked");
-        // They already asked you: accept rather than creating a second row.
-        if (existing.status === "requested" && existing.user_id === otherId) return await svc.acceptFriend(meId, otherId);
-        return { ...existing, idempotent: true };
-      }
-      return await friends.insert({ user_id: meId, friend_id: otherId, status: "requested", created_at: new Date().toISOString(), decided_at: null });
+      // one() then insert() is check-then-write, and the friends table's
+      // declared primary key is (user_id, friend_id) — so the duplicates it
+      // produced were duplicates of a key the store believes is unique. Measured:
+      // 16 concurrent requests wrote 16 rows; locally all 16 survived and the
+      // same person appeared 16 times in `outgoing`, while against Supabase
+      // collection.write() upserts on that key and 15 vanished. The two backings
+      // therefore held genuinely different data, and acceptFriend only ever
+      // rewrote the first of them, so the rest stayed "requested" forever.
+      //
+      // ensure() collapses the look and the write into one locked step. The
+      // predicate is SYMMETRIC, so a crossing request finds the row the other
+      // side wrote rather than adding a second one.
+      const pair = (f) =>
+        (f.user_id === meId && f.friend_id === otherId) || (f.user_id === otherId && f.friend_id === meId);
+      const { row: existing, created } = await friends.ensure(pair, () => ({
+        user_id: meId, friend_id: otherId, status: "requested",
+        created_at: new Date().toISOString(), decided_at: null,
+      }));
+      if (created) return existing;
+      if (existing.status === "blocked") throw Errors.forbidden("this relationship is blocked");
+      // They already asked you: accept rather than creating a second row.
+      // Deliberately OUTSIDE ensure(): acceptFriend writes to this same
+      // collection, and build() may read it but must never write to it.
+      if (existing.status === "requested" && existing.user_id === otherId) return await svc.acceptFriend(meId, otherId);
+      return { ...existing, idempotent: true };
     },
 
     /**
@@ -423,9 +513,22 @@ export function createSocialService(env = process.env, deps = {}) {
       if (!meId) throw Errors.unauthenticated("accepting a friend request needs an authenticated principal");
       if (!otherId) throw Errors.validation("friend_id is required");
       await refuseIfBlocked(meId, otherId, "accept_friend");
-      const row = await friends.one((f) => f.user_id === otherId && f.friend_id === meId && f.status === "requested");
-      if (!row) throw Errors.notFound(`a pending friend request from ${otherId}`);
-      return await friends.update((f) => f.user_id === otherId && f.friend_id === meId, (f) => ({ ...f, status: "accepted", decided_at: new Date().toISOString() }));
+      // one() then update() was the same check-then-write shape: the row could be
+      // removed (or already accepted) between the look and the write, and
+      // update() then returned null — which the route reported as ok:true with a
+      // null friend. update() finds and rewrites under one lock, so the decision
+      // and the write are the same step and "not found" is decided by the write.
+      const accepted = await friends.update(
+        (f) => f.user_id === otherId && f.friend_id === meId && f.status === "requested",
+        (f) => ({ ...f, status: "accepted", decided_at: new Date().toISOString() }),
+      );
+      if (accepted) return accepted;
+      // Losing an accept race is not an error: the friendship exists either way.
+      const already = await friends.one((f) =>
+        ((f.user_id === otherId && f.friend_id === meId) || (f.user_id === meId && f.friend_id === otherId))
+        && f.status === "accepted");
+      if (already) return { ...already, idempotent: true };
+      throw Errors.notFound(`a pending friend request from ${otherId}`);
     },
 
     async removeFriend(meId, otherId) {
@@ -476,50 +579,106 @@ export function createSocialService(env = process.env, deps = {}) {
       return { ...party, members: [meId] };
     },
 
-    async getParty(partyId) {
-      const p = await parties.one((x) => x.id === partyId);
-      if (!p) throw Errors.notFound(`party ${partyId}`);
-      const members = (await partyMembers.find((m) => m.party_id === partyId)).map((m) => m.member_id);
-      return { ...p, members, size: members.length };
+    /**
+     * A party, as much of it as this requester may see. A MEMBER gets the whole
+     * record; everyone else gets the decision below.
+     */
+    async getParty(partyId, requesterId = null) {
+      const p = await readParty(partyId);
+      if (p.members.includes(requesterId)) return p;
+      // Round-4 (Lane L): getParty took no requester at all, so server.mts:717 —
+      // which has no mustBe either — handed an anonymous caller with an id the
+      // full member list, the leader's principal id and the world the party is
+      // in, INCLUDING for a party created with open:false, the estate's own
+      // marker for "invite only". The same sprint closed exactly this on orgs by
+      // giving getOrg a requesterId; this is that check, on parties.
+      //
+      // An INVITE-ONLY party is private, full stop: refused, as an org is.
+      if (!p.open) {
+        throw Errors.forbidden("this party is invite-only and is visible only to its members", {
+          meta: { action: "get_party", party_id: partyId },
+        });
+      }
+      // An OPEN party is one anyone may join, so its existence and whether it has
+      // room are legitimately public — that is what a join button needs. WHO is
+      // in it is not: no member list, no leader id, no world id leaves here.
+      return {
+        id: p.id,
+        open: true,
+        closed_at: p.closed_at,
+        max_size: p.max_size,
+        size: p.size,
+        full: p.size >= p.max_size,
+        redacted: true,
+        note: "This party is open, so its capacity is public. Its member list, leader and world are visible only to its members.",
+      };
     },
 
     async joinParty(meId, partyId) {
       if (!meId) throw Errors.unauthenticated("joining a party needs an authenticated principal");
-      const p = await svc.getParty(partyId);
-      if (p.closed_at) throw Errors.conflict("this party has closed");
-      if (p.members.includes(meId)) return { ...p, idempotent: true };
-      if (!p.open) throw Errors.forbidden("this party is invite-only");
-      // A party is a shared room. Joining one that holds someone you blocked —
-      // or who blocked you — puts the two of you back together, which is the
-      // thing the block exists to prevent, so it is refused here rather than
-      // left to whatever calls joinParty.
-      for (const member of p.members) {
-        if (await isBlockedEitherWay(meId, member)) {
-          await dropFriendRowsBetween(meId, member);
-          throw Errors.forbidden(
-            "this party includes someone you have blocked, or who has blocked you",
-            { meta: { action: "join_party", party_id: partyId } },
-          );
+      // The party lock covers the WHOLE decision, because the capacity rule spans
+      // two collections: the member count lives in party_members and max_size
+      // lives on the parties row. It also keeps a join from interleaving with the
+      // leave that closes the party or hands over the leadership.
+      return await partyLock(partyId, async () => {
+        const p = await readParty(partyId);
+        if (p.closed_at) throw Errors.conflict("this party has closed");
+        if (p.members.includes(meId)) return { ...p, idempotent: true };
+        if (!p.open) throw Errors.forbidden("this party is invite-only");
+        // A party is a shared room. Joining one that holds someone you blocked —
+        // or who blocked you — puts the two of you back together, which is the
+        // thing the block exists to prevent, so it is refused here rather than
+        // left to whatever calls joinParty.
+        for (const member of p.members) {
+          if (await isBlockedEitherWay(meId, member)) {
+            await dropFriendRowsBetween(meId, member);
+            throw Errors.forbidden(
+              "this party includes someone you have blocked, or who has blocked you",
+              { meta: { action: "join_party", party_id: partyId } },
+            );
+          }
         }
-      }
-      if (p.size >= p.max_size) throw Errors.conflict(`this party is full (${p.size}/${p.max_size})`);
-      await partyMembers.insert({ party_id: partyId, member_id: meId, joined_at: new Date().toISOString() });
-      return await svc.getParty(partyId);
+        // The capacity decision and the insert are ONE step. build() runs holding
+        // the party_members write lock, so the count it takes is the count
+        // ensure() is about to append to — no other insert can land between them.
+        // Measured before this: 8 concurrent joins put 9 members in a party whose
+        // max_size was 2, and every one of them reported success.
+        await partyMembers.ensure(
+          (m) => m.party_id === partyId && m.member_id === meId,
+          async () => {
+            const row = await parties.one((x) => x.id === partyId);
+            if (!row) throw Errors.notFound(`party ${partyId}`);
+            if (row.closed_at) throw Errors.conflict("this party has closed");
+            const size = (await partyMembers.find((m) => m.party_id === partyId)).length;
+            if (size >= row.max_size) throw Errors.conflict(`this party is full (${size}/${row.max_size})`);
+            return { party_id: partyId, member_id: meId, joined_at: new Date().toISOString() };
+          },
+        );
+        return await readParty(partyId);
+      });
     },
 
     async leaveParty(meId, partyId) {
-      const p = await svc.getParty(partyId);
-      if (!p.members.includes(meId)) throw Errors.notFound("your membership of that party");
-      await partyMembers.remove((m) => m.party_id === partyId && m.member_id === meId);
-      const left = await svc.getParty(partyId);
-      // A party with nobody in it is closed rather than left as a ghost row.
-      if (left.size === 0) {
-        await parties.update((x) => x.id === partyId, (x) => ({ ...x, closed_at: new Date().toISOString() }));
-        return { ...left, closed: true };
-      }
-      // The leader leaving hands over rather than orphaning the party.
-      if (p.leader_id === meId) await parties.update((x) => x.id === partyId, (x) => ({ ...x, leader_id: left.members[0] }));
-      return await svc.getParty(partyId);
+      return await partyLock(partyId, async () => {
+        const p = await readParty(partyId);
+        if (!p.members.includes(meId)) throw Errors.notFound("your membership of that party");
+        await partyMembers.remove((m) => m.party_id === partyId && m.member_id === meId);
+        const left = await readParty(partyId);
+        // A party with nobody in it is closed rather than left as a ghost row.
+        if (left.size === 0) {
+          await parties.update((x) => x.id === partyId, (x) => ({ ...x, closed_at: new Date().toISOString() }));
+          return { ...left, closed: true };
+        }
+        // The leader leaving hands over rather than orphaning the party. Read
+        // under the same lock as the removal, so the successor is someone who is
+        // still a member — two concurrent leaves used to be able to hand the
+        // party to the person who had just left it.
+        if (p.leader_id === meId) await parties.update((x) => x.id === partyId, (x) => ({ ...x, leader_id: left.members[0] }));
+        // The leaver gets the full view of the party they just left: it is the
+        // result of their own action, and they already knew who was in it. Same
+        // rule removeOrgMember applies to a self-removal.
+        return await readParty(partyId);
+      });
     },
 
     async myParties(meId) {
@@ -527,7 +686,7 @@ export function createSocialService(env = process.env, deps = {}) {
       const out = [];
       for (const m of mine) {
         const p = await parties.one((x) => x.id === m.party_id);
-        if (p && !p.closed_at) out.push(await svc.getParty(p.id));
+        if (p && !p.closed_at) out.push(await svc.getParty(p.id, meId));
       }
       return out;
     },
@@ -542,38 +701,66 @@ export function createSocialService(env = process.env, deps = {}) {
       return { ...team, members: [{ member_id: meId, role: "owner" }] };
     },
 
-    async getTeam(teamId) {
-      const t = await teams.one((x) => x.id === teamId);
-      if (!t) throw Errors.notFound(`team ${teamId}`);
-      return { ...t, members: await teamMembers.find((m) => m.team_id === teamId) };
+    /**
+     * A team is private to its members — the same rule as an org, and the same
+     * hole this had: the WRITE side checked the caller's role and the READ side
+     * checked nothing, so anyone with the id got the name, the owner's principal
+     * id and every member row. A team has no "open" state to make public, so
+     * unlike a party there is nothing to redact down to.
+     */
+    async getTeam(teamId, requesterId = null) {
+      const t = await readTeam(teamId);
+      if (!requesterId || !t.members.some((m) => m.member_id === requesterId)) {
+        throw Errors.forbidden("this team is visible only to its members", {
+          meta: { action: "get_team", team_id: teamId },
+        });
+      }
+      return t;
     },
 
     async addTeamMember(meId, teamId, memberId, role = "member") {
       if (!TEAM_ROLES.includes(role)) throw Errors.validation(`role must be one of: ${TEAM_ROLES.join(", ")}`);
-      const t = await svc.getTeam(teamId);
+      if (!memberId) throw Errors.validation("member_id is required");
+      const t = await svc.getTeam(teamId, meId);
       const mine = t.members.find((m) => m.member_id === meId);
       if (!mine || !["owner", "admin"].includes(mine.role)) throw Errors.forbidden("only an owner or admin can add members");
       if (role === "owner") throw Errors.forbidden("a team has exactly one owner; transfer ownership instead");
       if (t.members.some((m) => m.member_id === memberId)) return { ...t, idempotent: true };
-      await teamMembers.insert({ team_id: teamId, member_id: memberId, role, joined_at: new Date().toISOString() });
-      return await svc.getTeam(teamId);
+      // (team_id, member_id) is the declared primary key, so two concurrent adds
+      // of the same person wrote two rows locally and one against Supabase — the
+      // friends defect, one capability along. ensure() makes the look and the
+      // insert one step, and the adder's role is re-read INSIDE it so a
+      // permission that was revoked while this call was in flight cannot be used.
+      const { created } = await teamMembers.ensure(
+        (m) => m.team_id === teamId && m.member_id === memberId,
+        async () => {
+          const still = await teamMembers.one((m) => m.team_id === teamId && m.member_id === meId);
+          if (!still || !["owner", "admin"].includes(still.role)) throw Errors.forbidden("only an owner or admin can add members");
+          return { team_id: teamId, member_id: memberId, role, joined_at: new Date().toISOString() };
+        },
+      );
+      const after = await svc.getTeam(teamId, meId);
+      return created ? after : { ...after, idempotent: true };
     },
 
     async removeTeamMember(meId, teamId, memberId) {
-      const t = await svc.getTeam(teamId);
+      const t = await svc.getTeam(teamId, meId);
       const mine = t.members.find((m) => m.member_id === meId);
       const isSelf = meId === memberId;
       if (!isSelf && (!mine || !["owner", "admin"].includes(mine.role))) throw Errors.forbidden("only an owner or admin can remove members");
       if (t.owner_id === memberId) throw Errors.forbidden("the owner cannot be removed; transfer ownership first");
       const n = await teamMembers.remove((m) => m.team_id === teamId && m.member_id === memberId);
       if (!n) throw Errors.notFound("that membership");
-      return await svc.getTeam(teamId);
+      // A member who removed THEMSELVES is no longer a member, so getTeam would
+      // now refuse them the answer to their own request. They get the full view
+      // of the team they just left, which is what removeOrgMember already does.
+      return await readTeam(teamId);
     },
 
     async myTeams(meId) {
       const mine = await teamMembers.find((m) => m.member_id === meId);
       const out = [];
-      for (const m of mine) out.push(await svc.getTeam(m.team_id));
+      for (const m of mine) out.push(await svc.getTeam(m.team_id, meId));
       return out;
     },
 
@@ -601,33 +788,62 @@ export function createSocialService(env = process.env, deps = {}) {
       };
     },
 
+    /**
+     * The split must total exactly 10000 bps. That invariant is validated from a
+     * read and then written as N separate row updates, so two concurrent calls
+     * used to interleave into a total that is neither of them: A writing
+     * 6000/4000 against B writing 3000/7000 could land 6000/7000 = 13000, and
+     * the rule the whole method exists to enforce would be violated by the
+     * method itself. The studio lock makes the validate-and-write one step.
+     */
     async setStudioSplit(meId, studioId, splits) {
-      const s = await svc.getStudio(studioId);
-      const mine = s.members.find((m) => m.member_id === meId);
-      if (!mine || !["owner", "admin"].includes(mine.role)) throw Errors.forbidden("only an owner or admin can configure the split");
-      if (!Array.isArray(splits) || !splits.length) throw Errors.validation("splits must be a non-empty array of { member_id, split_bps }");
-      const total = splits.reduce((a, x) => a + Number(x.split_bps || 0), 0);
-      if (total !== 10000) throw Errors.validation(`splits must total exactly 10000 basis points (100%), got ${total}`);
-      for (const x of splits) {
-        if (!s.members.some((m) => m.member_id === x.member_id)) throw Errors.validation(`'${x.member_id}' is not a member of this studio`);
-      }
-      for (const x of splits) {
-        await studioMembers.update((m) => m.studio_id === studioId && m.member_id === x.member_id, (m) => ({ ...m, split_bps: Number(x.split_bps) }));
-      }
-      return await svc.getStudio(studioId);
+      return await studioLock(studioId, async () => {
+        const s = await svc.getStudio(studioId);
+        const mine = s.members.find((m) => m.member_id === meId);
+        if (!mine || !["owner", "admin"].includes(mine.role)) throw Errors.forbidden("only an owner or admin can configure the split");
+        if (!Array.isArray(splits) || !splits.length) throw Errors.validation("splits must be a non-empty array of { member_id, split_bps }");
+        const total = splits.reduce((a, x) => a + Number(x.split_bps || 0), 0);
+        if (total !== 10000) throw Errors.validation(`splits must total exactly 10000 basis points (100%), got ${total}`);
+        for (const x of splits) {
+          if (!s.members.some((m) => m.member_id === x.member_id)) throw Errors.validation(`'${x.member_id}' is not a member of this studio`);
+        }
+        // Every named member is rewritten, and anyone not named is zeroed — a
+        // split that leaves an old share standing is a split that does not total
+        // 100%. A member added by a concurrent addStudioMember starts at 0, so it
+        // cannot break the total either.
+        const named = new Map(splits.map((x) => [x.member_id, Number(x.split_bps)]));
+        for (const m of s.members) {
+          const bps = named.has(m.member_id) ? named.get(m.member_id) : 0;
+          if (bps === m.split_bps) continue;
+          await studioMembers.update((r) => r.studio_id === studioId && r.member_id === m.member_id, (r) => ({ ...r, split_bps: bps }));
+        }
+        return await svc.getStudio(studioId);
+      });
     },
 
     async addStudioMember(meId, studioId, memberId, role = "member") {
       if (!STUDIO_ROLES.includes(role)) throw Errors.validation(`role must be one of: ${STUDIO_ROLES.join(", ")}`);
+      if (!memberId) throw Errors.validation("member_id is required");
       const s = await svc.getStudio(studioId);
       const mine = s.members.find((m) => m.member_id === meId);
       if (!mine || !["owner", "admin"].includes(mine.role)) throw Errors.forbidden("only an owner or admin can add members");
       if (role === "owner") throw Errors.forbidden("a studio has exactly one owner");
       if (s.members.some((m) => m.member_id === memberId)) return { ...s, idempotent: true };
-      // A new member starts on zero: adding someone must never silently dilute
-      // an existing split.
-      await studioMembers.insert({ studio_id: studioId, member_id: memberId, role, split_bps: 0, joined_at: new Date().toISOString() });
-      return await svc.getStudio(studioId);
+      // (studio_id, member_id) is the declared primary key, and the same
+      // check-then-write shape wrote duplicates of it. The adder's role is
+      // re-read inside the atomic step for the same reason as the team above.
+      const { created } = await studioMembers.ensure(
+        (m) => m.studio_id === studioId && m.member_id === memberId,
+        async () => {
+          const still = await studioMembers.one((m) => m.studio_id === studioId && m.member_id === meId);
+          if (!still || !["owner", "admin"].includes(still.role)) throw Errors.forbidden("only an owner or admin can add members");
+          // A new member starts on zero: adding someone must never silently
+          // dilute an existing split.
+          return { studio_id: studioId, member_id: memberId, role, split_bps: 0, joined_at: new Date().toISOString() };
+        },
+      );
+      const after = await svc.getStudio(studioId);
+      return created ? after : { ...after, idempotent: true };
     },
 
     // =================================================================== orgs
@@ -651,7 +867,10 @@ export function createSocialService(env = process.env, deps = {}) {
       const o = await orgs.one((x) => x.id === orgId);
       if (!o) throw Errors.notFound(`org ${orgId}`);
       const members = await orgMembers.find((m) => m.org_id === orgId);
-      if (requesterId && !members.some((m) => m.member_id === requesterId)) {
+      // `requesterId &&` used to mean an anonymous caller skipped the check
+      // entirely — the one case that most needs it. No caller relies on that:
+      // every route and every internal path passes a principal.
+      if (!requesterId || !members.some((m) => m.member_id === requesterId)) {
         throw Errors.forbidden("this org is visible only to its members");
       }
       const used = members.length;
@@ -676,11 +895,36 @@ export function createSocialService(env = process.env, deps = {}) {
       }
       if (role === "owner") throw Errors.forbidden("an org has exactly one billing owner; transfer ownership instead");
       if (o.members.some((m) => m.member_id === memberId)) return { ...o, idempotent: true };
-      if (o.seats_remaining <= 0) {
-        throw Errors.conflict(`this org has no seats left (${o.seats_used}/${o.seats})`, { meta: { seats: o.seats, used: o.seats_used } });
-      }
-      await orgMembers.insert({ org_id: orgId, member_id: memberId, role, joined_at: new Date().toISOString() });
-      return await svc.getOrg(orgId, meId);
+      // Seats are the only limit an org has, and they were decided from an
+      // unlocked read: 8 concurrent adds put 9 members in a 2-seat org, all
+      // reporting success, and setOrgSeats then refused to shrink back below the
+      // overflow — so the state could not be recovered through the API at all.
+      //
+      // The org lock is needed as well as ensure(), because the count is in
+      // org_members and the limit is on the orgs row: without it the owner could
+      // shrink the seat count in the window between the count and the insert.
+      return await orgLock(orgId, async () => {
+        const { created } = await orgMembers.ensure(
+          (m) => m.org_id === orgId && m.member_id === memberId,
+          async () => {
+            const row = await orgs.one((x) => x.id === orgId);
+            if (!row) throw Errors.notFound(`org ${orgId}`);
+            // Re-read the adder's own role in the same step: a permission that
+            // was revoked while this call was in flight must not be usable.
+            const still = await orgMembers.one((m) => m.org_id === orgId && m.member_id === meId);
+            if (!still || !["owner", "admin"].includes(still.role)) {
+              throw Errors.forbidden("only an owner or admin can add members to an org");
+            }
+            const used = (await orgMembers.find((m) => m.org_id === orgId)).length;
+            if (used >= row.seats) {
+              throw Errors.conflict(`this org has no seats left (${used}/${row.seats})`, { meta: { seats: row.seats, used } });
+            }
+            return { org_id: orgId, member_id: memberId, role, joined_at: new Date().toISOString() };
+          },
+        );
+        const after = await svc.getOrg(orgId, meId);
+        return created ? after : { ...after, idempotent: true };
+      });
     },
 
     async removeOrgMember(meId, orgId, memberId) {
@@ -698,14 +942,19 @@ export function createSocialService(env = process.env, deps = {}) {
 
     async setOrgSeats(meId, orgId, seats) {
       if (!Number.isInteger(seats) || seats < 1 || seats > 1000) throw Errors.validation("seats must be between 1 and 1000");
-      const o = await svc.getOrg(orgId, meId);
-      if (o.billing_owner !== meId) throw Errors.forbidden("only the billing owner can change the seat count");
-      if (seats < o.seats_used) {
-        // Silently dropping members to fit a smaller plan would be a data loss.
-        throw Errors.conflict(`this org already has ${o.seats_used} members; remove some before reducing to ${seats} seats`);
-      }
-      await orgs.update((x) => x.id === orgId, (x) => ({ ...x, seats }));
-      return await svc.getOrg(orgId, meId);
+      // Under the same lock addOrgMember takes: a shrink that reads the member
+      // count and an add that reads the seat count would otherwise cross, and
+      // land an org above the seat limit that both of them had just checked.
+      return await orgLock(orgId, async () => {
+        const o = await svc.getOrg(orgId, meId);
+        if (o.billing_owner !== meId) throw Errors.forbidden("only the billing owner can change the seat count");
+        if (seats < o.seats_used) {
+          // Silently dropping members to fit a smaller plan would be a data loss.
+          throw Errors.conflict(`this org already has ${o.seats_used} members; remove some before reducing to ${seats} seats`);
+        }
+        await orgs.update((x) => x.id === orgId, (x) => ({ ...x, seats }));
+        return await svc.getOrg(orgId, meId);
+      });
     },
 
     async myOrgs(meId) {
@@ -738,9 +987,15 @@ export function createSocialService(env = process.env, deps = {}) {
     async rateWorld(principalId, worldId, rating) {
       if (!principalId) throw Errors.unauthenticated("rating a world needs an authenticated principal");
       if (!Number.isInteger(rating) || rating < 1 || rating > 5) throw Errors.validation("rating must be an integer from 1 to 5");
-      const existing = await ratings.one((r) => r.world_id === worldId && r.principal_id === principalId);
-      if (existing) return await ratings.update((r) => r.world_id === worldId && r.principal_id === principalId, (r) => ({ ...r, rating, created_at: new Date().toISOString() }));
-      return await ratings.insert({ world_id: worldId, principal_id: principalId, rating, created_at: new Date().toISOString() });
+      if (!worldId) throw Errors.validation("world_id is required");
+      // one()-then-update-or-insert is check-then-write against a declared
+      // primary key of (world_id, principal_id): two ratings submitted at once by
+      // the same player wrote two rows, so worldStats counted one person twice
+      // and rating_avg — the number discover() ranks on — was skewed by a double
+      // click. upsert() decides and writes under one lock.
+      const row = { world_id: worldId, principal_id: principalId, rating, created_at: new Date().toISOString() };
+      await ratings.upsert((r) => r.world_id === worldId && r.principal_id === principalId, row);
+      return row;
     },
 
     /** Raw measured rows, for services that compute over them (progression). */

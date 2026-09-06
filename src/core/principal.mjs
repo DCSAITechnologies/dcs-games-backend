@@ -85,7 +85,10 @@ export function verifyLocalToken(secret, token) {
   try { payload = b64urlJson(p); } catch { throw Errors.invalidToken("malformed payload"); }
   if (!payload.sub) throw Errors.invalidToken("token carries no subject");
   const now = Math.floor(Date.now() / 1000);
-  if (typeof payload.exp === "number" && payload.exp < now) throw Errors.invalidToken("token expired");
+  // `exp` means "not valid ON OR AFTER", and it is second-granular — so `<`
+  // kept a token alive for up to a further second past its own expiry,
+  // depending only on where in the second it happened to be signed.
+  if (typeof payload.exp === "number" && payload.exp <= now) throw Errors.invalidToken("token expired");
   if (typeof payload.nbf === "number" && payload.nbf > now) throw Errors.invalidToken("token not yet valid");
   // The issuer was STAMPED on every token and never checked. Harmless while one
   // secret exists, and this estate is explicitly multi-product with a
