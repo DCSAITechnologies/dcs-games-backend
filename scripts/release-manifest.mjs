@@ -67,8 +67,39 @@ const manifest = {
   },
 };
 
-const out = path.resolve(GB, "../../DCS_GAMES_SPRINT_SEP2026/RELEASE_MANIFEST.json");
+const SPRINT = path.resolve(GB, "../../DCS_GAMES_SPRINT_SEP2026");
+const out = path.join(SPRINT, "RELEASE_MANIFEST.json");
 fs.mkdirSync(path.dirname(out), { recursive: true });
+fs.writeFileSync(out, JSON.stringify(manifest, null, 2) + "\n");
+
+// The estate-root documents are the source of truth and live where the handoff
+// asks for them, but that directory is not a repository. Snapshot them into the
+// versioned sprint directory so no deliverable exists only on one laptop --
+// the same exposure A0 fixed for the frontend.
+const ESTATE = path.resolve(GB, "../..");
+const rootDocs = [
+  "00_PUBLIC_LAUNCH_BLOCKERS_AND_APPROVALS.md",
+  "DCS_GAMES_CONTINUOUS_STATUS.md",
+  "DCS_GAMES_ESTATE_PASSPORT.md",
+  "DCS_GAMES_EXECUTION_OWNERSHIP.md",
+];
+const snapDir = path.join(SPRINT, "estate-root-snapshot");
+fs.mkdirSync(snapDir, { recursive: true });
+const snapped = [];
+for (const d of rootDocs) {
+  const src = path.join(ESTATE, d);
+  if (!fs.existsSync(src)) continue;
+  fs.copyFileSync(src, path.join(snapDir, d));
+  snapped.push(d);
+}
+fs.writeFileSync(path.join(snapDir, "README.md"),
+  "# Snapshot of the estate-root documents\n\n" +
+  "These are COPIES. The source of truth is the estate root, where the handoff\n" +
+  "asks for them; that directory is not a repository, so they are snapshotted here\n" +
+  "by `scripts/release-manifest.mjs` on every release checkpoint.\n\n" +
+  "Snapshotted " + new Date().toISOString() + ":\n" +
+  snapped.map((d) => "- " + d).join("\n") + "\n");
+manifest.estate_root_documents = snapped;
 fs.writeFileSync(out, JSON.stringify(manifest, null, 2) + "\n");
 console.log(JSON.stringify(manifest, null, 2));
 console.error(`\nwritten: ${out}`);
