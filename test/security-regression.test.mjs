@@ -13,6 +13,8 @@ import { createPrincipalResolver, signLocalToken, verifyLocalToken } from "../sr
 import { createVerificationService } from "../src/core/verification.mjs";
 import { createMarketplaceService } from "../src/core/marketplace.mjs";
 import { createSocialService } from "../src/core/social.mjs";
+import { createSubscriptionsService, INTERNAL_WINDOW_ENDS, PAID_STATUSES } from "../src/core/subscriptions.mjs";
+import { WorldRepository, FileWorldStore, VersionHistoryStore } from "../src/core/worldstore.mjs";
 
 const SECRET = "regression-secret-not-a-real-key";
 const local = (o = {}) => createPrincipalResolver({ localSecret: SECRET, supabaseUrl: "", supabaseKey: "", ...o });
@@ -315,4 +317,113 @@ test("an org's billing owner cannot be removed by a member", async () => {
   await assert.rejects(() => s.removeOrgMember("member-1", org.id, "owner-1"), (e) => e.httpStatus === 403);
   await assert.rejects(() => s.removeOrgMember("owner-1", org.id, "owner-1"),
     (e) => e.httpStatus === 403 && /billing owner cannot be removed/.test(e.detail));
+});
+
+// ================================================== subscriptions: the grant
+//
+// DEFECT: capability 77 kept subscriptions in an in-memory Map seeded with one
+// hard-coded `{ plan: "dcs_plus", status: "active" }` row for the founder,
+// behind a table no migration created. The rebuilt module must hold two things:
+// a customer cannot be handed a plan, and a comped internal grant cannot become
+// permanent.
+
+test("subscribing refuses rather than quietly granting a free plan", async () => {
+  // Prevents the return of: a caller believing they subscribed, and a row that
+  // the first genuine billing run cannot tell from a paid one.
+  const s = createSubscriptionsService(tmpEnv("dcs-sec-sub-"));
+  await assert.rejects(() => s.subscribe("customer-1", "dcs_plus"),
+    (e) => e.httpStatus === 503 && e.code === "not_configured");
+  const st = await s.statusFor("customer-1");
+  assert.equal(st.plan, "free");
+  assert.equal(st.active_grant, false);
+  assert.equal(st.paid, false);
+  assert.equal((await s.listGrants()).count, 0, "a refused subscribe must not create a subscription");
+  assert.equal((await s.assertDark()).dark, true);
+});
+
+test("a comped grant cannot be created without an expiry inside the internal window", async () => {
+  // Prevents the return of: a permanent "internal test" plan. An explicit null
+  // used to pass straight through to the row, so the default protected the
+  // careless caller and not the deliberate one — the grant then never expired
+  // and assertDark, which only compared a present expiry against the window,
+  // reported it as fine.
+  const s = createSubscriptionsService(tmpEnv("dcs-sec-grant-"));
+  const granter = { id: "tester-1", isInternalTester: true };
+  const subject = { id: "tester-2", isInternalTester: true };
+  for (const never of [null, ""]) {
+    await assert.rejects(() => s.grantTestPlan(granter, subject, "dcs_plus", { expiresAt: never }),
+      (e) => e.httpStatus === 422 && /must expire/.test(e.detail), `expiresAt=${JSON.stringify(never)} must be refused`);
+  }
+  await assert.rejects(() => s.grantTestPlan(granter, subject, "dcs_plus", { expiresAt: "2027-01-01" }),
+    (e) => e.httpStatus === 422 && /outlive/.test(e.detail));
+  assert.equal((await s.listGrants()).count, 0, "no refused grant may leave a row behind");
+
+  const row = await s.grantTestPlan(granter, subject);
+  assert.ok(row.expires_at, "the default grant must carry an expiry");
+  assert.ok(new Date(row.expires_at).getTime() <= new Date(INTERNAL_WINDOW_ENDS + "T23:59:59Z").getTime());
+  assert.equal(row.price_minor, 0);
+  assert.equal(row.paid, false);
+  assert.ok(!PAID_STATUSES.includes(row.status), `'${row.status}' is a paid status`);
+  assert.equal((await s.assertDark()).dark, true);
+});
+
+test("the subscription dark invariant fails loudly when payments are switched on", async () => {
+  // Prevents the return of: assertDark() passing vacuously.
+  const s = createSubscriptionsService(tmpEnv("dcs-sec-sublive-", { PAYMENTS_LIVE: "1" }));
+  const dark = await s.assertDark();
+  assert.equal(dark.dark, false);
+  assert.ok(dark.problems.some((p) => /PAYMENTS_LIVE/.test(p)));
+});
+
+// ================================================== persistence: other people's worlds
+//
+// DEFECT: the Round-2 store kept manifests in a process-local Map with no
+// ownership at all, so any caller who knew a world id had the world. The durable
+// store owns the ownership rules now; these hold them.
+
+const repoIn = (prefix) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  return new WorldRepository(new FileWorldStore(path.join(dir, "worlds")), new VersionHistoryStore(path.join(dir, "world-versions")));
+};
+
+test("a draft world is readable only by its creator", async () => {
+  // Prevents the return of: an unreleased world readable by anyone with its id.
+  const repo = repoIn("dcs-sec-world-");
+  await repo.upsert({ worldId: "w1", ownerId: "victim", manifest: { meta: { title: "unreleased" } }, state: "draft" });
+  await assert.rejects(() => repo.get("w1", { requesterId: "attacker" }), (e) => e.httpStatus === 403);
+  await assert.rejects(() => repo.get("w1", { requesterId: null }), (e) => e.httpStatus === 403);
+  await assert.rejects(() => repo.get("w1", { requesterId: "attacker", requireOwner: true }), (e) => e.httpStatus === 403);
+  assert.equal((await repo.get("w1", { requesterId: "victim" })).state, "draft");
+  // Publishing changes who may read it, and nothing else about who owns it.
+  await repo.upsert({ worldId: "w1", ownerId: "victim", manifest: { meta: { title: "released" } }, state: "published" });
+  assert.equal((await repo.get("w1", { requesterId: "attacker" })).owner_id, "victim");
+  await assert.rejects(() => repo.get("w1", { requesterId: "attacker", requireOwner: true }), (e) => e.httpStatus === 403);
+});
+
+test("another creator cannot overwrite a world they do not own", async () => {
+  // Prevents the return of: an id-keyed upsert with no ownership rule.
+  const repo = repoIn("dcs-sec-upsert-");
+  await repo.upsert({ worldId: "w1", ownerId: "victim", manifest: { meta: { title: "mine" } }, state: "draft" });
+  await assert.rejects(
+    () => repo.upsert({ worldId: "w1", ownerId: "attacker", manifest: { meta: { title: "HIJACKED" } }, state: "published" }),
+    (e) => e.httpStatus === 403
+  );
+  const after = await repo.get("w1", { requesterId: "victim" });
+  assert.equal(after.title, "mine");
+  assert.equal(after.state, "draft", "a refused write must not have changed the world's state either");
+});
+
+test("a retained world version cannot be rewritten", async () => {
+  // Prevents the return of: a rollback target that can be edited after the fact,
+  // which would make the whole retained history unfalsifiable.
+  const repo = repoIn("dcs-sec-versions-");
+  await repo.upsert({ worldId: "w1", ownerId: "victim", manifest: { meta: { title: "v1" } }, state: "draft" });
+  await repo.upsert({ worldId: "w1", ownerId: "victim", manifest: { meta: { title: "v2" } }, state: "draft" });
+  const v1 = await repo.getVersion("w1", 1, { requesterId: "victim" });
+  assert.equal(v1.manifest.meta.title, "v1");
+  // Re-saving the same version number must not replace what was recorded.
+  const again = await repo.versions.put("w1", 1, { world_id: "w1", version: 1, manifest: { meta: { title: "REWRITTEN" } }, manifest_hash: "x" });
+  assert.equal(again.already_recorded, true);
+  assert.equal((await repo.getVersion("w1", 1, { requesterId: "victim" })).manifest.meta.title, "v1");
+  assert.deepEqual((await repo.listVersions("w1", { requesterId: "victim" })).map((v) => v.version), [1, 2]);
 });

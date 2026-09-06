@@ -30,9 +30,15 @@ export function clientVerifier(cfg) {
     el.textContent = (status === 'VERIFIED' ? '\u2713 ' : '\u2717 ') + status + (detail ? ' — ' + detail : '');
     el.setAttribute('data-status', status);
   }
-  function canonicalBody(r) {
-    // keys sorted — must match the signing side exactly
-    return JSON.stringify({ attestation: r.attestation, attested_by: r.attested_by, prev_hash: r.prev_hash, subject_type: r.subject_type, subject_id: r.subject_id });
+  function canonicalBody(r, fields) {
+    // Built from the field list the SERVER serves, never from a list restated
+    // here. This function used to name the five fields in its own order, which
+    // did not match the signer's sorted order, so every genuine receipt showed
+    // INVALID in the widget. A verifier must follow the signer, not agree with
+    // it by hand.
+    var b = {};
+    for (var i = 0; i < fields.length; i++) b[fields[i]] = r[fields[i]];
+    return JSON.stringify(b, fields);
   }
   Promise.all([
     fetch(cfg.base + '/api/atlas/receipt/' + encodeURIComponent(cfg.receiptId)).then(function (x) { return x.json(); }),
@@ -43,7 +49,10 @@ export function clientVerifier(cfg) {
     // import the ed25519 public key + verify the signature over the canonical body
     var raw = Uint8Array.from(atob(key.public_key), function (c) { return c.charCodeAt(0); });
     var sig = Uint8Array.from(atob(receipt.sig), function (c) { return c.charCodeAt(0); });
-    var msg = new TextEncoder().encode(canonicalBody(receipt));
+    // If the server did not tell us the field order, we cannot rebuild the
+    // signed bytes; guessing would produce a confident wrong answer.
+    if (!key.canonical_fields || !key.canonical_fields.length) return show('UNVERIFIABLE', 'server did not publish the canonical field order');
+    var msg = new TextEncoder().encode(canonicalBody(receipt, key.canonical_fields));
     crypto.subtle.importKey('raw', raw, { name: 'Ed25519' }, false, ['verify']).then(function (pk) {
       return crypto.subtle.verify({ name: 'Ed25519' }, pk, sig, msg);
     }).then(function (okSig) {

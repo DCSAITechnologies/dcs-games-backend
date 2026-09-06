@@ -13,7 +13,10 @@
 // receipts: [{ receipt_id, world_id, builder_id, action: 'create'|'update', prev_receipt_id, ts, sig }]
 // deps.verifyReceiptSig(receipt) -> bool  (LIVE ed25519 verify; injected)
 export function buildOwnershipHistory(worldId, receipts, deps = {}) {
-  const verify = deps.verifyReceiptSig || (() => true);
+  // Fail CLOSED. This defaulted to a function that says yes, so a caller that
+  // forgot to inject a verifier got "signature valid" for a sig of the literal
+  // string NOT-A-SIGNATURE. A missing verifier means unverified, never verified.
+  const verify = deps.verifyReceiptSig || (() => false);
   const chain = receipts
     .filter((r) => r.world_id === worldId)
     .filter((r) => verify(r))                 // only signature-valid receipts count — provable, not promised

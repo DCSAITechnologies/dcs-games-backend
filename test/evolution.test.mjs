@@ -448,3 +448,188 @@ test("B5: adopting requires an authenticated principal and a known persona", asy
   await assert.rejects(() => svc.adopt(null, "w1"), (e) => e.httpStatus === 401);
   await assert.rejects(() => svc.adopt("u1", "w1", { persona: "chaos_gremlin" }), (e) => e.httpStatus === 422);
 });
+
+// ============================== B6 the chronicle records what actually happened
+
+test("B6 chronicle: a removal that removed nothing is recorded as nothing removed", async () => {
+  const m = await world();
+  const d = newDelta({ label: "clear out a ghost", author: "u1" });
+  d.remove.push({ collection: "items", id: "item_that_was_never_here", reason: "test" });
+
+  const res = applyDelta(m, d);
+  const entry = res.manifest.expansion.history.at(-1);
+
+  assert.equal(res.applied.removed, 0, "nothing was in the manifest to remove");
+  assert.equal(entry.removed, 0, "the permanent record must not claim a deletion that only raised a warning");
+  assert.equal(entry.removed, res.applied.removed, "the chronicle and the result must agree");
+  assert.deepEqual(res.applied.warnings.map((w) => w.code), ["remove_missing"]);
+});
+
+test("B6 chronicle: a delta that removes some of what it named counts only what went", async () => {
+  const m = await world();
+  const questTargets = new Set((m.quests || []).flatMap((q) => q.steps.map((s) => s.target)));
+  const item = m.items.find((it) => !questTargets.has(it.id));
+  assert.ok(item, "the fixture needs an item no quest requires");
+
+  const d = newDelta({ label: "half a clear-out", author: "u1" });
+  d.remove.push({ collection: "items", id: item.id, reason: "no longer stocked" });
+  d.remove.push({ collection: "items", id: "item_that_was_never_here", reason: "test" });
+
+  const res = applyDelta(m, d);
+  assert.equal(res.applied.removed, 1);
+  assert.equal(res.manifest.expansion.history.at(-1).removed, 1, "the record counts what happened, not what was asked for");
+});
+
+// ================ B6 references a removal orphans INSIDE a behaviour's spec
+
+test("B6: removing an item takes the pickup that granted it, and that pickup's interaction", async () => {
+  const m = await world();
+  const questTargets = new Set((m.quests || []).flatMap((q) => q.steps.map((s) => s.target)));
+  const item = m.items.find((it) => !questTargets.has(it.id));
+  const pickup = m.behaviors.find((b) => b.kind === "pickup" && b.spec?.item === item.id);
+  assert.ok(pickup, "the fixture needs a pickup for that item");
+  const interaction = m.interactions.find((i) => i.behavior_ref === pickup.id);
+  assert.ok(interaction, "the fixture needs an interaction for that pickup");
+
+  const d = newDelta({ label: "drop the item", author: "u1" });
+  d.remove.push({ collection: "items", id: item.id, reason: "cut" });
+  const res = applyDelta(m, d);
+  const after = res.manifest;
+
+  assert.ok(!after.items.some((i) => i.id === item.id));
+  assert.ok(!after.behaviors.some((b) => b.id === pickup.id), "a pickup that grants a deleted item can do nothing and must go with it");
+  assert.ok(!after.interactions.some((i) => i.id === interaction.id), "and its interaction with it");
+  // The cascade is reported rather than done quietly.
+  assert.deepEqual(res.applied.pruned.behaviors, [pickup.id]);
+  assert.ok(res.applied.pruned.spec_refs.some((s) => s.behavior === pickup.id && s.field === "item" && s.id === item.id));
+  assert.ok(res.applied.pruned.interactions >= 1);
+  assert.equal(validateManifest(after).ok, true);
+});
+
+test("B6: a door whose key is removed becomes unlocked, and the door survives", async () => {
+  const m = await world();
+  const key = m.items.find((it) => m.behaviors.some((b) => b.kind === "door" && b.spec?.locked_by === it.id));
+  const door = m.behaviors.find((b) => b.kind === "door" && b.spec?.locked_by === key?.id);
+  assert.ok(key && door, "the fixture needs a door locked by an item");
+  // The key is a quest target in the fixture, so retarget that step first —
+  // the point under test is the door, not the quest gate.
+  const quests = structuredClone(m.quests);
+  for (const q of m.quests) q.steps = q.steps.filter((s) => s.target !== key.id);
+  assert.notDeepEqual(m.quests, quests);
+
+  const d = newDelta({ label: "lose the key", author: "u1" });
+  d.remove.push({ collection: "items", id: key.id, reason: "cut" });
+  const res = applyDelta(m, d);
+
+  const afterDoor = res.manifest.behaviors.find((b) => b.id === door.id);
+  assert.ok(afterDoor, "the door itself still exists — only its lock referenced the item");
+  assert.equal(afterDoor.spec.locked_by, null, "the lock is cleared, not left naming a deleted item");
+  assert.ok(res.applied.pruned.spec_refs.some((s) => s.behavior === door.id && s.field === "locked_by"));
+});
+
+test("B6: a list-valued spec reference loses only the entry that went", async () => {
+  const m = await world();
+  const keep = m.items[0].id;
+  const questTargets = new Set((m.quests || []).flatMap((q) => q.steps.map((s) => s.target)));
+  const drop = m.items.find((it) => it.id !== keep && !questTargets.has(it.id));
+  assert.ok(drop, "the fixture needs a spare item");
+  const zone = m.zones[0].id;
+
+  m.behaviors.push(
+    { id: "behavior_crate", kind: "container", spec: { contains: [keep, drop.id], locked_by: null } },
+    { id: "behavior_lift", kind: "elevator", spec: { floors: [0, 6], speed: 2, call_from: [zone] } },
+  );
+  m.interactions.push({ id: "interaction_crate", trigger: "interact", target_ref: m.structures[0].id, behavior_ref: "behavior_crate", params: {} });
+
+  const d = newDelta({ label: "empty half the crate", author: "u1" });
+  d.remove.push({ collection: "items", id: drop.id, reason: "cut" });
+  const after = applyDelta(m, d).manifest;
+
+  const crate = after.behaviors.find((b) => b.id === "behavior_crate");
+  assert.ok(crate, "a container that lost one of several items is still a container");
+  assert.deepEqual(crate.spec.contains, [keep]);
+  assert.ok(after.interactions.some((i) => i.id === "interaction_crate"), "and it keeps its interaction");
+  assert.deepEqual(after.behaviors.find((b) => b.id === "behavior_lift").spec.call_from, [zone], "an untouched reference is left alone");
+});
+
+test("B6: a teleporter to a removed zone goes with the zone", async () => {
+  const m = await world();
+  // A zone nothing else depends on, added and then removed in two steps.
+  const zoneId = "zone_test_annex";
+  const add = newDelta({ label: "annex", author: "u1" });
+  add.add.zones.push({ id: zoneId, name: "Annex", kind: "district", bounds: [0, 0, 20, 20], tags: [] });
+  add.add.behaviors.push({ id: "behavior_portal", kind: "teleporter", spec: { to_zone: zoneId, to_position: { x: 5, y: 0, z: 5 } } });
+  add.add.interactions.push({ id: "interaction_portal", trigger: "interact", target_ref: m.structures[0].id, behavior_ref: "behavior_portal", params: {} });
+  const withAnnex = applyDelta(m, add).manifest;
+  assert.ok(withAnnex.behaviors.some((b) => b.id === "behavior_portal"));
+
+  const cut = newDelta({ label: "close the annex", author: "u1" });
+  cut.remove.push({ collection: "zones", id: zoneId, reason: "cut" });
+  const res = applyDelta(withAnnex, cut);
+
+  assert.ok(!res.manifest.behaviors.some((b) => b.id === "behavior_portal"), "a teleporter with nowhere to go is not a teleporter");
+  assert.ok(!res.manifest.interactions.some((i) => i.id === "interaction_portal"));
+  assert.deepEqual(res.applied.pruned.behaviors, ["behavior_portal"]);
+});
+
+test("B6: a delta adding a behaviour that references something that will not exist is REFUSED", async () => {
+  const m = await world();
+  const d = newDelta({ label: "a pickup for nothing", author: "u1" });
+  d.add.behaviors.push({ id: "behavior_pickup_ghost", kind: "pickup", spec: { item: "item_not_in_this_world", respawn_s: null } });
+
+  const compat = checkCompatibility(m, d);
+  assert.equal(compat.ok, false);
+  const e = compat.errors.find((x) => x.code === "new_behavior_dangling_spec_ref");
+  assert.ok(e, JSON.stringify(compat.errors));
+  assert.match(e.detail, /item_not_in_this_world/);
+  assert.throws(() => applyDelta(m, d), (err) => err.httpStatus === 409);
+});
+
+// ================================ B7 a rollback is an event the world remembers
+
+test("B7: a rolled_back event must say which versions it moved between, and who did it", async () => {
+  const mem = createWorldMemory(tmpEnv());
+  await assert.rejects(
+    () => mem.record("w1", { kind: "rolled_back", summary: "the world went back", actorId: "u1" }),
+    (e) => e.httpStatus === 422 && /fromVersion and toVersion/.test(e.detail),
+  );
+  await assert.rejects(
+    () => mem.record("w1", { kind: "rolled_back", summary: "the world went back", fromVersion: 3, toVersion: 1 }),
+    (e) => e.httpStatus === 422 && /attributed to a principal/.test(e.detail),
+  );
+  assert.equal((await mem.chronology("w1")).length, 0, "a refused event must not be written");
+});
+
+test("B7: a rollback is recorded in the chronicle and reads as one", async () => {
+  const mem = createWorldMemory(tmpEnv());
+  await mem.record("w1", { kind: "created", summary: "the town was generated", worldVersion: 1, actorId: "u1" });
+  await mem.record("w1", { kind: "expanded", summary: "the hospital district was added", worldVersion: 2, actorId: "u1" });
+  const row = await mem.record("w1", {
+    kind: "rolled_back",
+    summary: "the world was rolled back from v2 to the content of v1 by u1",
+    worldVersion: 3, fromVersion: 2, toVersion: 1, actorId: "u1",
+  });
+
+  assert.equal(row.kind, "rolled_back");
+  assert.equal(row.from_version, 2);
+  assert.equal(row.to_version, 1);
+  assert.equal(row.actor_id, "u1");
+  assert.deepEqual((await mem.chronology("w1")).map((r) => r.seq), [1, 2, 3], "the chronicle is still append-only");
+
+  // It is recallable as itself, and it is citable — a companion asked what
+  // happened can say the world went back, because it is written down.
+  const recalled = await mem.recall("w1", { kinds: ["rolled_back"] });
+  assert.equal(recalled.length, 1);
+  assert.equal(recalled[0].to_version, 1);
+  assert.equal((await mem.supports("w1", "the world was rolled back from v2 to the content of v1 by u1")).supported, true);
+});
+
+test("B7: adding rolled_back did not change how any existing kind is recorded", async () => {
+  const mem = createWorldMemory(tmpEnv());
+  for (const kind of ["created", "expanded", "edited", "published", "player_event", "seasonal", "milestone"]) {
+    const row = await mem.record("w1", { kind, summary: `a ${kind} event`, worldVersion: 1 });
+    assert.equal(row.kind, kind);
+    assert.equal("from_version" in row, false, `${kind} rows must keep the shape their consumers already read`);
+  }
+  assert.equal((await mem.chronology("w1")).length, 7);
+});

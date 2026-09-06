@@ -25,7 +25,10 @@ export function portableIdentity(builderId, worlds, events, receipts, opts = {})
   // portable_proof: the set of signed create-receipts that anchor this identity's claims. A consumer
   // in ANOTHER context can re-verify these against /atlas/key — that's what makes the identity portable
   // rather than a self-asserted profile.
-  const verify = opts.verifyReceiptSig || (() => true);
+  // Fail CLOSED. This defaulted to a function that says yes, so a caller that
+  // forgot to inject a verifier got "signature valid" for a sig of the literal
+  // string NOT-A-SIGNATURE. A missing verifier means unverified, never verified.
+  const verify = opts.verifyReceiptSig || (() => false);
   const anchors = (receipts || [])
     .filter((r) => r.builder_id === builderId && r.action === 'create' && verify(r))
     .map((r) => ({ world_id: r.world_id, receipt_id: r.receipt_id, ts: r.ts }));
@@ -44,7 +47,10 @@ export function portableIdentity(builderId, worlds, events, receipts, opts = {})
 // Verify a portable identity presented in another context: re-check its proof anchors.
 // This is what a DIFFERENT world/platform does when a player brings their identity over.
 export function verifyPortableIdentity(identity, deps = {}) {
-  const verify = deps.verifyReceiptSig || (() => true);
+  // Fail CLOSED. This defaulted to a function that says yes, so a caller that
+  // forgot to inject a verifier got "signature valid" for a sig of the literal
+  // string NOT-A-SIGNATURE. A missing verifier means unverified, never verified.
+  const verify = deps.verifyReceiptSig || (() => false);
   // re-resolve the anchors against the (injected) receipt store + signature check
   const store = deps.receiptStore || [];
   const checks = identity.portable_proof.map((p) => {

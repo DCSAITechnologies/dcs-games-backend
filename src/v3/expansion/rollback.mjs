@@ -25,6 +25,14 @@ import { COLLECTIONS, deltaHash, emptyLiveState, verifyPreservation } from "./de
 import { diffManifests } from "./diff.mjs";
 import { manifestHash } from "../../core/worldstore.mjs";
 import { Errors } from "../../core/errors.mjs";
+import { OWNABLE_COLLECTIONS } from "./fork.mjs";
+
+/**
+ * Fields on meta that express a creator's DECISION rather than the world's
+ * content: who may remix it, and on what terms. A rollback restores content;
+ * it must never restore a permission the creator has since changed.
+ */
+export const CARRIED_FORWARD_PERMISSIONS = ["fork_policy", "revenue_policy", "remix_terms", "attribution_required"];
 
 /** How live state can hold on to an entity, and how to say so to a creator. */
 const HOLDS = [
@@ -62,9 +70,71 @@ function heldEntitiesLost(current, target, liveState) {
   };
 
   for (const [key, why] of HOLDS) for (const id of liveState?.[key] || []) hold(id, why);
-  for (const s of current.structures || []) if (s.owner_id) hold(s.id, `owned by ${s.owner_id}`);
+  // Ownership was read from structures only, so a rollback that deleted a
+  // player's ITEM or NPC went through silently — the refusal existed but looked
+  // past two thirds of what a player can own.
+  for (const key of OWNABLE_COLLECTIONS) {
+    for (const e of current[key] || []) if (e.owner_id) hold(e.id, `owned by ${e.owner_id}`);
+  }
 
   return [...held.values()];
+}
+
+/**
+ * A manifest's chronology has to agree with the version it claims to be.
+ *
+ * Every manifest this system produces satisfies this: applyDelta and
+ * planRollback both bump world_version and append one history entry carrying
+ * that same number, and a world that has never been expanded carries an empty
+ * history. So a manifest whose chronology and version disagree did not come out
+ * of that path, and treating it as an ordinary input is what lets a caller
+ * fabricate a lineage.
+ *
+ * Two attacks this closes, both of which produced a chronicle that no later
+ * reader could straighten out:
+ *
+ *   a manifest resaved from a STALE read (world_version behind its own history)
+ *   makes the rollback mint a version number the chronicle already contains, so
+ *   the world's history ends ... v2, v3, v3;
+ *
+ *   a manifest whose world_version runs AHEAD of its history leaves a gap, so
+ *   the history ends ... v2, v3, v10 and the versions in between are neither
+ *   recorded nor recoverable;
+ *
+ * and the forged-ancestor case, where a manifest claiming to be v1 carries v3's
+ * whole history. The prefix test alone waves that through — an identical
+ * history is a prefix of itself — but a real v1 has no history at all.
+ */
+function assertChronologyMatchesVersion(manifest, which) {
+  const history = manifest.expansion?.history || [];
+  if (!Array.isArray(history)) throw Errors.validation(`the ${which} manifest's expansion.history is not a chronology`);
+  const version = Number(manifest.world_version);
+  let previous = 0;
+  for (const [i, entry] of history.entries()) {
+    const v = Number(entry?.version);
+    if (!Number.isInteger(v) || v < 1) {
+      throw Errors.conflict(`the ${which} manifest's history entry ${i} records no usable version`, { meta: { entry: i } });
+    }
+    if (v <= previous) {
+      throw Errors.conflict(
+        `the ${which} manifest's chronology does not move forward: entry ${i} records v${v} after v${previous}`,
+        { meta: { entry: i, version: v, previous } }
+      );
+    }
+    if (v > version) {
+      throw Errors.conflict(
+        `the ${which} manifest claims to be v${version} but its history records a later v${v}`,
+        { meta: { entry: i, version: v, claimed: version } }
+      );
+    }
+    previous = v;
+  }
+  if (history.length && previous !== version) {
+    throw Errors.conflict(
+      `the ${which} manifest claims to be v${version} but its chronology ends at v${previous}`,
+      { meta: { claimed: version, chronology_ends_at: previous } }
+    );
+  }
 }
 
 /**
@@ -73,7 +143,9 @@ function heldEntitiesLost(current, target, liveState) {
  * @param {object} currentManifest the world as it stands now
  * @param {object} targetManifest  the earlier version's manifest, as it was saved
  * @param {{actorId:string, toVersion?:number, liveState?:object, label?:string, reason?:string}} opts
- * @returns {{manifest:object, record:object}} the new version, and the history entry it gained
+ * @returns {{manifest:object, record:object, memory_event:object}} the new
+ *   version, the history entry it gained, and the world-memory event to record
+ *   for it
  */
 export function planRollback(currentManifest, targetManifest, { actorId, toVersion = null, liveState = emptyLiveState(), label = null, reason = null } = {}) {
   if (!actorId) throw Errors.unauthenticated("a rollback must be attributed to a principal");
@@ -118,6 +190,16 @@ export function planRollback(currentManifest, targetManifest, { actorId, toVersi
     }
   }
 
+  // Comparing the two chronologies is not enough on its own, because an
+  // identical history is a prefix of itself: a manifest calling itself v1 while
+  // carrying v3's entries passes the test above unchallenged. So each manifest
+  // is then held to its own account of where it sits in its chronology. This
+  // runs after the comparison so that the two-manifest failures keep their more
+  // specific wording; what is left here is a manifest that is incoherent on its
+  // own terms.
+  assertChronologyMatchesVersion(current, "current");
+  assertChronologyMatchesVersion(target, "target");
+
   // ---- would this cost a player anything? --------------------------------
   const lost = heldEntitiesLost(current, target, liveState);
   if (lost.length) {
@@ -144,6 +226,16 @@ export function planRollback(currentManifest, targetManifest, { actorId, toVersi
   // when the content it arrived with does not.
   if (current.meta?.forked_from) next.meta.forked_from = structuredClone(current.meta.forked_from);
   if (current.meta?.stitched_attribution) next.meta.stitched_attribution = structuredClone(current.meta.stitched_attribution);
+  // A PERMISSION is not content either. Rolling the world's content back to v1
+  // used to restore v1's remix policy with it, so a creator who set
+  // fork_policy:"deny" at v2 silently returned to "allow" — the rollback
+  // re-granting a permission they had deliberately revoked. Attribution and
+  // consent both carry forward from the CURRENT state, which is where the
+  // creator's latest decision lives.
+  for (const key of CARRIED_FORWARD_PERMISSIONS) {
+    if (current.meta?.[key] !== undefined) next.meta[key] = structuredClone(current.meta[key]);
+    else delete next.meta[key];
+  }
 
   // Ownership is a player's ledger, not the creator's content. A structure that
   // existed at the target version and has since been bought stays bought; the
@@ -207,6 +299,11 @@ export function planRollback(currentManifest, targetManifest, { actorId, toVersi
   // forward by exactly one, that no earlier history entry changed, and that the
   // result is a valid WorldManifestV3. Anything it finds is a refusal, never a
   // repair — a half-restored world is worse than none.
+  // The world it just built has to satisfy the same chronology rule it demanded
+  // of its inputs. If it does not, the bug is here, and shipping the manifest
+  // anyway would put the inconsistency into the permanent record.
+  assertChronologyMatchesVersion(next, "restored");
+
   const preservation = verifyPreservation(current, next, liveState);
   if (!preservation.ok) {
     throw Errors.conflict(
@@ -215,7 +312,67 @@ export function planRollback(currentManifest, targetManifest, { actorId, toVersi
     );
   }
 
-  return { manifest: next, record };
+  return { manifest: next, record, memory_event: rollbackMemoryEvent(record) };
+}
+
+/**
+ * The world-memory event for a rollback.
+ *
+ * A rollback is a world event, not a piece of database bookkeeping, and it has
+ * to read as one in the world's own history: this is the same chronicle an NPC
+ * or the companion draws on, and they may only cite what is written here. A
+ * world that quietly went back two versions while its memory says only
+ * "expanded, expanded" would have its inhabitants talking about a hospital that
+ * is no longer standing.
+ *
+ * Built from the history record rather than from the caller's intent, so the
+ * chronicle and the manifest's own chronology cannot disagree. Returned rather
+ * than written: world memory is async and file-backed while planRollback is
+ * pure, and a rollback that has not been persisted yet must not already have
+ * been announced as having happened.
+ */
+export function rollbackMemoryEvent(record) {
+  if (!record || typeof record !== "object") throw Errors.validation("a rollback memory event needs the rollback record");
+  // Cloned, not referenced. The chronicle is written from this event, and a
+  // caller that edits the record it was handed must not thereby edit what the
+  // world remembers happening to it.
+  const detailOf = (v) => (v === undefined || v === null ? v : structuredClone(v));
+  return {
+    kind: "rolled_back",
+    // Factual and self-contained: which way it went, and who did it.
+    summary: `the world was rolled back from v${record.from_version} to the content of v${record.to_version} by ${record.author}`,
+    worldVersion: record.version,
+    fromVersion: record.from_version,
+    toVersion: record.to_version,
+    actorId: record.author,
+    occurredAt: record.at,
+    detail: {
+      from_version: record.from_version,
+      to_version: record.to_version,
+      restored_as_version: record.version,
+      from_manifest_hash: record.from_manifest_hash ?? null,
+      to_manifest_hash: record.to_manifest_hash ?? null,
+      label: record.label,
+      reason: record.reason ?? null,
+      // What it actually did to the world, counted from the manifests.
+      added: detailOf(record.added) || {},
+      modified: record.modified ?? 0,
+      removed: record.removed ?? 0,
+      change_summary: record.summary ?? null,
+      ...(record.ownership_preserved ? { ownership_preserved: detailOf(record.ownership_preserved) } : {}),
+    },
+  };
+}
+
+/**
+ * Write a rollback into the world chronicle. A thin, deliberate seam: callers
+ * that hold a world memory hand it and the plan's result here rather than
+ * assembling the event themselves, so every rollback is recorded the same way.
+ */
+export async function recordRollback(worldMemory, worldId, planned) {
+  if (!worldMemory?.record) throw Errors.validation("recording a rollback needs a world memory");
+  const event = planned?.memory_event || rollbackMemoryEvent(planned?.record);
+  return await worldMemory.record(worldId, event);
 }
 
 /**

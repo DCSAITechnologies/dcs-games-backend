@@ -247,3 +247,192 @@ test("B6 diff: a missing manifest is refused rather than diffed against nothing"
   assert.throws(() => diffManifests(null, m), (e) => e.httpStatus === 422);
   assert.throws(() => diffManifests(m, undefined), (e) => e.httpStatus === 422);
 });
+
+// ======================================= the parts of a world that are not entities
+//
+// Navigation, spawn, audio, media and metadata move without any entity count
+// moving. A diff that covered only the collections would report "nothing
+// changed" about a world whose districts had been disconnected — which is
+// exactly the change a diff exists to surface, because it is invisible on the
+// map and instant for the player.
+
+test("B6 diff: navigation links are named as they go, not just counted", async () => {
+  const v1 = await world();
+  const v2 = applyDelta(v1, planExpansion(v1, { request: "add a hospital district" })).manifest;
+
+  const forward = diffManifests(v1, v2);
+  const gained = v2.navigation.links.filter((l) => !v1.navigation.links.some((o) => o.from === l.from && o.to === l.to));
+  assert.ok(gained.length, "the fixture's expansion must link its new district in");
+  assert.equal(forward.navigation.changed, true);
+  assert.equal(forward.navigation.links.added.length, gained.length);
+  assert.equal(forward.navigation.links.removed.length, 0);
+  assert.equal(forward.summary.navigation_links_added, gained.length);
+
+  // And the reverse — the shape a rollback takes — reports them as losses, by name.
+  const back = diffManifests(v2, v1);
+  assert.equal(back.navigation.links.removed.length, gained.length);
+  assert.equal(back.summary.navigation_links_removed, gained.length);
+  for (const l of gained) assert.match(back.summary.text, new RegExp(`${l.from} <-> ${l.to}`));
+});
+
+test("B6 diff: a single dropped navigation link is reported, with nothing else claimed", async () => {
+  const m = await world();
+  assert.ok(m.navigation.links.length, "the fixture needs a linked world");
+  const after = structuredClone(m);
+  const [cut] = after.navigation.links.splice(0, 1);
+
+  const d = diffManifests(m, after);
+  assert.equal(d.summary.changed, true, "silently dropping a link is not 'nothing changed'");
+  assert.equal(d.navigation.links.removed.length, 1);
+  assert.equal(d.navigation.links.removed[0].from, cut.from);
+  assert.equal(d.navigation.links.removed[0].to, cut.to);
+  assert.equal(d.added.total + d.removed.total + d.modified.total, 0, "no entity moved");
+  assert.equal(d.environment.changed, false);
+  assert.equal(d.terrain.changed, false);
+  assert.match(d.summary.text, /1 zone link removed/);
+  assert.match(d.summary.text, new RegExp(`${cut.from} <-> ${cut.to}`));
+});
+
+test("B6 diff: which way round a link is written is not a change to the world", async () => {
+  const m = await world();
+  const after = structuredClone(m);
+  after.navigation.links = after.navigation.links.map((l) => ({ ...l, from: l.to, to: l.from }));
+
+  const d = diffManifests(m, after);
+  assert.equal(d.navigation.links.added.length, 0, "a link the runtime walks both ways is the same link");
+  assert.equal(d.navigation.links.removed.length, 0);
+});
+
+test("B6 diff: a zone's measured walkability is compared, not assumed", async () => {
+  const m = await world();
+  assert.ok(m.navigation.walkable_zones.length, "the fixture needs measured walkability");
+  const after = structuredClone(m);
+  const target = after.navigation.walkable_zones[0];
+  target.walkable_fraction = 0.1;
+
+  const d = diffManifests(m, after);
+  assert.equal(d.navigation.changed, true);
+  assert.equal(d.navigation.walkable_zones.modified.length, 1);
+  assert.equal(d.navigation.walkable_zones.modified[0].key, target.zone);
+  assert.deepEqual(d.navigation.walkable_zones.modified[0].fields, ["walkable_fraction"]);
+  assert.match(d.summary.text, new RegExp(`walkability of '${target.zone}' changed`));
+});
+
+test("B6 diff: the navmesh is part of navigation", async () => {
+  const m = await world();
+  const after = structuredClone(m);
+  after.navigation.navmesh_ref = "navmesh_v2";
+  const d = diffManifests(m, after);
+  assert.equal(d.navigation.navmesh_ref.changed, true);
+  assert.equal(d.navigation.navmesh_ref.before, m.navigation.navmesh_ref ?? null);
+  assert.equal(d.navigation.navmesh_ref.after, "navmesh_v2");
+  assert.equal(d.summary.changed, true);
+});
+
+test("B6 diff: moving, adding or losing a spawn is reported", async () => {
+  const m = await world();
+  const moved = structuredClone(m);
+  moved.spawn.player_spawns[0].position = { x: 99, y: 2, z: 99 };
+  const d1 = diffManifests(m, moved);
+  assert.equal(d1.spawn.changed, true);
+  assert.equal(d1.summary.spawn_changed, true);
+  assert.equal(d1.spawn.player_spawns.modified.length, 1);
+  assert.deepEqual(d1.spawn.player_spawns.modified[0].fields, ["position"]);
+  assert.match(d1.summary.text, new RegExp(`Spawn: '${m.spawn.player_spawns[0].id}' changed \\(position\\)`));
+
+  const extra = structuredClone(m);
+  extra.spawn.player_spawns.push({ id: "spawn_docks", position: { x: 10, y: 1, z: 10 }, zone: null });
+  extra.spawn.respawn_policy = "origin";
+  const d2 = diffManifests(m, extra);
+  assert.equal(d2.spawn.player_spawns.added.length, 1);
+  assert.equal(d2.spawn.player_spawns.added[0].id, "spawn_docks");
+  assert.deepEqual(d2.spawn.fields.map((f) => f.field), ["respawn_policy"]);
+  assert.match(d2.summary.text, /Spawn: 'spawn_docks' was added/);
+
+  const back = diffManifests(extra, m);
+  assert.equal(back.spawn.player_spawns.removed.length, 1);
+  assert.match(back.summary.text, /Spawn: 'spawn_docks' was removed/);
+});
+
+test("B6 diff: audio is compared channel by channel", async () => {
+  const m = await world();
+  const after = structuredClone(m);
+  after.audio.ambient = [...(after.audio.ambient || []), { id: "amb_harbour", uri: "asset://gulls", loop: true }];
+  after.audio.music = [...(after.audio.music || []), { id: "music_theme", uri: "asset://theme" }];
+
+  const d = diffManifests(m, after);
+  assert.equal(d.audio.changed, true);
+  assert.equal(d.summary.audio_changed, true);
+  assert.equal(d.audio.channels.ambient.added.length, 1);
+  assert.equal(d.audio.channels.music.added.length, 1);
+  assert.equal(d.audio.channels.sfx.changed, false);
+  assert.match(d.summary.text, /Audio: 1 ambient track added/);
+
+  // And the reverse is a loss, which is what a rollback of an audio pass looks like.
+  const back = diffManifests(after, m);
+  assert.equal(back.audio.channels.ambient.removed.length, 1);
+  assert.match(back.summary.text, /Audio: 1 ambient track removed/);
+});
+
+test("B6 diff: media refs are compared", async () => {
+  const m = await world();
+  const after = structuredClone(m);
+  after.media.thumbnail_ref = "asset_thumbnail";
+  const d = diffManifests(m, after);
+  assert.equal(d.media.changed, true);
+  assert.equal(d.summary.media_fields_changed, 1);
+  assert.deepEqual(d.media.fields, [{ field: "thumbnail_ref", before: m.media.thumbnail_ref ?? null, after: "asset_thumbnail" }]);
+  assert.match(d.summary.text, /Media: thumbnail_ref changed from nothing to 'asset_thumbnail'/);
+});
+
+test("B6 diff: a renamed or reclassified world is reported through meta", async () => {
+  const m = await world();
+  const after = structuredClone(m);
+  after.meta.title = "Ashfall Harbour";
+  after.meta.maturity = "16+";
+
+  const d = diffManifests(m, after);
+  assert.equal(d.meta.changed, true);
+  assert.equal(d.summary.meta_fields_changed, 2);
+  assert.deepEqual(d.meta.fields.map((f) => f.field), ["maturity", "title"]);
+  assert.match(d.summary.text, /Meta: title changed from/);
+});
+
+test("B6 diff: a re-save is not a change — updated_at alone reports nothing", async () => {
+  const m = await world();
+  const resaved = structuredClone(m);
+  resaved.meta.updated_at = new Date(Date.now() + 60000).toISOString();
+
+  const d = diffManifests(m, resaved);
+  assert.equal(d.meta.changed, false, "updated_at moves on every write and must not be reported as a change");
+  assert.equal(d.summary.changed, false);
+  assert.match(d.summary.text, /Nothing changed/);
+});
+
+test("B6 diff: an untouched world reports nothing changed in EVERY section", async () => {
+  const m = await world();
+  const d = diffManifests(m, structuredClone(m));
+  for (const section of ["navigation", "spawn", "audio", "media", "meta"]) {
+    assert.equal(d[section].changed, false, `${section} must report no change`);
+  }
+  assert.deepEqual(d.navigation.links.added, []);
+  assert.deepEqual(d.navigation.links.removed, []);
+  assert.deepEqual(d.spawn.player_spawns.modified, []);
+  assert.deepEqual(d.media.fields, []);
+  assert.deepEqual(d.meta.fields, []);
+  assert.equal(d.summary.navigation_changed, false);
+  assert.equal(d.summary.changed, false);
+});
+
+test("B6 diff: an expansion's new navigation is reported alongside its new entities", async () => {
+  const v1 = await world();
+  const delta = planExpansion(v1, { request: "add an airport" });
+  const v2 = applyDelta(v1, delta).manifest;
+
+  const d = diffManifests(v1, v2);
+  assert.equal(d.added.by_collection.zones, 1);
+  assert.equal(d.navigation.walkable_zones.added.length, 1, "a new district brings its own walkability figure");
+  assert.equal(d.navigation.walkable_zones.added[0].zone, delta.add.zones[0].id);
+  assert.equal(d.spawn.changed, false, "an expansion does not move the player's spawn");
+  assert.equal(d.meta.changed, false, "nor rename the world");
+});

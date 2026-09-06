@@ -679,3 +679,107 @@ test("HONESTY: /health cannot claim a capability the routes do not provide", asy
   assert.equal((await (await req("/v3/marketplace/assert-dark")).json()).dark, true);
   assert.equal((await (await req("/v3/subscriptions/assert-dark")).json()).dark, true);
 });
+
+// ------------------------------------------------- rollback, end to end
+//
+// This route had no end-to-end test, and that is exactly how it shipped saving
+// the world and THEN throwing while recording the chronicle: the rollback
+// really happened, the caller was told it failed, and the history entry was
+// lost. A unit test of planRollback could not have seen it, because the bug was
+// in the seam between the plan and the record.
+
+/**
+ * Rollback needs its OWN world. The shared fixture has been hand-saved with
+ * partial manifests by earlier tests, so most of its retained versions are not
+ * playable worlds — a rollback correctly refuses them, which would make this
+ * gate prove nothing about the success path.
+ */
+let rollbackWorldId = null;
+
+test("B6 setup: a world with two real, playable versions", async () => {
+  const g = await (await req("/v3/worlds/generate", {
+    method: "POST", headers: json(ALICE),
+    body: JSON.stringify({ prompt: "Saltmarsh Reach, a tidal fishing village" }),
+  })).json();
+  assert.equal(g.ok, true, JSON.stringify(g));
+  rollbackWorldId = g.world_id;
+
+  const e = await req(`/v3/worlds/${rollbackWorldId}/expand`, {
+    method: "POST", headers: json(ALICE), body: JSON.stringify({ request: "add a lighthouse district" }),
+  });
+  const eb = await e.json();
+  assert.equal(e.status, 200, `expansion failed: ${JSON.stringify(eb)}`);
+
+  const v = await (await req(`/v3/worlds/${rollbackWorldId}/versions`, { headers: auth(ALICE) })).json();
+  assert.ok(v.versions.length >= 2, `expected two retained versions, got ${v.versions.length}`);
+});
+
+test("B6 GATE: a rollback succeeds, is recorded, and creates a NEW version", async () => {
+  const versions = await (await req(`/v3/worlds/${rollbackWorldId}/versions`, { headers: auth(ALICE) })).json();
+  assert.ok(versions.versions.length >= 2, `need at least two versions to roll back; have ${versions.versions.length}`);
+  const target = versions.versions.at(-2).version;
+  const latest = versions.versions.at(-1).version;
+
+  const r = await req(`/v3/worlds/${rollbackWorldId}/rollback`, {
+    method: "POST", headers: json(ALICE),
+    body: JSON.stringify({ to_version: target, reason: "end-to-end gate" }),
+  });
+  const b = await r.json();
+  assert.equal(r.status, 200, `rollback failed: ${JSON.stringify(b)}`);
+  assert.equal(b.rolled_back_to, target);
+
+  // A rollback goes FORWARD. Nothing is erased.
+  assert.ok(b.world_version > latest, `a rollback must create a new version, got v${b.world_version} after v${latest}`);
+
+  // The claim the caller was given must match what was actually stored — the
+  // save-then-throw bug made these two disagree.
+  const after = await (await req(`/v3/worlds/${rollbackWorldId}/versions`, { headers: auth(ALICE) })).json();
+  assert.equal(after.versions.length, versions.versions.length + 1, "the retained history must have gained exactly one version");
+
+  // And the chronicle must actually carry the event, with both versions.
+  const mem = await (await req(`/v3/worlds/${rollbackWorldId}/memory`, { headers: auth(ALICE) })).json();
+  // chronology is the event list; timeline is the same events grouped by version.
+  const ev = (mem.chronology || []).find((e) => e.kind === "rolled_back");
+  assert.ok(ev, `the chronicle has no rolled_back event: ${JSON.stringify((mem.chronology || []).map((e) => e.kind))}`);
+  assert.equal(Number(ev.to_version), Number(target), "the event must say which version it moved to");
+  assert.ok(Number(ev.from_version) > 0, "the event must say which version it moved from");
+
+  // Honest about how far the ownership check reached.
+  assert.equal(b.live_state_checked, false, "no live state was supplied here");
+  assert.match(b.live_state_note, /not verified|only ownership recorded/i);
+});
+
+test("B6 GATE: a target that no longer passes the playtest gate is refused, not shipped", async () => {
+  // v1 of this world was written before the v3 manifest existed. It is a
+  // legitimate rollback TARGET — the route migrates it — but it has no
+  // behaviours and its spawns sit inside a structure, so today's gate rejects
+  // it. The world must be left exactly as it was, and the caller must be told
+  // what was wrong rather than given a world nobody can play.
+  const before = await (await req(`/v3/worlds/${generatedId}/versions`, { headers: auth(ALICE) })).json();
+
+  const r = await req(`/v3/worlds/${generatedId}/rollback`, {
+    method: "POST", headers: json(ALICE), body: JSON.stringify({ to_version: 1 }),
+  });
+  const b = await r.json();
+  assert.equal(r.status, 422, JSON.stringify(b));
+  assert.equal(b.error, "rollback_failed_playtest");
+  assert.ok(b.findings.length > 0, "the refusal must say what was wrong");
+  assert.match(b.detail, /was not changed/);
+
+  const after = await (await req(`/v3/worlds/${generatedId}/versions`, { headers: auth(ALICE) })).json();
+  assert.equal(after.versions.length, before.versions.length, "a refused rollback must not have written a version");
+});
+
+test("B6: a rollback to a version that does not exist is a 404, not a silent no-op", async () => {
+  const r = await req(`/v3/worlds/${generatedId}/rollback`, {
+    method: "POST", headers: json(ALICE), body: JSON.stringify({ to_version: 999 }),
+  });
+  assert.equal(r.status, 404);
+});
+
+test("B6 GATE: another creator cannot roll back your world", async () => {
+  const r = await req(`/v3/worlds/${generatedId}/rollback`, {
+    method: "POST", headers: json(MALLORY_TESTER), body: JSON.stringify({ to_version: 1 }),
+  });
+  assert.equal(r.status, 403, await r.text());
+});

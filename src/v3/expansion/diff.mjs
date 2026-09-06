@@ -136,6 +136,134 @@ function diffEnvironment(before, after) {
 const isPlain = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const short = (v) => (v === null || v === undefined ? "nothing" : typeof v === "object" ? "a new setting" : `'${v}'`);
 
+// ------------------------------------------------- the rest of the manifest
+//
+// The entity collections, the environment and the terrain are what a creator
+// SEES, so they were covered first. They are not what a rollback most often
+// takes away quietly. Navigation is: a rollback that restores an earlier
+// content set also restores that set's zone links, and a link dropped in
+// silence is a district the player can suddenly no longer walk to, in a world
+// where the district itself is still listed and still on the map. The spawn,
+// the audio beds, the media refs and the metadata all have the same property —
+// nothing in the world's entity counts moves when they change, so a diff that
+// covers only entities reports "nothing changed" about a world that plays
+// differently. That is the failure this module exists to prevent, so they are
+// compared too.
+
+/**
+ * Compare two lists of records by a natural key, falling back to the record's
+ * own stable form when it has no id. Keeps a diff of anonymous rows (a nav
+ * link, a spawn point, an audio bed) honest: two identical rows are one row
+ * present twice, not one added and one removed.
+ */
+function diffRecords(beforeList, afterList, keyOf) {
+  const index = (list) => {
+    const map = new Map();
+    for (const row of Array.isArray(list) ? list : []) {
+      const k = keyOf(row);
+      if (!map.has(k)) map.set(k, []);
+      map.get(k).push(row);
+    }
+    return map;
+  };
+  const ib = index(beforeList);
+  const ia = index(afterList);
+  const added = [], removed = [], modified = [];
+
+  for (const [k, rows] of ia) {
+    const was = ib.get(k) || [];
+    for (let i = was.length; i < rows.length; i++) added.push(rows[i]);
+    for (let i = 0; i < Math.min(was.length, rows.length); i++) {
+      const fields = changedFields(was[i], rows[i]);
+      if (fields.length) modified.push({ key: k, fields, before: was[i], after: rows[i] });
+    }
+  }
+  for (const [k, rows] of ib) {
+    const now = ia.get(k) || [];
+    for (let i = now.length; i < rows.length; i++) removed.push(rows[i]);
+  }
+  return { changed: added.length > 0 || removed.length > 0 || modified.length > 0, added, removed, modified };
+}
+
+/** Scalar/plain fields of a sub-object, compared one by one. */
+function diffFields(before, after, { skip = new Set() } = {}) {
+  const b = isPlain(before) ? before : {};
+  const a = isPlain(after) ? after : {};
+  const fields = [];
+  for (const k of [...new Set([...Object.keys(b), ...Object.keys(a)])].sort()) {
+    if (skip.has(k)) continue;
+    if (stable(b[k]) === stable(a[k])) continue;
+    fields.push({ field: k, before: b[k] ?? null, after: a[k] ?? null });
+  }
+  return { changed: fields.length > 0, fields };
+}
+
+/**
+ * Navigation: the zone-link graph and the measured walkability of each zone.
+ *
+ * A link is identified by the pair it joins, undirected — the runtime walks it
+ * both ways, so `from`/`to` swapping is not a change to the world. Reporting it
+ * as one would bury a real dropped link in noise.
+ */
+function diffNavigation(before, after) {
+  const nb = before?.navigation || {};
+  const na = after?.navigation || {};
+  const linkKey = (l) => [String(l?.from ?? ""), String(l?.to ?? "")].sort().join("<->");
+  const links = diffRecords(nb.links, na.links, linkKey);
+  const walkable = diffRecords(nb.walkable_zones, na.walkable_zones, (w) => String(w?.zone ?? stable(w)));
+  const navmeshBefore = nb.navmesh_ref ?? null;
+  const navmeshAfter = na.navmesh_ref ?? null;
+  const navmeshChanged = stable(navmeshBefore) !== stable(navmeshAfter);
+  return {
+    changed: links.changed || walkable.changed || navmeshChanged,
+    links,
+    walkable_zones: walkable,
+    navmesh_ref: { before: navmeshBefore, after: navmeshAfter, changed: navmeshChanged },
+  };
+}
+
+/** Spawn: where a player arrives, and what happens when they die. */
+function diffSpawn(before, after) {
+  const sb = before?.spawn || {};
+  const sa = after?.spawn || {};
+  const spawns = diffRecords(sb.player_spawns, sa.player_spawns, (s) => String(s?.id ?? stable(s)));
+  const settings = diffFields(sb, sa, { skip: new Set(["player_spawns"]) });
+  return { changed: spawns.changed || settings.changed, player_spawns: spawns, fields: settings.fields };
+}
+
+const AUDIO_CHANNELS = ["ambient", "music", "sfx", "narration"];
+
+/** Audio: the beds and cues, channel by channel. */
+function diffAudio(before, after) {
+  const ab = before?.audio || {};
+  const aa = after?.audio || {};
+  const channels = {};
+  let changed = false;
+  for (const c of AUDIO_CHANNELS) {
+    channels[c] = diffRecords(ab[c], aa[c], (x) => String(x?.id ?? x?.ref ?? stable(x)));
+    if (channels[c].changed) changed = true;
+  }
+  // Anything a provider added outside the four known channels still counts.
+  const rest = diffFields(ab, aa, { skip: new Set(AUDIO_CHANNELS) });
+  return { changed: changed || rest.changed, channels, fields: rest.fields };
+}
+
+/** Media: thumbnail, trailer, intro, portraits, captions. */
+function diffMedia(before, after) {
+  return diffFields(before?.media, after?.media);
+}
+
+// updated_at moves on every write, including ones that changed nothing else. A
+// diff that called that a change would report a difference for every manifest
+// that had merely been re-saved, which is exactly the kind of noise that trains
+// a creator to stop reading the diff.
+const META_VOLATILE = new Set(["updated_at"]);
+
+/** Meta: title, prompt, genre, style, tags, maturity, attribution. */
+function diffMeta(before, after) {
+  return diffFields(before?.meta, after?.meta, { skip: META_VOLATILE });
+}
+
 /**
  * Compare two versions of a world.
  *
@@ -144,7 +272,9 @@ const short = (v) => (v === null || v === undefined ? "nothing" : typeof v === "
  * diffing a rollback's result against the live world reports the entities the
  * rollback would take away as removals.
  *
- * @returns {{added:object, removed:object, modified:object, environment:object, terrain:object, summary:object}}
+ * @returns {{added:object, removed:object, modified:object, environment:object,
+ *            terrain:object, navigation:object, spawn:object, audio:object,
+ *            media:object, meta:object, summary:object}}
  */
 export function diffManifests(before, after) {
   if (!before || typeof before !== "object") throw Errors.validation("a diff needs a 'before' manifest");
@@ -183,6 +313,11 @@ export function diffManifests(before, after) {
 
   const environment = diffEnvironment(before, after);
   const terrain = diffTerrain(before, after);
+  const navigation = diffNavigation(before, after);
+  const spawn = diffSpawn(before, after);
+  const audio = diffAudio(before, after);
+  const media = diffMedia(before, after);
+  const meta = diffMeta(before, after);
 
   // ---- the creator-facing account ----------------------------------------
   const lines = [];
@@ -215,7 +350,41 @@ export function diffManifests(before, after) {
   }
   if (terrain.cells_changed) lines.push(`${terrain.cells_changed} height ${terrain.cells_changed === 1 ? "cell was" : "cells were"} re-sculpted.`);
 
-  const changed = added.total > 0 || removed.total > 0 || modified.total > 0 || environment.changed || terrain.changed;
+  // Navigation is named link by link when it is losing them. "3 links removed"
+  // is not enough for a creator to know whether the district they care about is
+  // still connected, and that is the whole question.
+  const linkName = (l) => `${l.from} <-> ${l.to}`;
+  if (navigation.links.removed.length) {
+    lines.push(`Navigation: ${navigation.links.removed.length} zone ${navigation.links.removed.length === 1 ? "link" : "links"} removed (${listPhrase(navigation.links.removed.map(linkName))}).`);
+  }
+  if (navigation.links.added.length) {
+    lines.push(`Navigation: ${navigation.links.added.length} zone ${navigation.links.added.length === 1 ? "link" : "links"} added (${listPhrase(navigation.links.added.map(linkName))}).`);
+  }
+  if (navigation.links.modified.length) lines.push(`Navigation: ${navigation.links.modified.length} zone ${navigation.links.modified.length === 1 ? "link" : "links"} changed.`);
+  for (const w of navigation.walkable_zones.removed) lines.push(`Navigation: zone '${w.zone}' no longer has measured walkability.`);
+  for (const w of navigation.walkable_zones.added) lines.push(`Navigation: zone '${w.zone}' gained measured walkability.`);
+  for (const w of navigation.walkable_zones.modified) lines.push(`Navigation: walkability of '${w.key}' changed (${listPhrase(w.fields)}).`);
+  if (navigation.navmesh_ref.changed) lines.push(`Navigation: the navmesh changed from ${short(navigation.navmesh_ref.before)} to ${short(navigation.navmesh_ref.after)}.`);
+
+  for (const s of spawn.player_spawns.removed) lines.push(`Spawn: '${s.id ?? "a spawn point"}' was removed.`);
+  for (const s of spawn.player_spawns.added) lines.push(`Spawn: '${s.id ?? "a spawn point"}' was added.`);
+  for (const s of spawn.player_spawns.modified) lines.push(`Spawn: '${s.key}' changed (${listPhrase(s.fields)}).`);
+  for (const f of spawn.fields) lines.push(`Spawn: ${f.field} changed from ${short(f.before)} to ${short(f.after)}.`);
+
+  for (const c of AUDIO_CHANNELS) {
+    const ch = audio.channels[c];
+    if (ch.added.length) lines.push(`Audio: ${ch.added.length} ${c} ${ch.added.length === 1 ? "track" : "tracks"} added.`);
+    if (ch.removed.length) lines.push(`Audio: ${ch.removed.length} ${c} ${ch.removed.length === 1 ? "track" : "tracks"} removed.`);
+    if (ch.modified.length) lines.push(`Audio: ${ch.modified.length} ${c} ${ch.modified.length === 1 ? "track" : "tracks"} changed.`);
+  }
+  for (const f of audio.fields) lines.push(`Audio: ${f.field} changed.`);
+
+  for (const f of media.fields) lines.push(`Media: ${f.field} changed from ${short(f.before)} to ${short(f.after)}.`);
+  for (const f of meta.fields) lines.push(`Meta: ${f.field} changed from ${short(f.before)} to ${short(f.after)}.`);
+
+  const changed = added.total > 0 || removed.total > 0 || modified.total > 0
+    || environment.changed || terrain.changed
+    || navigation.changed || spawn.changed || audio.changed || media.changed || meta.changed;
   const fromV = before.world_version ?? null;
   const toV = after.world_version ?? null;
   const versions = fromV !== null && toV !== null && fromV !== toV ? ` between v${fromV} and v${toV}` : "";
@@ -232,6 +401,11 @@ export function diffManifests(before, after) {
     modified,
     environment,
     terrain,
+    navigation,
+    spawn,
+    audio,
+    media,
+    meta,
     summary: {
       changed,
       from_version: fromV,
@@ -241,6 +415,16 @@ export function diffManifests(before, after) {
       modified_total: modified.total,
       environment_fields_changed: environment.fields.length,
       terrain_changed: terrain.changed,
+      // Counted, not just flagged: a rollback that drops navigation links is the
+      // change a creator most needs a number for, and "navigation changed" does
+      // not tell them whether one link went or twelve.
+      navigation_links_added: navigation.links.added.length,
+      navigation_links_removed: navigation.links.removed.length,
+      navigation_changed: navigation.changed,
+      spawn_changed: spawn.changed,
+      audio_changed: audio.changed,
+      media_fields_changed: media.fields.length,
+      meta_fields_changed: meta.fields.length,
       lines,
       text,
     },

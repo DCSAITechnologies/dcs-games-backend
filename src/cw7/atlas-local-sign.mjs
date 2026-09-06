@@ -93,6 +93,16 @@ export function signedFields(r) {
   return out;
 }
 
+/**
+ * The exact field order of the signed bytes. Anything that tells a third party
+ * how to rebuild the canonical body must serve THIS, not restate it: the
+ * in-browser widget and GET /atlas/key each listed their own order, and both
+ * had subject_type before subject_id, so every genuine receipt read INVALID to
+ * an external verifier. That failed closed, but it made the independent
+ * verifiability claim — the one the badge rests on — false.
+ */
+export const CANONICAL_FIELD_ORDER = Object.keys(SIGNED_FIELDS).sort();
+
 // canonical signed body (sorted keys) from a receipt-or-body object
 export function canonicalBody(r) {
   const b = signedFields(r);

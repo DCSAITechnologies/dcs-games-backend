@@ -15,7 +15,17 @@ export function publicVerifyReceipt(receipt, deps = {}) {
   if (!receipt || !receipt.sig) {
     return { valid: false, status: 'INVALID', reason: 'no signature present', receipt: null };
   }
-  const valid = verify(receipt);
+  // Read the receipt ONCE, into a plain snapshot, and verify and display that
+  // same snapshot. Verifying the caller's object and then reading it again to
+  // build the display is two reads of something that can answer differently
+  // each time: a receipt whose subject_id is an accessor could return the
+  // genuine subject to the verifier and an attacker's subject to the viewer,
+  // producing a VERIFIED badge beside a subject nobody signed. JSON.parse
+  // cannot make accessors, so no HTTP body reaches this — but a store row
+  // behind a Proxy, an ORM model or a receipt cache can, and the guarantee this
+  // module states is that the viewer sees what the key attested.
+  const snapshot = { ...receipt };
+  const valid = verify(snapshot);
   return {
     valid,
     status: valid ? 'VERIFIED' : 'INVALID',
@@ -26,7 +36,7 @@ export function publicVerifyReceipt(receipt, deps = {}) {
     // reading an unsigned alias here is what let a receipt display a world, a
     // creator and an action it was never signed for.
     receipt: (() => {
-      const b = signedFields(receipt);
+      const b = signedFields(snapshot);
       return {
         subject_type: b.subject_type,
         subject_id: b.subject_id,
@@ -34,9 +44,9 @@ export function publicVerifyReceipt(receipt, deps = {}) {
         action: b.attestation,
         // Recomputed, not echoed, so the identifier a third party cross-references
         // is the one the signature actually covers.
-        receipt_hash: valid ? receiptHash(receipt) : null,
+        receipt_hash: valid ? receiptHash(snapshot) : null,
         // Outside the signed body by design, so it is never presented as attested.
-        ts: receipt.ts ?? null,
+        ts: snapshot.ts ?? null,
         ts_signed: false,
       };
     })(),

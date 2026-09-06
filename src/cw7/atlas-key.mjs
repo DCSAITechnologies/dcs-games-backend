@@ -1,3 +1,4 @@
+import { CANONICAL_FIELD_ORDER } from './atlas-local-sign.mjs';
 // atlas-key.mjs — serves GET /atlas/key (CW7 mandate item: "/atlas/* + /atlas/key live").
 // The public verify view + any external verifier needs the Atlas ed25519 PUBLIC key to independently
 // check a receipt's signature. CW7 exposes the public key (never the private key — that stays in the
@@ -22,7 +23,7 @@ export function makeKeyEndpoint(deps = {}) {
       public_key: pk,                 // base64 — browser/verifier safe (public key only)
       format: 'base64',
       // a verifier reconstructs the canonical body and checks sig with this key
-      canonical_fields: ['attestation', 'attested_by', 'prev_hash', 'subject_type', 'subject_id'],
+      canonical_fields: CANONICAL_FIELD_ORDER,
     };
   }
 

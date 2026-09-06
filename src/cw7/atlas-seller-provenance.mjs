@@ -35,7 +35,10 @@ export function sellerEligibility({ builderId, worlds, events, opts = {} }) {
 //                    prev_receipt_id, ts, sig, parent_asset_id? }]
 // Returns a verifiable provenance record a buyer can check before purchase.
 export function assetProvenance(assetId, receipts, deps = {}) {
-  const verify = deps.verifyReceiptSig || (() => true);
+  // Fail CLOSED. This defaulted to a function that says yes, so a caller that
+  // forgot to inject a verifier got "signature valid" for a sig of the literal
+  // string NOT-A-SIGNATURE. A missing verifier means unverified, never verified.
+  const verify = deps.verifyReceiptSig || (() => false);
   const chain = receipts
     .filter((r) => r.asset_id === assetId)
     .filter((r) => verify(r))

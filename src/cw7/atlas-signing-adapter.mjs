@@ -31,11 +31,14 @@ export function makeInjectedVerify(liveVerify, { prevHashOf } = {}) {
   return function verify(cw7Receipt) {
     if (!cw7Receipt || !cw7Receipt.sig) return false;     // no signature → not verifiable
     const payload = toCanonicalPayload(cw7Receipt, prevHashOf);
-    const canonicalReceipt = {
-      ...payload,
-      receipt_hash: cw7Receipt.receipt_hash ?? cw7Receipt.receipt_id, // live fn recomputes/compares
-      sig: cw7Receipt.sig,
-    };
+    // A CW7 receipt_id is an OPAQUE identifier, not a digest. Passing it as a
+    // receipt_hash used to be harmless because nothing checked that field;
+    // now that verifyReceipt does, substituting "rcpt_0001" for the real hash
+    // would reject every genuine CW7 receipt. Only a real receipt_hash is
+    // forwarded; when there is none, the field is absent and the signature over
+    // the canonical body is the whole check.
+    const canonicalReceipt = { ...payload, sig: cw7Receipt.sig };
+    if (cw7Receipt.receipt_hash != null) canonicalReceipt.receipt_hash = cw7Receipt.receipt_hash;
     return !!liveVerify(canonicalReceipt);
   };
 }

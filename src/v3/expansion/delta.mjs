@@ -29,6 +29,82 @@ const COLLECTIONS = ["zones", "structures", "npcs", "items", "quests", "behavior
 const SINGULAR = { zones: "zone", structures: "structure", npcs: "npc", items: "item", quests: "quest", behaviors: "behavior", interactions: "interaction", assets: "asset" };
 
 /**
+ * Entity references that live INSIDE a behaviour's `spec` rather than in a
+ * `target_ref` / `behavior_ref`.
+ *
+ * These are the references that nothing else in the system walks. Pruning that
+ * only follows target_ref/behavior_ref leaves them pointing at entities the
+ * world no longer contains: a pickup that grants a deleted item, a door locked
+ * by a key that does not exist, a teleporter aimed at a demolished zone. The
+ * manifest still validates, so the defect surfaces at runtime as a thing the
+ * player can never obtain, open or reach.
+ *
+ * The vocabulary is the one the gameplay contract declares (providers/text.mjs
+ * GAMEPLAY_SYSTEM) and that the stitcher already remaps (stitch.mjs remapSpec).
+ * Keeping the three in step is the point: a field that one of them knows about
+ * and the others do not is exactly how a dangling reference gets through.
+ *
+ * Matching is by FIELD NAME, not by behaviour kind. `kinds` records which kind
+ * the contract declares the field on, for the reader; enforcing it would mean a
+ * provider that put a `spec.item` on some other kind got its reference checked
+ * by nobody, which is the failure mode this table exists to close.
+ *
+ *   kinds      the behaviour kind(s) the contract declares this field on
+ *   points_at  which collections a resolved reference may name
+ *   on_missing what losing the referent does to the behaviour:
+ *              "defunct" — the behaviour's whole purpose was that entity, so it
+ *                          can no longer do anything and is dropped
+ *              "clear"   — a scalar option that is now simply absent
+ *              "filter"  — one entry of a list; the rest of the list survives
+ */
+const SPEC_REFS = {
+  item:      { kinds: ["pickup"],              points_at: ["items"],                                            on_missing: "defunct" },
+  to_zone:   { kinds: ["teleporter"],          points_at: ["zones"],                                            on_missing: "defunct" },
+  locked_by: { kinds: ["door", "container"],   points_at: ["items"],                                            on_missing: "clear" },
+  contains:  { kinds: ["container"],           points_at: ["items"],                                            on_missing: "filter" },
+  toggles:   { kinds: ["switch"],              points_at: ["structures", "npcs", "items", "zones", "behaviors"], on_missing: "filter" },
+  unlocks:   { kinds: ["terminal"],            points_at: ["structures", "npcs", "items", "zones", "behaviors"], on_missing: "filter" },
+  call_from: { kinds: ["elevator"],            points_at: ["zones"],                                            on_missing: "filter" },
+};
+
+/**
+ * Every entity id a behaviour's spec points at, as { field, id }.
+ * Read-only: used by pruning here and by the reference validator in B4.
+ */
+export function specRefsOf(behavior) {
+  const out = [];
+  const spec = behavior?.spec;
+  if (!spec || typeof spec !== "object") return out;
+  for (const [field, rule] of Object.entries(SPEC_REFS)) {
+    const v = spec[field];
+    if (rule.on_missing === "filter") {
+      if (Array.isArray(v)) for (const id of v) if (typeof id === "string" && id) out.push({ field, id, rule });
+    } else if (typeof v === "string" && v) {
+      out.push({ field, id: v, rule });
+    }
+  }
+  return out;
+}
+
+/**
+ * Scrub references to gone ids out of one behaviour's spec, in place.
+ * Returns { defunct, scrubbed } — `defunct` means the behaviour lost the entity
+ * it existed to act on and should go with it.
+ */
+function scrubSpecRefs(behavior, goneIds) {
+  const scrubbed = [];
+  let defunct = false;
+  for (const { field, id, rule } of specRefsOf(behavior)) {
+    if (!goneIds.has(id)) continue;
+    scrubbed.push({ behavior: behavior.id, field, id });
+    if (rule.on_missing === "defunct") defunct = true;
+    else if (rule.on_missing === "clear") behavior.spec[field] = null;
+    else behavior.spec[field] = behavior.spec[field].filter((x) => x !== id);
+  }
+  return { defunct, scrubbed };
+}
+
+/**
  * Grow the heightmap so a new district has real ground under it.
  *
  * Existing cells are copied through untouched — that is what keeps an expansion
@@ -236,6 +312,16 @@ export function checkCompatibility(manifest, delta, liveState = emptyLiveState()
   for (const n of delta.add?.npcs || []) {
     if (n.zone && !futureIds.has(n.zone)) errors.push({ code: "new_npc_bad_zone", detail: `new npc '${n.id}' is in zone '${n.zone}', which will not exist`, entity: n.id });
   }
+  // A new behaviour's spec references are held to the same standard as a new
+  // quest's targets. They are the ones nothing else checks, so a pickup granting
+  // an item that will not exist would otherwise be applied without complaint.
+  for (const b of delta.add?.behaviors || []) {
+    for (const { field, id } of specRefsOf(b)) {
+      if (!futureIds.has(id)) {
+        errors.push({ code: "new_behavior_dangling_spec_ref", detail: `new ${b.kind || "behaviour"} '${b.id}' has spec.${field} = '${id}', which will not exist`, entity: b.id, field });
+      }
+    }
+  }
 
   return { ok: errors.length === 0, errors, warnings };
 }
@@ -347,9 +433,40 @@ export function applyDelta(manifest, delta, liveState = emptyLiveState()) {
   }
 
   // --- prune anything the removals orphaned -------------------------------
+  //
+  // Following target_ref and behavior_ref alone is not enough. A behaviour can
+  // hold an entity id inside its own spec — the item a pickup grants, the key a
+  // door is locked by, the zone a teleporter aims at — and those references are
+  // invisible to a target_ref sweep. Left behind they produce a world that
+  // validates and is still wrong: an item nothing can obtain because the only
+  // thing that granted it points at nothing, a door with a key that was deleted.
+  //
+  // So the cascade runs in three passes: scrub the spec references, drop the
+  // behaviours that lost the entity they existed for, then prune the
+  // interactions that pointed at anything now gone. Removal, not repair: a
+  // pickup with no item is not fixable by inventing one.
+  const pruned = { behaviors: [], interactions: 0, spec_refs: [], npc_behavior_refs: [] };
   if (removedIds.size) {
-    next.interactions = (next.interactions || []).filter((x) => !removedIds.has(x.target_ref) && !removedIds.has(x.behavior_ref));
-    for (const n of next.npcs || []) if (removedIds.has(n.behavior_ref)) n.behavior_ref = null;
+    const defunct = new Set();
+    for (const b of next.behaviors || []) {
+      const { defunct: dead, scrubbed } = scrubSpecRefs(b, removedIds);
+      pruned.spec_refs.push(...scrubbed);
+      if (dead) defunct.add(b.id);
+    }
+    if (defunct.size) {
+      next.behaviors = (next.behaviors || []).filter((b) => !defunct.has(b.id));
+      pruned.behaviors = [...defunct];
+    }
+
+    // A behaviour dropped here is as gone as one the delta named, so the same
+    // sweep has to see both — otherwise its interaction outlives it.
+    const gone = new Set([...removedIds, ...defunct]);
+    const beforeInteractions = (next.interactions || []).length;
+    next.interactions = (next.interactions || []).filter((x) => !gone.has(x.target_ref) && !gone.has(x.behavior_ref));
+    pruned.interactions = beforeInteractions - next.interactions.length;
+    for (const n of next.npcs || []) {
+      if (gone.has(n.behavior_ref)) { pruned.npc_behavior_refs.push(n.id); n.behavior_ref = null; }
+    }
   }
 
   // --- version + history --------------------------------------------------
@@ -368,7 +485,14 @@ export function applyDelta(manifest, delta, liveState = emptyLiveState()) {
       at: new Date().toISOString(),
       added: Object.fromEntries(COLLECTIONS.map((c) => [c, (delta.add?.[c] || []).length]).filter(([, n]) => n > 0)),
       modified: (delta.modify || []).length,
-      removed: (delta.remove || []).length,
+      // What HAPPENED, not what was asked for. A delta naming an id that is not
+      // in the manifest raises a remove_missing warning and deletes nothing; if
+      // the chronicle counted the request instead, the permanent record would
+      // claim a deletion that never occurred and no later reader could tell.
+      // Additions and modifications need no such distinction: an addition that
+      // collides and a modification of a missing entity are both refusals, so a
+      // delta that applies at all applied every one of them.
+      removed: removedIds.size,
     },
   ];
 
@@ -381,6 +505,10 @@ export function applyDelta(manifest, delta, liveState = emptyLiveState()) {
       added: Object.fromEntries(COLLECTIONS.map((c) => [c, (delta.add?.[c] || []).length])),
       modified: (delta.modify || []).length,
       removed: removedIds.size,
+      // The cascade a removal caused, reported rather than done quietly: a
+      // creator who deletes one item is entitled to know it also took the
+      // pickup that granted it and that pickup's interaction with it.
+      pruned,
       warnings: compat.warnings,
     },
   };
@@ -437,4 +565,4 @@ export function verifyPreservation(before, after, liveState = emptyLiveState()) 
   return { ok: problems.length === 0, problems };
 }
 
-export { COLLECTIONS, MODIFIABLE };
+export { COLLECTIONS, MODIFIABLE, SPEC_REFS };

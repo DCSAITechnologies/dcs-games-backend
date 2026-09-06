@@ -28,7 +28,7 @@ import { planExpansion, planEdit } from "./src/v3/expansion/planner.mjs";       
 import { forkWorld, attributionChain, forkPolicyOf, FORK_POLICIES } from "./src/v3/expansion/fork.mjs"; // remix/fork with provenance
 import { planStitch, recordStitch, stitchSummary, checkStitchPermission } from "./src/v3/expansion/stitch.mjs"; // 9.2: world stitching
 import { applyDelta, verifyPreservation, emptyLiveState, newDelta } from "./src/v3/expansion/delta.mjs";
-import { planRollback } from "./src/v3/expansion/rollback.mjs";              // B6: rollback as a new version, never a rewind
+import { planRollback, recordRollback } from "./src/v3/expansion/rollback.mjs";              // B6: rollback as a new version, never a rewind
 import { diffManifests } from "./src/v3/expansion/diff.mjs";                 // B6: what actually changed between two versions
 import { createSubscriptionsService } from "./src/core/subscriptions.mjs";   // B15: subscriptions, built DARK — nothing is purchasable
 import { createWorldMemory } from "./src/v3/memory/world-memory.mjs";           // B7: factual world chronology
@@ -1209,9 +1209,37 @@ const server = http.createServer(async (req, res) => {
         const rec = await repo.get(mm[1], { requesterId: me.id, requireOwner: true });
         const target = await repo.getVersion(mm[1], toVersion, { requesterId: me.id });
         const { manifest: current } = ensureV3(rec.manifest, { worldVersion: rec.version, creatorId: rec.owner_id });
+        // The TARGET gets the same treatment. A version retained before the v3
+        // migration is still a legitimate rollback target — refusing it would
+        // mean the oldest history a world has is the part it can never return
+        // to. It is migrated on the way back, exactly as the current manifest is
+        // migrated on the way in, and then has to pass the same playtest gate.
+        const { manifest: targetV3 } = ensureV3(target.manifest, { worldVersion: target.version, creatorId: rec.owner_id });
 
+        // A world that has never been expanded carries no world_version of its
+        // own — only applyDelta and the migrator write one. The repository's
+        // version number is the authority for "which version is this", so it is
+        // stamped in where the manifest is silent. A manifest that DOES carry
+        // one keeps it, because its chronology is validated against it.
+        // The world_id is the same story: the record knows it, the manifest may
+        // not carry it, and a rollback must be able to prove both sides name the
+        // same world before it touches anything.
+        const stamp = (m: any, v: number) => ({
+          ...m,
+          world_id: m?.world_id ?? rec.world_id,
+          world_version: Number.isInteger(m?.world_version) && m.world_version >= 1 ? m.world_version : v,
+        });
+        const currentM = stamp(current, Number(rec.version));
+        const targetM = stamp(targetV3, Number(target.version));
+
+        // Client-supplied live state is ADDITIVE evidence of what players hold,
+        // never the whole of it: a caller that simply omits it must not thereby
+        // get permission to demolish. Manifest-recorded ownership is checked
+        // independently inside planRollback, and the response says plainly how
+        // far the live-state check reached so nobody reads silence as safety.
         const live = { ...emptyLiveState(), ...(b.live_state || {}) };
-        const { manifest, record } = planRollback(current, target.manifest, {
+        const liveStateSupplied = !!b.live_state && Object.keys(b.live_state).length > 0;
+        const { manifest, record } = planRollback(currentM, targetM, {
           actorId: me.id, toVersion, liveState: live, reason: b.reason ?? null,
         });
 
@@ -1223,17 +1251,24 @@ const server = http.createServer(async (req, res) => {
         }
 
         const saved = await repo.upsert({ worldId: rec.world_id, ownerId: me.id, manifest: gate.manifest, state: rec.state, title: gate.manifest.meta.title });
-        await worldMemory.record(rec.world_id, {
-          kind: "rolled_back", summary: `rolled back to v${toVersion}`,
-          worldVersion: gate.manifest.world_version, actorId: me.id,
-          detail: { from_version: record.from_version, to_version: record.to_version, reason: record.reason || null },
-        });
+        // Written through the seam rollback.mjs exports, which builds the event
+        // from the history RECORD rather than from what this route believes.
+        // Hand-rolling it here put the versions inside `detail`, while a
+        // rolled_back event requires them at the top level — so this threw AFTER
+        // the world had already been saved: the rollback happened, the caller
+        // was told it failed, and the chronicle entry was lost. That is exactly
+        // the inconsistency the append-only chronicle exists to prevent.
+        await recordRollback(worldMemory, rec.world_id, { manifest: gate.manifest, record });
 
         return send(res, 200, {
           ok: true, world_id: rec.world_id, rolled_back_to: toVersion,
           world_version: gate.manifest.world_version, record_version: saved.version,
           ownership_preserved: record.ownership_preserved || [],
-          diff: diffManifests(current, gate.manifest).summary,
+          live_state_checked: liveStateSupplied,
+          live_state_note: liveStateSupplied
+            ? "Player-held entities were checked against the live state supplied with this request, and against ownership recorded in the manifest."
+            : "No live state was supplied, so only ownership recorded in the manifest was checked. Inventory, quest progress and companion references were not verified.",
+          diff: diffManifests(currentM, gate.manifest).summary,
           playtest: gate.verdict, correlation_id: cid,
         });
       }

@@ -7,7 +7,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createAssemblyRouter } from "../src/v3/router/assembly.mjs";
 import { simulatePlaythrough, simulateQuests, critique, repair, playtestAndRepair } from "../src/v3/playtest/agent.mjs";
-import { runAllValidators, validateStructure, validateNavigation, validateQuests, validateGameplayLoop } from "../src/v3/playtest/validators.mjs";
+import { runAllValidators, validateStructure, validateNavigation, validateQuests, validateGameplayLoop, validateReferences } from "../src/v3/playtest/validators.mjs";
 
 const OFFLINE = { DCS_PROVIDERS_OFFLINE: "1" };
 
@@ -253,4 +253,137 @@ test("B4: every severity level is reachable, so the verdict is meaningful", asyn
   const rejected = await goodWorld();
   rejected.quests[0].steps[0].target = null;
   assert.equal(run(rejected).verdict.verdict, "REJECTED");
+});
+
+// -------------------------------------------- references held inside a spec
+//
+// A behaviour can name an entity from inside its own `spec` — the item a pickup
+// grants, the key a door is locked by, the zone a teleporter aims at. Nothing
+// that walks `target_ref`/`behavior_ref` sees those, and the schema validator
+// does not look inside a spec either, so a world can lose the entity and still
+// be pronounced valid. What the player gets is an item nothing can obtain, a
+// door nothing can open, a teleporter to nowhere, and no error anywhere.
+
+test("B4: the agent does not claim to have picked up an item that does not exist", async () => {
+  const m = await goodWorld();
+  const pickup = m.behaviors.find((b) => b.kind === "pickup" && b.spec?.item);
+  assert.ok(pickup, "the fixture needs a pickup");
+  const itemId = pickup.spec.item;
+
+  // The item is gone; the pickup that granted it survives, still naming it.
+  m.items = m.items.filter((i) => i.id !== itemId);
+
+  const walk = simulatePlaythrough(m);
+  assert.equal(walk.reached.has(itemId), false, "the walk must not report reaching an entity the world no longer contains");
+
+  // And a quest step aimed at it is not judged completable on the strength of it.
+  m.quests[0].steps[0] = { id: "step_ghost", kind: "collect", target: itemId, description: "Recover the missing thing." };
+  const quests = simulateQuests(m, simulatePlaythrough(m));
+  assert.equal(quests[0].completable, false);
+  assert.match(quests[0].steps[0].why, new RegExp(itemId));
+});
+
+test("B4: a pickup whose item was deleted is a BLOCKER, not a valid world", async () => {
+  const m = await goodWorld();
+  const pickup = m.behaviors.find((b) => b.kind === "pickup" && b.spec?.item);
+  const itemId = pickup.spec.item;
+  m.items = m.items.filter((i) => i.id !== itemId);
+  m.quests = m.quests.map((q) => ({ ...q, steps: q.steps.filter((s) => s.target !== itemId) })).filter((q) => q.steps.length);
+
+  const findings = validateReferences(m);
+  const f = findings.find((x) => x.where === pickup.id);
+  assert.ok(f, "a pickup naming a deleted item must be reported");
+  assert.equal(f.id, "behavior_spec_dangling");
+  assert.equal(f.severity, "blocker");
+  assert.equal(f.data.field, "item");
+  assert.equal(f.data.ref, itemId);
+  assert.match(f.message, new RegExp(itemId));
+
+  // And it reaches the verdict, so the gate can actually fail on it.
+  assert.equal(run(m).verdict.verdict, "REJECTED");
+  assert.ok(has(run(m).verdict, "behavior_spec_dangling"));
+});
+
+test("B4: every spec-held reference kind is checked, not just a pickup's item", async () => {
+  const m = await goodWorld();
+  const zone = m.zones[0].id;
+  const item = m.items[0].id;
+  m.behaviors.push(
+    { id: "behavior_door_ghostkey", kind: "door", spec: { opens: "inward", speed: 1, locked_by: "item_no_such_key", auto_close_s: 6 } },
+    { id: "behavior_crate_ghost", kind: "container", spec: { contains: [item, "item_no_such_loot"], locked_by: null } },
+    { id: "behavior_switch_ghost", kind: "switch", spec: { toggles: ["struct_no_such_gate"], starts: "off" } },
+    { id: "behavior_terminal_ghost", kind: "terminal", spec: { screens: ["welcome"], unlocks: ["npc_no_such_warden"] } },
+    { id: "behavior_lift_ghost", kind: "elevator", spec: { floors: [0, 6], speed: 2, call_from: [zone, "zone_no_such_floor"] } },
+    { id: "behavior_portal_ghost", kind: "teleporter", spec: { to_zone: "zone_no_such_place", to_position: { x: 1, y: 0, z: 1 } } },
+  );
+
+  const byBehavior = new Map(validateReferences(m).map((f) => [f.where, f]));
+  const expected = {
+    behavior_door_ghostkey: ["locked_by", "item_no_such_key", "major"],
+    behavior_crate_ghost: ["contains", "item_no_such_loot", "major"],
+    behavior_switch_ghost: ["toggles", "struct_no_such_gate", "major"],
+    behavior_terminal_ghost: ["unlocks", "npc_no_such_warden", "major"],
+    behavior_lift_ghost: ["call_from", "zone_no_such_floor", "major"],
+    behavior_portal_ghost: ["to_zone", "zone_no_such_place", "blocker"],
+  };
+  for (const [id, [field, ref, severity]] of Object.entries(expected)) {
+    const f = byBehavior.get(id);
+    assert.ok(f, `${id}: a dangling spec.${field} must be reported`);
+    assert.equal(f.data.field, field);
+    assert.equal(f.data.ref, ref);
+    assert.equal(f.severity, severity, `${id}: losing spec.${field} is a ${severity}`);
+  }
+  // The references that DO resolve are left alone — no false positives.
+  assert.equal(byBehavior.size, Object.keys(expected).length);
+});
+
+test("B4: repair scrubs a dead spec reference rather than substituting another entity", async () => {
+  const m = await goodWorld();
+  const door = m.behaviors.find((b) => b.kind === "door");
+  door.spec.locked_by = "item_no_such_key";
+  m.behaviors.push({ id: "behavior_crate_ghost", kind: "container", spec: { contains: [m.items[0].id, "item_no_such_loot"], locked_by: null } });
+  m.interactions.push({ id: "interaction_crate_ghost", trigger: "interact", target_ref: m.structures[0].id, behavior_ref: "behavior_crate_ghost", params: {} });
+
+  const r = repair(m, validateReferences(m));
+  const fixedDoor = r.manifest.behaviors.find((b) => b.id === door.id);
+  const fixedCrate = r.manifest.behaviors.find((b) => b.id === "behavior_crate_ghost");
+
+  assert.equal(fixedDoor.spec.locked_by, null, "the door is simply not locked any more");
+  assert.deepEqual(fixedCrate.spec.contains, [m.items[0].id], "only the dead entry goes; the real one stays");
+  assert.equal(validateReferences(r.manifest).length, 0);
+  // Nothing was invented to satisfy the reference.
+  assert.ok(!r.manifest.items.some((i) => i.id === "item_no_such_key" || i.id === "item_no_such_loot"));
+  assert.ok(r.applied.some((a) => a.fix === "scrub_spec_ref" && a.dropped === "item_no_such_key"));
+});
+
+test("B4: a pickup with no item left is dropped, not patched with an invented one", async () => {
+  const m = await goodWorld();
+  const pickup = m.behaviors.find((b) => b.kind === "pickup" && b.spec?.item);
+  const itemId = pickup.spec.item;
+  m.items = m.items.filter((i) => i.id !== itemId);
+  m.quests = m.quests.map((q) => ({ ...q, steps: q.steps.filter((s) => s.target !== itemId) })).filter((q) => q.steps.length);
+
+  const r = repair(m, validateReferences(m));
+  assert.ok(!r.manifest.behaviors.some((b) => b.id === pickup.id), "the pickup goes with the item it granted");
+  assert.ok(!r.manifest.items.some((i) => i.id === itemId), "and no item is invented to keep it alive");
+  assert.ok(!r.manifest.interactions.some((i) => i.behavior_ref === pickup.id), "its interaction goes too");
+  assert.equal(validateReferences(r.manifest).length, 0);
+});
+
+test("B4: an item held in a container is obtainable, and the walk agrees with the validators", async () => {
+  const m = await goodWorld();
+  // A brand new item that exists only inside a container, on a structure the
+  // agent can already reach.
+  const host = m.structures.find((s) => simulatePlaythrough(m).reached.has(s.id));
+  assert.ok(host, "the fixture needs a reachable structure");
+  m.items.push({ id: "item_strongbox_key", name: "Strongbox Key", kind: "key", asset_ref: null, stackable: false, effects: [] });
+  m.behaviors.push({ id: "behavior_strongbox", kind: "container", spec: { contains: ["item_strongbox_key"], locked_by: null } });
+  m.interactions.push({ id: "interaction_strongbox", trigger: "interact", target_ref: host.id, behavior_ref: "behavior_strongbox", params: { prompt: "Open" } });
+  m.quests[0].steps.push({ id: "step_key", kind: "collect", target: "item_strongbox_key", description: "Take the key." });
+
+  const walk = simulatePlaythrough(m);
+  assert.equal(walk.reached.has("item_strongbox_key"), true, "an item in a reachable container is reachable");
+  const quests = simulateQuests(m, walk);
+  assert.equal(quests.find((q) => q.quest === m.quests[0].id).completable, true);
+  assert.equal(validateReferences(m).length, 0);
 });

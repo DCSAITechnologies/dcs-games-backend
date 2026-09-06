@@ -12,11 +12,15 @@ import assert from "node:assert/strict";
 import { createAssemblyRouter } from "../src/v3/router/assembly.mjs";
 import { applyDelta, emptyLiveState, verifyPreservation } from "../src/v3/expansion/delta.mjs";
 import { planExpansion, planEdit } from "../src/v3/expansion/planner.mjs";
-import { planRollback, rollbackHistoryOf } from "../src/v3/expansion/rollback.mjs";
+import { planRollback, rollbackHistoryOf, rollbackMemoryEvent, recordRollback } from "../src/v3/expansion/rollback.mjs";
 import { diffManifests } from "../src/v3/expansion/diff.mjs";
 import { validateManifest } from "../src/v3/manifest/schema.mjs";
 import { playtestAndRepair } from "../src/v3/playtest/agent.mjs";
 import { manifestHash } from "../src/core/worldstore.mjs";
+import { createWorldMemory } from "../src/v3/memory/world-memory.mjs";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 const OFFLINE = { DCS_PROVIDERS_OFFLINE: "1" };
 
@@ -387,4 +391,288 @@ test("B6 rollback: the world it was called on is never mutated", async () => {
   v3.zones.push({ id: "zone_scribble", name: "Scribble", kind: "district", bounds: [0, 0, 1, 1] });
   v3.terrain.data[0][0] = 999;
   assert.equal(JSON.stringify(v1), targetSnapshot, "the target snapshot must not alias the restored world");
+});
+
+// ============================== the chronicle, under attack
+//
+// Everything above tests that a rollback does the right thing when it is used
+// the way it is meant to be. This section tries to break the record instead.
+// The chronology is the one artefact a world cannot recover from losing: every
+// player's history, every companion memory and every retained version is
+// addressed by it, so a chronicle with a gap, a duplicate or a rewritten entry
+// is not a cosmetic defect. Each test below is an attempt to produce one.
+
+const tmpEnv = () => ({ DCS_DATA_DIR: fs.mkdtempSync(path.join(os.tmpdir(), "dcs-rb-")) });
+const versionsIn = (m) => (m.expansion?.history || []).map((h) => h.version);
+
+test("B6 rollback ATTACK: no earlier history entry is truncated, reordered or rewritten", async () => {
+  const v1 = await world();
+  const v2 = expand(v1, "add a hospital district");
+  const v3 = expand(v2, "add an airport");
+  const v4 = expand(v3, "add a university campus");
+  const before = structuredClone(v4.expansion.history);
+
+  const { manifest: v5 } = planRollback(v4, v1, { actorId: "u1", toVersion: 1 });
+  const after = v5.expansion.history;
+
+  assert.equal(after.length, before.length + 1, "the chronology gains exactly one entry");
+  for (let i = 0; i < before.length; i++) {
+    assert.deepEqual(after[i], before[i], `history entry ${i} was altered by a rollback`);
+  }
+  assert.deepEqual(versionsIn(v5), [2, 3, 4, 5], "and it stays in order, with no gap and no repeat");
+  // The entries that describe expansions still describe expansions — restoring
+  // v1's content does not un-happen the work that came after it.
+  assert.deepEqual(after.slice(0, 3).map((h) => h.label), before.map((h) => h.label));
+});
+
+test("B6 rollback ATTACK: a stale world_version cannot mint a version the chronicle already has", async () => {
+  const v1 = await world();
+  const v2 = expand(v1, "add a hospital district");
+  const v3 = expand(v2, "add an airport");
+  assert.deepEqual(versionsIn(v3), [2, 3]);
+
+  // A manifest resaved from a stale read: its content and chronology are v3's,
+  // but it calls itself v2. Left unchecked the rollback would number itself v3
+  // and the chronicle would read 2, 3, 3.
+  const stale = structuredClone(v3);
+  stale.world_version = 2;
+
+  assert.throws(
+    () => planRollback(stale, v1, { actorId: "u1" }),
+    (e) => e.httpStatus === 409 && /claims to be v2 but its history records a later v3/.test(e.detail),
+  );
+});
+
+test("B6 rollback ATTACK: a version ahead of its own chronicle cannot open a gap", async () => {
+  const v1 = await world();
+  const v2 = expand(v1, "add a hospital district");
+  const v3 = expand(v2, "add an airport");
+
+  const ahead = structuredClone(v3);
+  ahead.world_version = 9;   // as if versions had been assigned elsewhere
+
+  assert.throws(
+    () => planRollback(ahead, v1, { actorId: "u1" }),
+    (e) => e.httpStatus === 409 && /claims to be v9 but its chronology ends at v3/.test(e.detail),
+  );
+});
+
+test("B6 rollback ATTACK: a chronicle that does not move forward is refused", async () => {
+  const v1 = await world();
+  const v2 = expand(v1, "add a hospital district");
+  const v3 = expand(v2, "add an airport");
+
+  const reordered = structuredClone(v3);
+  reordered.expansion.history = [reordered.expansion.history[1], reordered.expansion.history[0]];
+
+  assert.throws(
+    () => planRollback(reordered, v1, { actorId: "u1" }),
+    (e) => e.httpStatus === 409 && /does not move forward/.test(e.detail),
+  );
+
+  const duplicated = structuredClone(v3);
+  duplicated.expansion.history = [duplicated.expansion.history[0], structuredClone(duplicated.expansion.history[0]), duplicated.expansion.history[1]];
+  assert.throws(() => planRollback(duplicated, v1, { actorId: "u1" }), (e) => e.httpStatus === 409);
+});
+
+test("B6 rollback ATTACK: two rollbacks off the same base cannot interleave", async () => {
+  const v1 = await world();
+  const v2 = expand(v1, "add a hospital district");
+  const v3 = expand(v2, "add an airport");
+
+  // Two callers each fetch v3 and roll it back to a different point. Both plans
+  // legitimately claim v4 — that is what optimistic concurrency at the store is
+  // for — but neither may be applied ON TOP of the other, because that would
+  // produce a chronology containing v4 twice.
+  const a = planRollback(v3, v1, { actorId: "u1", toVersion: 1 });
+  const b = planRollback(v3, v2, { actorId: "u2", toVersion: 2 });
+  assert.equal(a.record.version, 4);
+  assert.equal(b.record.version, 4);
+
+  assert.throws(
+    () => planRollback(a.manifest, b.manifest, { actorId: "u1" }),
+    (e) => e.httpStatus === 422 && /only goes backwards/.test(e.detail),
+  );
+  assert.throws(
+    () => planRollback(b.manifest, a.manifest, { actorId: "u2" }),
+    (e) => e.httpStatus === 422 && /only goes backwards/.test(e.detail),
+  );
+
+  // Applied one after the other — the way a store that serialises writes would
+  // do it — the chronology stays contiguous.
+  const first = planRollback(v3, v1, { actorId: "u1", toVersion: 1 });
+  const second = planRollback(first.manifest, v2, { actorId: "u2", toVersion: 2 });
+  assert.deepEqual(versionsIn(second.manifest), [2, 3, 4, 5]);
+  assert.equal(new Set(versionsIn(second.manifest)).size, 4, "no version appears twice");
+});
+
+test("B6 rollback ATTACK: a rollback of a rollback is recorded, not cancelled out", async () => {
+  const v1 = await world();
+  const v2 = expand(v1, "add a hospital district");
+  const v3 = expand(v2, "add an airport");
+
+  const back = planRollback(v3, v1, { actorId: "u1", toVersion: 1 });      // v4, content of v1
+  const forward = planRollback(back.manifest, v3, { actorId: "u1", toVersion: 3 }); // v5, content of v3
+
+  assert.equal(forward.manifest.world_version, 5, "undoing an undo still moves forward");
+  assert.deepEqual(versionsIn(forward.manifest), [2, 3, 4, 5]);
+  const rollbacks = rollbackHistoryOf(forward.manifest);
+  assert.equal(rollbacks.length, 2, "both rollbacks are in the record; neither erases the other");
+  assert.deepEqual(rollbacks.map((r) => [r.from_version, r.to_version]), [[3, 1], [4, 3]]);
+
+  // The content really is v3's again, and the chronicle says how it got there.
+  assert.equal(diffManifests(v3, forward.manifest).summary.changed, false);
+  assert.equal(forward.manifest.expansion.history.filter((h) => h.kind === "rollback").length, 2);
+});
+
+test("B6 rollback ATTACK: editing the returned record cannot edit the stored chronicle", async () => {
+  const v1 = await world();
+  const v2 = expand(v1, "add a hospital district");
+  const { manifest: v3, record, memory_event } = planRollback(v2, v1, { actorId: "u1", toVersion: 1 });
+  const stored = structuredClone(v3.expansion.history.at(-1));
+
+  record.version = 999;
+  record.to_version = 999;
+  record.author = "someone_else";
+  record.label = "TAMPERED";
+  record.summary = "nothing happened";
+  record.added.zones = 99;
+  if (record.ownership_preserved) record.ownership_preserved.push({ id: "fake", owner_id: "u9" });
+
+  assert.deepEqual(v3.expansion.history.at(-1), stored, "the chronicle holds its own copy");
+  assert.equal(rollbackHistoryOf(v3)[0].to_version, 1);
+  assert.equal(rollbackHistoryOf(v3)[0].author, "u1");
+  assert.deepEqual(memory_event.detail.added, stored.added, "and so does the event that will be written to world memory");
+});
+
+test("B6 rollback ATTACK: editing the source manifests afterwards cannot edit the stored chronicle", async () => {
+  const v1 = await world();
+  const v2 = expand(v1, "add a hospital district");
+  const { manifest: v3 } = planRollback(v2, v1, { actorId: "u1", toVersion: 1 });
+  const stored = structuredClone(v3.expansion.history);
+
+  v2.expansion.history[0].label = "REWRITTEN";
+  v2.expansion.history[0].version = 99;
+  v2.expansion.history.push({ version: 100, label: "FABRICATED" });
+  v1.zones.push({ id: "zone_scribble", name: "Scribble", kind: "district", bounds: [0, 0, 1, 1] });
+
+  assert.deepEqual(v3.expansion.history, stored, "the restored world's chronology is not a view onto its inputs");
+  assert.ok(!v3.zones.some((z) => z.id === "zone_scribble"));
+});
+
+test("B6 rollback ATTACK: a forged ancestor carrying a chronology it could not have is refused", async () => {
+  const v1 = await world();
+  const v2 = expand(v1, "add a hospital district");
+  const v3 = expand(v2, "add an airport");
+
+  // Equal-length: a manifest calling itself v1 while carrying v3's whole
+  // chronology. An identical history IS a prefix of itself, so the prefix test
+  // alone waves this through — but a real v1 has no history at all.
+  const forged = structuredClone(v1);
+  forged.expansion.history = structuredClone(v3.expansion.history);
+  assert.throws(
+    () => planRollback(v3, forged, { actorId: "u1" }),
+    (e) => e.httpStatus === 409 && /claims to be v1 but its history records a later v2/.test(e.detail),
+  );
+
+  // Diverged: same length, different content. A different world's second version.
+  const other = await world("A desert trading post", v1.world_id);
+  const otherV2 = expand(other, "add a hospital district");
+  const diverged = structuredClone(otherV2);
+  diverged.world_version = 2;
+  assert.throws(
+    () => planRollback(v3, diverged, { actorId: "u1", toVersion: 2 }),
+    (e) => e.httpStatus === 409 && /diverges at history entry/.test(e.detail),
+  );
+
+  // Doctored: the right lineage with one entry quietly altered.
+  const doctored = structuredClone(v2);
+  doctored.expansion.history[0].delta_hash = "0".repeat(64);
+  assert.throws(
+    () => planRollback(v3, doctored, { actorId: "u1", toVersion: 2 }),
+    (e) => e.httpStatus === 409 && /diverges at history entry 0/.test(e.detail),
+  );
+});
+
+test("B6 rollback ATTACK: the world it produces satisfies the rule it demanded of its inputs", async () => {
+  const v1 = await world();
+  let m = v1;
+  for (const r of ["add a hospital district", "add an airport", "add a university campus"]) m = expand(m, r);
+
+  // Roll back and forward repeatedly; the chronology must stay contiguous and
+  // must always be a manifest planRollback would itself accept as an input.
+  let current = m;
+  for (const target of [v1, m, v1]) {
+    const out = planRollback(current, target, { actorId: "u1" });
+    const vs = versionsIn(out.manifest);
+    assert.deepEqual(vs, Array.from({ length: vs.length }, (_, i) => i + 2), "the chronology stays contiguous");
+    assert.equal(vs.at(-1), out.manifest.world_version, "and ends at the version the manifest claims to be");
+    current = out.manifest;
+  }
+  assert.equal(current.world_version, 7);
+  assert.equal(rollbackHistoryOf(current).length, 3);
+});
+
+// ==================================== a rollback is an event the world remembers
+
+test("B6 rollback: the world chronicle records the rollback, with both versions and the actor", async () => {
+  const v1 = await world();
+  const v2 = expand(v1, "add a hospital district");
+  const planned = planRollback(v2, v1, { actorId: "u7", toVersion: 1, reason: "the district broke the harbour" });
+
+  const event = planned.memory_event;
+  assert.equal(event.kind, "rolled_back");
+  assert.equal(event.fromVersion, 2);
+  assert.equal(event.toVersion, 1);
+  assert.equal(event.actorId, "u7");
+  assert.equal(event.worldVersion, 3, "the version the restored content was saved as");
+  assert.match(event.summary, /rolled back from v2 to the content of v1 by u7/);
+  assert.equal(event.detail.reason, "the district broke the harbour");
+  assert.equal(event.detail.restored_as_version, 3);
+  assert.equal(event.detail.from_manifest_hash, manifestHash(v2));
+  assert.equal(event.detail.to_manifest_hash, manifestHash(v1));
+
+  const mem = createWorldMemory(tmpEnv());
+  await mem.record(v1.world_id, { kind: "created", summary: "the town was generated", worldVersion: 1, actorId: "u7" });
+  await mem.record(v1.world_id, { kind: "expanded", summary: "the hospital district was added", worldVersion: 2, actorId: "u7" });
+  const row = await recordRollback(mem, v1.world_id, planned);
+
+  assert.equal(row.kind, "rolled_back");
+  assert.equal(row.from_version, 2);
+  assert.equal(row.to_version, 1);
+  assert.equal(row.actor_id, "u7");
+
+  // It reads as a world event in the world's own history, in sequence.
+  const chronology = await mem.chronology(v1.world_id);
+  assert.deepEqual(chronology.map((r) => r.kind), ["created", "expanded", "rolled_back"]);
+  assert.deepEqual(chronology.map((r) => r.seq), [1, 2, 3]);
+  const timeline = await mem.timeline(v1.world_id);
+  assert.deepEqual(timeline.map((t) => t.world_version), [1, 2, 3]);
+  assert.equal(timeline.at(-1).events[0].kind, "rolled_back");
+});
+
+test("B6 rollback: the memory event is built from the record, so it cannot overstate the rollback", async () => {
+  const v1 = await world();
+  const wanted = v1.environment.weather === "storm" ? "fog" : "storm";
+  const v2 = applyDelta(v1, planEdit(v1, { request: `set weather to ${wanted}` }).delta).manifest;
+  const planned = planRollback(v2, v1, { actorId: "u1" });
+
+  // Reverting the weather removes nothing, and the event must say so rather
+  // than describing a rollback as a demolition.
+  assert.equal(planned.record.removed, 0);
+  assert.equal(planned.memory_event.detail.removed, 0);
+  assert.deepEqual(planned.memory_event.detail.added, {});
+  assert.equal(planned.memory_event.detail.change_summary, planned.record.summary);
+
+  // And it is independently derivable from the record alone.
+  assert.deepEqual(rollbackMemoryEvent(planned.record), planned.memory_event);
+});
+
+test("B6 rollback: a rollback event with no versions is refused by the chronicle", async () => {
+  const mem = createWorldMemory(tmpEnv());
+  await assert.rejects(
+    () => mem.record("w_rb", { kind: "rolled_back", summary: "the world went back somehow", actorId: "u1" }),
+    (e) => e.httpStatus === 422,
+  );
+  assert.deepEqual(await mem.chronology("w_rb"), [], "an event that cannot say what it undid is not written");
 });

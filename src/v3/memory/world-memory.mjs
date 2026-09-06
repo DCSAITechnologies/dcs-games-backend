@@ -22,8 +22,24 @@ export const EVENT_KINDS = [
   "player_event",   // something a player did that the world should remember
   "seasonal",       // a seasonal or timed event ran
   "milestone",      // a version milestone
-  "rollback",       // a version was rolled back
+  "rollback",       // legacy spelling of rolled_back, still accepted (see below)
+  "rolled_back",    // an earlier version's content was restored as a new version
 ];
+
+/**
+ * Kinds that must say which versions they moved between.
+ *
+ * A rollback is a world event and has to read as one in the world's own history:
+ * "the world was rolled back" with no from and no to is not a chronicle entry,
+ * it is a rumour. An NPC or the companion may only cite what is recorded here,
+ * so an entry that cannot say what it undid would have them telling a player
+ * something happened without being able to say what.
+ *
+ * `rollback` is kept alongside `rolled_back` because it has been in the
+ * published kind list from the start; anything already passing it keeps working,
+ * and it carries the same requirement. New callers should use `rolled_back`.
+ */
+const VERSIONED_KINDS = new Set(["rolled_back", "rollback"]);
 
 export function createWorldMemory(env = process.env) {
   const dir = path.join(env.DCS_DATA_DIR || path.join(process.cwd(), ".dcs-data"), "world-memory");
@@ -52,9 +68,18 @@ export function createWorldMemory(env = process.env) {
      * Record something that actually happened. The chronology is append-only:
      * there is no update or delete, because a world's history is not editable.
      */
-    async record(worldId, { kind, summary, detail = null, actorId = null, worldVersion = null, occurredAt = null }) {
+    async record(worldId, { kind, summary, detail = null, actorId = null, worldVersion = null, occurredAt = null, fromVersion = null, toVersion = null }) {
       if (!EVENT_KINDS.includes(kind)) throw Errors.validation(`event kind must be one of: ${EVENT_KINDS.join(", ")}`);
       if (!summary || typeof summary !== "string") throw Errors.validation("an event needs a factual one-line summary");
+      if (VERSIONED_KINDS.has(kind)) {
+        // null and undefined coerce to 0 through Number(), which would let an
+        // event with no versions at all through as if it carried v0.
+        const version = (v) => (v === null || v === undefined || v === "" || !Number.isInteger(Number(v)) || Number(v) < 1 ? null : Number(v));
+        if (version(fromVersion) === null || version(toVersion) === null) {
+          throw Errors.validation(`a '${kind}' event must record fromVersion and toVersion`);
+        }
+        if (!actorId) throw Errors.validation(`a '${kind}' event must be attributed to a principal`);
+      }
       const rows = await readAll(worldId);
       const row = {
         id: crypto.randomUUID(),
@@ -66,6 +91,11 @@ export function createWorldMemory(env = process.env) {
         detail,
         actor_id: actorId,
         occurred_at: occurredAt || new Date().toISOString(),
+        // Present only on the kinds that move between versions, so the shape
+        // every existing consumer already reads is untouched.
+        ...(fromVersion !== null || toVersion !== null
+          ? { from_version: fromVersion === null ? null : Number(fromVersion), to_version: toVersion === null ? null : Number(toVersion) }
+          : {}),
       };
       rows.push(row);
       await writeAll(worldId, rows);

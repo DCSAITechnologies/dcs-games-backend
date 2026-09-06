@@ -95,11 +95,24 @@ export function simulatePlaythrough(m, { maxNodes = 60000 } = {}) {
     if (visited.some((v) => v.x >= x0 && v.x <= x1 && v.z >= z0 && v.z <= z1)) reached.add(z.id);
     else unreachable.push({ kind: "zone", id: z.id });
   }
-  // Items are reached through whatever pickup hosts them.
+  // Items are reached through whatever pickup or container hosts them.
+  //
+  // The existence check is not belt-and-braces. A behaviour can outlive the item
+  // its spec names — the id is not a target_ref, so a prune that only follows
+  // target_ref/behavior_ref will not see it — and without this gate the walk
+  // would put an id that no longer names anything into `reached`. Everything
+  // downstream trusts `reached`, so a quest step pointing at a deleted item was
+  // then judged completable: the agent reported it had picked up something that
+  // does not exist.
+  const itemIds = new Set((m.items || []).map((it) => it.id));
   for (const b of m.behaviors || []) {
-    if (b.kind !== "pickup" || !b.spec?.item) continue;
+    const held = b.kind === "pickup" ? (b.spec?.item ? [b.spec.item] : [])
+      : b.kind === "container" && Array.isArray(b.spec?.contains) ? b.spec.contains
+      : [];
+    if (!held.length) continue;
     const host = (m.interactions || []).find((i) => i.behavior_ref === b.id);
-    if (host && reached.has(host.target_ref)) reached.add(b.spec.item);
+    if (!host || !reached.has(host.target_ref)) continue;
+    for (const id of held) if (itemIds.has(id)) reached.add(id);
   }
 
   const coverage = (visited.length * STEP * STEP) / (size.w * size.h);
@@ -315,6 +328,19 @@ export function repair(manifest, findings) {
       case "wire_or_drop": {
         m.behaviors = m.behaviors.filter((b) => b.id !== f.where);
         applied.push({ fix: "drop_orphan_behavior", target: f.where });
+        break;
+      }
+      case "scrub_spec_ref": {
+        // A behaviour that names an entity the world no longer has, in a field
+        // it can survive losing. The reference is removed, not redirected: the
+        // door simply is not locked any more, the container simply does not hold
+        // that item. Substituting a different entity would be a fabrication.
+        const b = byId(m.behaviors, f.where);
+        const field = f.data?.field;
+        if (!b || !field || !b.spec || !(field in b.spec)) { skipped.push({ ...f, why: "behaviour or field gone" }); break; }
+        if (Array.isArray(b.spec[field])) b.spec[field] = b.spec[field].filter((x) => x !== f.data.ref);
+        else b.spec[field] = null;
+        applied.push({ fix: "scrub_spec_ref", target: f.where, field, dropped: f.data.ref });
         break;
       }
       default:

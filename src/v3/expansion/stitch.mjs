@@ -53,7 +53,9 @@ export function checkStitchPermission(host, guest, stitcherId) {
   const problems = [];
   if (!stitcherId) problems.push({ code: "unauthenticated", detail: "stitching requires an authenticated principal" });
   if (host.world_id === guest.world_id) problems.push({ code: "same_world", detail: "a world cannot be stitched to itself" });
-  if (host.owner_id && host.owner_id !== stitcherId) {
+  // Fail CLOSED. This read `host.owner_id && ...`, so a host row with no owner
+  // recorded was stitchable by any stranger. An absent owner is not consent.
+  if (host.owner_id !== stitcherId) {
     problems.push({ code: "not_host_owner", detail: "you can only stitch into a world you own" });
   }
   if (guest.owner_id !== stitcherId) {
@@ -74,6 +76,17 @@ export function checkStitchPermission(host, guest, stitcherId) {
   return { ok: problems.length === 0, problems };
 }
 
+/**
+ * The largest world edge a stitch will plan for, in world units.
+ *
+ * The schema requires only four numbers with max > min, so `bounds:[0,0,1e9,1e9]`
+ * is a perfectly valid zone. extendTerrain allocates a grid from the extent, so
+ * a guest like that asks for ~1e18 cells and takes the HOST's process down —
+ * a world the attacker publishes, paid for by the person who stitches it in.
+ * A refusal names the number; an allocation just dies.
+ */
+export const MAX_STITCH_EXTENT = 16384;
+
 /** The bounding box a manifest's content actually occupies. */
 function extentOf(m) {
   const size = m.terrain?.size || { w: 256, h: 256 };
@@ -81,7 +94,14 @@ function extentOf(m) {
   for (const z of m.zones || []) {
     if (Array.isArray(z.bounds)) { maxX = Math.max(maxX, z.bounds[2]); maxZ = Math.max(maxZ, z.bounds[3]); }
   }
-  return { w: Math.ceil(maxX), h: Math.ceil(maxZ) };
+  const w = Math.ceil(maxX), h = Math.ceil(maxZ);
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w > MAX_STITCH_EXTENT || h > MAX_STITCH_EXTENT) {
+    throw Errors.validation(
+      `this world's extent is ${w}x${h}, beyond the ${MAX_STITCH_EXTENT}x${MAX_STITCH_EXTENT} a stitch will plan for`,
+      { meta: { extent: { w, h }, max: MAX_STITCH_EXTENT } }
+    );
+  }
+  return { w, h };
 }
 
 /**

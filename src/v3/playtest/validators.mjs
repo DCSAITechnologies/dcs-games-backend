@@ -8,6 +8,8 @@
 //
 // Every finding has: id, severity, what is wrong, and where.
 
+import { specRefsOf } from "../expansion/delta.mjs";
+
 export const SEVERITY = { BLOCKER: "blocker", MAJOR: "major", MINOR: "minor", INFO: "info" };
 const ORDER = { blocker: 0, major: 1, minor: 2, info: 3 };
 
@@ -217,6 +219,56 @@ export function validateQuests(m) {
   return out;
 }
 
+// -------------------------------------------------------- reference integrity
+
+/**
+ * Entity references held INSIDE a behaviour's spec, checked against the world.
+ *
+ * The schema validator resolves `target_ref`, `behavior_ref`, `asset_ref`,
+ * `zone` and quest-step targets, and stops there. It does not look inside a
+ * behaviour's spec, so a world can pass validation while containing a pickup
+ * that grants a deleted item, a door locked by a key that no longer exists, a
+ * teleporter aimed at a demolished zone or a lift called from a zone that went
+ * with a rollback. Every one of those reads to a player as a thing they can
+ * never obtain, open or reach, with nothing anywhere saying why.
+ *
+ * The severity split follows the consequence, not the tidiness. Losing the
+ * entity a behaviour EXISTS for (a pickup's item, a teleporter's destination)
+ * makes the behaviour unusable and blocks: there is nothing left for it to do.
+ * Losing one entry of a list, or a lock, degrades it — the rest still works —
+ * so those are major and repairable by scrubbing the reference.
+ */
+export function validateReferences(m) {
+  const out = [];
+  const present = {
+    zones: new Set((m.zones || []).map((z) => z.id)),
+    structures: new Set((m.structures || []).map((s) => s.id)),
+    npcs: new Set((m.npcs || []).map((n) => n.id)),
+    items: new Set((m.items || []).map((i) => i.id)),
+    behaviors: new Set((m.behaviors || []).map((b) => b.id)),
+  };
+
+  for (const b of m.behaviors || []) {
+    for (const { field, id, rule } of specRefsOf(b)) {
+      if (rule.points_at.some((c) => present[c]?.has(id))) continue;
+      const fatal = rule.on_missing === "defunct";
+      out.push(finding(
+        "behavior_spec_dangling",
+        fatal ? SEVERITY.BLOCKER : SEVERITY.MAJOR,
+        `${b.kind || "behaviour"} '${b.id}' references '${id}' through spec.${field}, which does not exist`,
+        {
+          where: b.id,
+          // A pickup with no item cannot be repaired by inventing one, so the
+          // honest repair is to drop it. A scrubbable field is scrubbed.
+          fix: fatal ? "wire_or_drop" : "scrub_spec_ref",
+          data: { field, ref: id, expected: rule.points_at },
+        }
+      ));
+    }
+  }
+  return out;
+}
+
 // ------------------------------------------------------------ gameplay depth
 
 /** Is there actually a game here, or just scenery? */
@@ -255,6 +307,7 @@ export function runAllValidators(m) {
     ...validateStructure(m),
     ...validateNavigation(m),
     ...validateQuests(m),
+    ...validateReferences(m),
     ...validateGameplayLoop(m),
   ];
   findings.sort((a, b) => ORDER[a.severity] - ORDER[b.severity]);

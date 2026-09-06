@@ -16,6 +16,13 @@ import crypto from "node:crypto";
 import { validateManifest } from "../manifest/schema.mjs";
 import { Errors } from "../../core/errors.mjs";
 
+/**
+ * Every manifest collection whose entries can carry an owner. A player can buy
+ * a structure, be given an item, or be assigned an NPC, and each of those is a
+ * claim that must not travel to a forker or survive a rollback.
+ */
+export const OWNABLE_COLLECTIONS = ["structures", "items", "npcs", "vehicles", "behaviors"];
+
 /** A world's own statement about whether it may be remixed. */
 export const FORK_POLICIES = ["allow", "allow_with_attribution", "deny"];
 export const DEFAULT_FORK_POLICY = "allow_with_attribution";
@@ -71,6 +78,9 @@ export function forkWorld(source, { forkerId, newWorldId, title = null } = {}) {
   };
 
   // Attribution is permanent and structural, not a courtesy line in a description.
+  // What the SOURCE already recorded about where it came from, if it was itself
+  // a fork. Read before we overwrite meta.forked_from with this fork's record.
+  const prior = source.manifest?.meta?.forked_from || null;
   const attribution = {
     forked_from_world_id: source.world_id,
     forked_from_creator: source.owner_id,
@@ -81,6 +91,14 @@ export function forkWorld(source, { forkerId, newWorldId, title = null } = {}) {
     forked_by: forkerId,
     forked_at: now,
     source_manifest_hash: crypto.createHash("sha256").update(JSON.stringify(source.manifest)).digest("hex"),
+    // A→B→C used to record only B, so attributionChain named the intermediate
+    // remixer as the original creator. The root travels explicitly: an
+    // attribution that drops the person who actually made the thing is worse
+    // than no attribution, because it credits someone else by name.
+    root_creator: prior?.root_creator ?? prior?.forked_from_creator ?? source.owner_id ?? null,
+    root_world_id: prior?.root_world_id ?? prior?.forked_from_world_id ?? source.world_id ?? null,
+    root_title: prior?.root_title ?? prior?.forked_from_title ?? source.manifest?.meta?.title ?? null,
+    generation: Number(prior?.generation ?? 1) + 1,
   };
   m.meta.forked_from = attribution;
 
@@ -104,9 +122,14 @@ export function forkWorld(source, { forkerId, newWorldId, title = null } = {}) {
     forked_from: attribution,
   };
 
-  // No player state travels. Ownership on structures is cleared, so a fork can
-  // never hand someone else's property to the forker.
-  for (const s of m.structures || []) s.owner_id = null;
+  // No player state travels. This cleared structures ONLY, under a comment
+  // promising that a fork can never hand someone else's property to the forker
+  // — while a player-owned item or NPC travelled with its owner_id intact.
+  // Every collection that can carry ownership is cleared, and the list is
+  // derived rather than spelled out so a new collection cannot be forgotten.
+  for (const key of OWNABLE_COLLECTIONS) {
+    for (const e of m[key] || []) if ("owner_id" in e) e.owner_id = null;
+  }
 
   // A revenue policy has somewhere to attach, and settles nothing today.
   m.meta.revenue_policy = {
@@ -134,14 +157,26 @@ export function forkWorld(source, { forkerId, newWorldId, title = null } = {}) {
 export function attributionChain(manifest) {
   const f = manifest?.meta?.forked_from;
   if (!f) return { is_fork: false, chain: [] };
+  // The chain reports the ROOT as the original. When this world was forked from
+  // something that was itself a fork, the immediate source is an intermediate
+  // remixer and naming it "original" credits the wrong person.
+  const rootCreator = f.root_creator ?? f.forked_from_creator;
+  const rootWorldId = f.root_world_id ?? f.forked_from_world_id;
+  const viaIntermediate = rootWorldId !== f.forked_from_world_id;
+  const chain = [
+    { role: "original", creator: rootCreator, world_id: rootWorldId, title: f.root_title ?? f.forked_from_title, version: viaIntermediate ? null : f.forked_from_version },
+  ];
+  if (viaIntermediate) {
+    chain.push({ role: "remix", creator: f.forked_from_creator, world_id: f.forked_from_world_id, title: f.forked_from_title, version: f.forked_from_version });
+  }
+  chain.push({ role: "remix", creator: manifest.meta.creator_id, world_id: manifest.world_id, title: manifest.meta.title, version: manifest.world_version });
   return {
     is_fork: true,
-    original_creator: f.forked_from_creator,
-    original_world_id: f.forked_from_world_id,
+    original_creator: rootCreator,
+    original_world_id: rootWorldId,
+    forked_directly_from: { creator: f.forked_from_creator, world_id: f.forked_from_world_id },
+    generation: Number(f.generation ?? 2),
     attribution_required: !!f.attribution_required,
-    chain: [
-      { role: "original", creator: f.forked_from_creator, world_id: f.forked_from_world_id, title: f.forked_from_title, version: f.forked_from_version },
-      { role: "remix", creator: manifest.meta.creator_id, world_id: manifest.world_id, title: manifest.meta.title, version: manifest.world_version },
-    ],
+    chain,
   };
 }

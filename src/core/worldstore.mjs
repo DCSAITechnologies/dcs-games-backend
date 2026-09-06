@@ -196,7 +196,12 @@ export class WorldRepository {
     if (!worldId) throw Errors.validation("world_id is required");
     if (!manifest || typeof manifest !== "object") throw Errors.validation("manifest must be an object");
     const existing = await this.store.get(worldId);
-    if (existing && ownerId && existing.owner_id && existing.owner_id !== ownerId) {
+    // Fail CLOSED. This was `existing && ownerId && existing.owner_id && ...`,
+    // so it skipped entirely when EITHER side was absent: a caller passing no
+    // ownerId could overwrite anyone's world, and a stored row with a null
+    // owner could be overwritten — and re-published — by any caller. An absent
+    // owner is not permission; it is the absence of evidence of permission.
+    if (existing && existing.owner_id !== (ownerId ?? null)) {
       throw Errors.forbidden("this world belongs to another creator");
     }
     if (expected_version != null && existing && Number(existing.version) !== Number(expected_version)) {
@@ -226,6 +231,11 @@ export class WorldRepository {
       await this.versions.put(worldId, record.version, {
         world_id: worldId, version: record.version, manifest, manifest_hash: hash,
         label: manifest?.expansion?.history?.at(-1)?.label ?? null,
+        // The state this version was saved IN. Without it, publishing a world
+        // retroactively exposed every draft-era version: the permission check
+        // asked only whether the world is published NOW, and the retained
+        // versions carried no state of their own.
+        state: record.state,
         created_by: ownerId ?? null, created_at: record.updated_at,
       });
     }
@@ -235,24 +245,44 @@ export class WorldRepository {
   async get(worldId, { requesterId = null, requireOwner = false } = {}) {
     const r = await this.store.get(worldId);
     if (!r) throw Errors.notFound(`world ${worldId}`);
-    if (requireOwner && r.owner_id && r.owner_id !== requesterId) throw Errors.forbidden("this world belongs to another creator");
+    // Fail CLOSED on both, for the same reason as upsert: a world with no owner
+    // recorded used to satisfy requireOwner for every caller, and an unowned
+    // draft used to be readable by anyone.
+    if (requireOwner && r.owner_id !== requesterId) throw Errors.forbidden("this world belongs to another creator");
     // Published worlds are readable by anyone; drafts only by their owner (IDOR guard).
-    if (!requireOwner && r.state !== "published" && r.owner_id && requesterId !== r.owner_id) {
+    if (!requireOwner && r.state !== "published" && requesterId !== r.owner_id) {
       throw Errors.forbidden("this world is a draft and is readable only by its creator");
     }
     return r;
   }
-  /** Every retained version of a world, oldest first. */
+  /**
+   * A retained version is visible if its OWN state was published, or if the
+   * caller owns the world. Publishing a world must not retroactively publish
+   * the drafts it passed through — that content was private when it was written
+   * and there is no way to withdraw it, because history is deliberately
+   * append-only. A version recorded before this field existed has no provable
+   * state, so it is treated as private.
+   */
+  _versionVisible(v, world, requesterId) {
+    if (world.owner_id != null && world.owner_id === requesterId) return true;
+    return v.state === "published";
+  }
+
+  /** Every retained version of a world the caller may see, oldest first. */
   async listVersions(worldId, { requesterId = null } = {}) {
-    await this.get(worldId, { requesterId });          // permission check first
-    return this.versions ? await this.versions.list(worldId) : [];
+    const world = await this.get(worldId, { requesterId });   // permission check first
+    const all = this.versions ? await this.versions.list(worldId) : [];
+    return all.filter((v) => this._versionVisible(v, world, requesterId));
   }
 
   /** One retained version, for a rollback or a diff. */
   async getVersion(worldId, version, { requesterId = null } = {}) {
-    await this.get(worldId, { requesterId });
+    const world = await this.get(worldId, { requesterId });
     const v = this.versions ? await this.versions.get(worldId, Number(version)) : null;
     if (!v) throw Errors.notFound(`version ${version} of world ${worldId}`);
+    if (!this._versionVisible(v, world, requesterId)) {
+      throw Errors.forbidden(`version ${version} of world ${worldId} was a draft and is readable only by its creator`);
+    }
     return v;
   }
 

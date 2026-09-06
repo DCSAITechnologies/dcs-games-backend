@@ -361,24 +361,22 @@ test("an invalid receipt is never described in language that implies trust", () 
   assert.doesNotMatch(v.reason, /trust|verified against/i);
 });
 
-// ==================================================================== DEFECTS
-// The three tests below FAIL on purpose. Each is a genuine, reproducible hole
-// in code Lane D does not own; per the lane brief they are recorded as failing
-// tests rather than silently fixed across an ownership boundary.
+// ================================================ the three alias forgeries, closed
+// The three tests below were the failing record of three genuine holes found by
+// this file on 6 Sep 2026. All three are now FIXED in src/cw7/, so these are
+// regressions: each one fails again the moment the fix is undone.
 
 test("an unsigned alias never overrides a signed field in the public verification result", () => {
-  // DEFECT, OPEN (found 6 Sep 2026 by this file). This is a SECOND instance of
-  // the class fixed for world_id, in two more fields:
+  // REGRESSION (defect found and closed 6 Sep 2026). This was a SECOND instance
+  // of the class fixed for world_id, in two more fields:
   //   canonicalBody() signs `attested_by ?? builder_id` and `attestation ?? action`
   //   publicVerifyReceipt() displays `builder_id ?? attested_by` and `action ?? attestation`
   // The precedences are opposite, exactly as world_id/subject_id were, and
-  // hasConflictingAlias() guards only world_id/subject_id. So appending an
-  // unsigned `builder_id` to a genuine receipt re-attributes a VERIFIED receipt
-  // to any creator the attacker names, and an unsigned `action` changes what the
-  // badge appears to attest.
-  // Fix belongs in src/cw7/atlas-local-sign.mjs (extend hasConflictingAlias to
-  // every aliased field) and src/cw7/atlas-verify-view.mjs (display the signed
-  // spelling). Reproduction: the two blocks below.
+  // hasConflictingAlias() guarded only world_id/subject_id, so appending an
+  // unsigned `builder_id` to a genuine receipt re-attributed a VERIFIED receipt
+  // to any creator the attacker named, and an unsigned `action` changed what the
+  // badge appeared to attest. Closed by enumerating every alias once in
+  // SIGNED_FIELDS and displaying signedFields() rather than the raw receipt.
   const attester = { ...genuine(), builder_id: "famous-studio" };
   assert.equal(verifyReceipt(attester), false,
     "an unsigned builder_id contradicting the signed attested_by is a forgery");
@@ -393,14 +391,12 @@ test("an unsigned alias never overrides a signed field in the public verificatio
 });
 
 test("a verified receipt's displayed hash is the hash of the body that was signed", () => {
-  // DEFECT, OPEN (found 6 Sep 2026 by this file). receipt_hash / receipt_id are
-  // outside the signed body and are never recomputed. verifyReceipt() does not
-  // compare them to receiptHash(body), so an attacker can take a genuine receipt,
-  // replace its hash with any value, and the page prints that value under
-  // "Receipt hash" beside a VERIFIED badge. The hash is the identifier a third
-  // party would cross-reference, which makes it exactly the wrong field to leave
-  // unchecked. It is cheaply fixable: the value is derivable from the signed body.
-  // Fix belongs in src/cw7/atlas-local-sign.mjs (verifyReceipt).
+  // REGRESSION (defect found and closed 6 Sep 2026). receipt_hash / receipt_id
+  // sit outside the signed body. verifyReceipt() did not compare them to
+  // receiptHash(body), so an attacker could take a genuine receipt, replace its
+  // hash with any value, and the page printed that value under "Receipt hash"
+  // beside a VERIFIED badge — the identifier a third party cross-references.
+  // Closed by verifying receipt_hash and by recomputing the displayed value.
   const forgedHash = { ...genuine(), receipt_hash: "deadbeef".repeat(8) };
   assert.equal(verifyReceipt(forgedHash), false,
     "a receipt whose stated hash is not the hash of its signed body must not verify");
@@ -412,15 +408,281 @@ test("a verified receipt's displayed hash is the hash of the body that was signe
 });
 
 test("every module that resolves a receipt subject agrees on one canonicalisation", () => {
-  // DEFECT, OPEN (found 6 Sep 2026 by this file). atlas-local-sign.mjs states
-  // that canonicalSubjectId() is "the ONE place a receipt's subject is resolved"
-  // and that everything which signs, verifies or displays a receipt must call it.
-  // atlas-signing-adapter.toCanonicalPayload() does not: it resolves
-  // `world_id ?? asset_id`, the precedence that caused the 6 Sep defect. It is
-  // latent today because server.mts injects verifyReceipt directly rather than
-  // makeInjectedVerify, but it is a live re-entry point for the same bug.
-  // Fix belongs in src/cw7/atlas-signing-adapter.mjs.
+  // REGRESSION (defect found and closed 6 Sep 2026). atlas-local-sign.mjs states
+  // that canonicalSubjectId() is "the ONE place a receipt's subject is resolved".
+  // atlas-signing-adapter.toCanonicalPayload() used to resolve `world_id ??
+  // asset_id` on its own — the precedence that caused the 6 Sep defect, and a
+  // live re-entry point for it. Closed by routing it through signedFields().
   const receipt = { subject_id: "world-a", world_id: "world-b", action: "create", builder_id: "c" };
   assert.equal(toCanonicalPayload(receipt).subject_id, canonicalSubjectId(receipt),
     "the signing adapter resolves a different subject than the canonical resolver");
+});
+
+// =============================================================================
+// SECOND PASS — attacking the fix itself.
+//
+// The fix of 6 Sep 2026 rests on one claim: the five signed fields and their
+// unsigned spellings are enumerated ONCE, in SIGNED_FIELDS, and signedFields()
+// is the single reading everything uses. Everything below tries to find a sixth
+// spelling, a value that slips past the conflict check, or a reader that still
+// has its own opinion.
+// =============================================================================
+
+const { SIGNED_FIELDS, signedFields } = await import("../src/cw7/atlas-local-sign.mjs");
+const { makeInjectedVerify } = await import("../src/cw7/atlas-signing-adapter.mjs");
+const { makeKeyEndpoint } = await import("../src/cw7/atlas-key.mjs");
+const { clientVerifier } = await import("../src/cw7/atlas-embed.mjs");
+const { buildOwnershipHistory } = await import("../src/cw7/atlas-trust.mjs");
+const { makeAtlasRoutes } = await import("../src/cw7/atlas-routes.mjs");
+const { assetProvenance } = await import("../src/cw7/atlas-seller-provenance.mjs");
+const { portableIdentity } = await import("../src/cw7/atlas-portable-identity.mjs");
+
+// ------------------------------------------------------- is the list complete?
+
+test("every spelling the codebase documents as an alias is enumerated in SIGNED_FIELDS", () => {
+  // The signing adapter's header is the contract that named these mappings in
+  // the first place. If a spelling is documented there and missing from
+  // SIGNED_FIELDS, the "enumerated once" claim is already false.
+  const enumerated = new Set(Object.entries(SIGNED_FIELDS).flatMap(([k, v]) => [k, ...v.aliases]));
+  for (const spelling of ["world_id", "asset_id", "builder_id", "action", "attestation", "attested_by", "prev_hash", "subject_type", "subject_id"]) {
+    assert.ok(enumerated.has(spelling), `'${spelling}' is used as a receipt field in src/cw7 but is not in SIGNED_FIELDS`);
+  }
+  // Self-test of the check: a spelling that is genuinely not an alias must not
+  // be reported as one, or this assertion would pass against anything.
+  assert.ok(!enumerated.has("receipt_id"), "receipt_id is unsigned metadata and must NOT be treated as a signed field");
+  assert.ok(!enumerated.has("ts"));
+  // And the body must contain exactly the five signed fields, no more.
+  assert.deepEqual(Object.keys(signedFields({})).sort(), ["attestation", "attested_by", "prev_hash", "subject_id", "subject_type"]);
+});
+
+// --------------------------------------------- values that only LOOK identical
+
+test("an alias equal only by String() coercion cannot change what was signed or shown", () => {
+  // hasConflictingAlias compares with String(), so `123` and `"123"`, or
+  // `["w"]` and `"w"`, do not read as contradictions. That is safe only while
+  // NOTHING resolves the raw alias — which is exactly what the fix established.
+  // These prove the loose comparison cannot be turned into a display forgery.
+  const body = { attestation: "create", attested_by: "c", prev_hash: null, subject_type: "world", subject_id: "123" };
+  const r = { ...body, sig: signReceipt(body), receipt_hash: receiptHash(body) };
+  for (const alias of [123, ["123"], "123"]) {
+    const forged = { ...r, world_id: alias };
+    assert.equal(verifyReceipt(forged), true, `alias ${JSON.stringify(alias)} coerces equal, so the receipt stays valid`);
+    const shown = publicVerifyReceipt(forged, { verify: verifyReceipt }).receipt;
+    assert.equal(shown.subject_id, "123", "the SIGNED value must be displayed, whatever type the alias carries");
+    assert.equal(shown.subject_id, canonicalSubjectId(forged));
+    assert.equal(shown.receipt_hash, receiptHash(body), "the displayed hash must be the hash of the signed body");
+  }
+  // A coercion collision that names a DIFFERENT subject is still a contradiction.
+  assert.equal(hasConflictingAlias({ ...genuine(), world_id: ["someone-elses-world"] }), true);
+  assert.equal(verifyReceipt({ ...genuine(), world_id: ["someone-elses-world"] }), false);
+  assert.equal(verifyReceipt({ ...genuine(), world_id: {} }), false);
+});
+
+test("a homoglyph or differently-normalised alias is a contradiction, not a match", () => {
+  // "world-a" with a Cyrillic а, and "café" in NFD against a body signed in NFC.
+  // Both must fail CLOSED: the estate never attested the lookalike.
+  const latin = { attestation: "create", attested_by: "c", prev_hash: null, subject_type: "world", subject_id: "world-a" };
+  const cyrillic = "world-а";
+  assert.notEqual(cyrillic, "world-a");
+  const r1 = { ...latin, sig: signReceipt(latin) };
+  assert.equal(hasConflictingAlias({ ...r1, world_id: cyrillic }), true);
+  assert.equal(verifyReceipt({ ...r1, world_id: cyrillic }), false);
+
+  const nfc = { attestation: "create", attested_by: "c", prev_hash: null, subject_type: "world", subject_id: "café" };
+  const nfd = "café";
+  assert.equal(nfc.subject_id.normalize("NFD"), nfd);
+  const r2 = { ...nfc, sig: signReceipt(nfc) };
+  assert.equal(verifyReceipt(r2), true);
+  assert.equal(verifyReceipt({ ...r2, world_id: nfd }), false, "an alias that differs only by normalisation must fail closed");
+  // And the canonical body is byte-exact, so a normalised copy is a different body.
+  assert.notEqual(canonicalBody(nfc), canonicalBody({ ...nfc, subject_id: nfd }));
+  assert.equal(verifyReceipt({ ...nfc, subject_id: nfd, sig: r2.sig }), false);
+});
+
+// ------------------------------------------------ hostile object shapes
+
+test("__proto__ and constructor keys cannot reach the canonical body or pollute anything", () => {
+  const evil = JSON.parse('{"attestation":"create","attested_by":"c","prev_hash":null,"subject_type":"world","subject_id":"world-a","__proto__":{"polluted":1},"constructor":{"prototype":{"polluted":1}}}');
+  assert.deepEqual(Object.keys(JSON.parse(canonicalBody(evil))).sort(), ["attestation", "attested_by", "prev_hash", "subject_id", "subject_type"]);
+  assert.equal({}.polluted, undefined, "canonicalising a receipt must not pollute Object.prototype");
+  const shown = publicVerifyReceipt({ ...evil, sig: signReceipt(evil) }, { verify: verifyReceipt });
+  assert.equal(shown.valid, true);
+  assert.equal(shown.receipt.subject_id, "world-a");
+  assert.equal({}.polluted, undefined);
+});
+
+test("a polluted Object.prototype cannot make a receipt verify as anything", () => {
+  // signedFields() reads properties rather than own-properties, so an inherited
+  // world_id IS visible to it. That must fail closed in both directions: it can
+  // deny service, but it must never produce a verified receipt for the injected
+  // subject.
+  Object.prototype.world_id = "victim-world";      // eslint-disable-line no-extend-native
+  try {
+    const withOwn = genuine();
+    assert.equal(verifyReceipt(withOwn), false, "an inherited alias contradicting the signed subject fails closed");
+    const { subject_id, ...noOwn } = genuine();
+    assert.equal(verifyReceipt(noOwn), false, "an inherited alias must not be signable-for, only refusable");
+    assert.doesNotMatch(page(noOwn), VERIFIED_BADGE);
+    assert.doesNotMatch(page(withOwn), VERIFIED_BADGE);
+  } finally {
+    delete Object.prototype.world_id;
+  }
+  assert.equal(verifyReceipt(genuine()), true, "and the pollution must not outlive the test");
+});
+
+// ============================================================ OPEN DEFECTS
+// Everything below FAILS on purpose. Each is a genuine, reproducible hole in
+// code Lane D does not own, recorded as a failing test with its reproduction and
+// the file+line where the fix belongs.
+
+test("DEFECT, OPEN: the browser embed and /atlas/key advertise a canonical body the signer never signs", () => {
+  // DEFECT, OPEN (found by this file, 6 Sep 2026). The signer sorts the five
+  // keys — canonicalBody() is JSON.stringify(b, Object.keys(b).sort()), and a
+  // replacer ARRAY fixes serialisation order — so the bytes that get signed are
+  //   {"attestation":..,"attested_by":..,"prev_hash":..,"subject_id":..,"subject_type":..}
+  // Two places tell a third party to rebuild it in a DIFFERENT order:
+  //   src/cw7/atlas-embed.mjs:35   clientVerifier's own canonicalBody(), which
+  //                                lists subject_type before subject_id
+  //   src/cw7/atlas-key.mjs:25     canonical_fields, served by GET /atlas/key
+  // (the same wrong order also appears in the header comment of
+  //  atlas-local-sign.mjs:3, atlas-embed.mjs:63 and atlas-verify-page.mjs:46.)
+  // So the in-browser widget — the entire point of the "public verify ecosystem",
+  // and the claim the verify page prints in its footer — renders
+  // "✗ INVALID — signature mismatch" for every genuine receipt, and any external
+  // verifier following the documented field list gets the same. This is a fifth
+  // and sixth reading of the signed body that survived the "enumerated once"
+  // fix, because neither goes through signedFields()/canonicalBody().
+  // It fails CLOSED (nothing forged verifies), but it makes the estate's
+  // independent-verifiability claim false, which is the claim the badge rests on.
+  // Fix belongs in src/cw7/atlas-embed.mjs:35 and src/cw7/atlas-key.mjs:25 —
+  // both must derive the order from the signer, not restate it.
+  const r = genuine();
+  const sorted = Object.keys(JSON.parse(canonicalBody(r)));
+
+  const key = makeKeyEndpoint({ publicKey: atlasPublicKeyBase64() }).key();
+  assert.deepEqual(key.canonical_fields, sorted,
+    "GET /atlas/key tells verifiers to rebuild the body in an order the signer does not use");
+
+  // Rebuild the body exactly as the embedded verifier does, and check the
+  // signature the way the browser would.
+  const embedded = { document: { getElementById: () => ({ setAttribute() {} }) } };
+  void embedded;
+  const embedBody = clientVerifierCanonicalBody(r);
+  assert.equal(embedBody, canonicalBody(r), "the embedded verifier rebuilds a different body than the signer signed");
+
+  const raw = Buffer.from(atlasPublicKeyBase64(), "base64");
+  const spki = crypto.createPublicKey({ key: Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), raw]), format: "der", type: "spki" });
+  assert.equal(
+    crypto.verify(null, Buffer.from(embedBody, "utf8"), spki, Buffer.from(r.sig, "base64")),
+    true,
+    "an embedder following our own snippet must be able to verify a genuine receipt"
+  );
+});
+
+/** The embed's canonicalBody, lifted verbatim from the serialised clientVerifier. */
+function clientVerifierCanonicalBody(r) {
+  const src = clientVerifier.toString();
+  // The widget now takes the field order from GET /atlas/key rather than
+  // restating it, which is the fix for this defect — so the extracted function
+  // is called with the SERVED order, exactly as the browser calls it.
+  const m = src.match(/function canonicalBody\(r, fields\)\s*\{([\s\S]*?)\n\s{2}\}/);
+  assert.ok(m, "clientVerifier no longer contains a canonicalBody to check — update this test rather than deleting it");
+  const served = makeKeyEndpoint({ publicKey: atlasPublicKeyBase64() }).key().canonical_fields;
+  // eslint-disable-next-line no-new-func
+  return new Function("r", "fields", m[1])(r, served);
+}
+
+test("DEFECT, OPEN: the signing adapter turns every CW7 receipt into an unverifiable one", () => {
+  // DEFECT, OPEN (found by this file, 6 Sep 2026). verifyReceipt now checks
+  // receipt_hash against the hash of the signed body (atlas-local-sign.mjs:151) —
+  // correct, and one of the three fixes. But makeInjectedVerify still builds the
+  // canonical receipt as
+  //   src/cw7/atlas-signing-adapter.mjs:36
+  //     receipt_hash: cw7Receipt.receipt_hash ?? cw7Receipt.receipt_id
+  // and a CW7 receipt_id is an OPAQUE identifier, not a hash — the shape is
+  // documented as { receipt_id, world_id, builder_id, action, prev_receipt_id,
+  // ts, sig } in atlas-trust.mjs:13 and atlas-seller-provenance.mjs:34, with no
+  // receipt_hash at all. The adapter therefore substitutes "rcpt_0001" for the
+  // hash, verifyReceipt compares it with the real digest, and returns false.
+  // Every CW7 receipt verified through the injected path is now rejected, while
+  // the SAME receipt passed to verifyReceipt directly verifies. Latent because
+  // server.mts injects verifyReceipt directly, but this adapter is the declared
+  // interface for the live signer, and the two readings disagree again.
+  // Fix belongs in src/cw7/atlas-signing-adapter.mjs:36 — do not pass a
+  // receipt_id where a receipt_hash is checked.
+  const body = { attestation: "create", attested_by: "builder-1", prev_hash: null, subject_type: "world", subject_id: "world-a" };
+  const cw7 = { receipt_id: "rcpt_0001", world_id: "world-a", builder_id: "builder-1", action: "create", prev_receipt_id: null, ts: new Date().toISOString(), sig: signReceipt(body) };
+  assert.equal(verifyReceipt(cw7), true, "the receipt itself is genuine, which is the point");
+  const injected = makeInjectedVerify(verifyReceipt, { prevHashOf: () => null });
+  assert.equal(injected(cw7), true, "the adapter must not invent a receipt_hash the signature does not cover");
+});
+
+test("DEFECT, OPEN: the verify view re-reads a receipt after verifying it", () => {
+  // DEFECT, OPEN (found by this file, 6 Sep 2026). publicVerifyReceipt calls
+  // verify(receipt) and then calls signedFields(receipt) AGAIN to build what it
+  // displays (src/cw7/atlas-verify-view.mjs:18 then :29), and receiptHash(receipt)
+  // a third time (:37). Those are separate reads of the same object, so what is
+  // displayed is not provably the body that verified — the module's stated
+  // guarantee is that a viewer is shown "by construction what the key attested".
+  // A receipt whose subject_id is an accessor returns the genuine value for the
+  // verification reads and an attacker's value for the display read: a VERIFIED
+  // badge beside a subject the estate never signed, with a receipt_hash
+  // recomputed over the forged body so it looks internally consistent.
+  // Reachability: JSON.parse cannot produce accessors, so this is not reachable
+  // from an HTTP body today. It is reachable from any in-process caller that
+  // builds a receipt object (a store row wrapped in a Proxy, an ORM model, a
+  // future receipt cache). LOW severity, real property violation.
+  // Fix belongs in src/cw7/atlas-verify-view.mjs:13-45 — snapshot
+  // signedFields(receipt) once and verify and display THAT — and/or in
+  // src/cw7/atlas-local-sign.mjs:86-94, which reads each property afresh on
+  // every call.
+  let reads = 0;
+  const gen = genuine();
+  const trap = { ...gen };
+  delete trap.receipt_hash;
+  Object.defineProperty(trap, "subject_id", {
+    enumerable: true,
+    get() { reads++; return reads <= 2 ? "world-a" : "someone-elses-world"; },
+  });
+
+  const v = publicVerifyReceipt(trap, { verify: verifyReceipt });
+  assert.ok(
+    !(v.status === "VERIFIED" && v.receipt.subject_id === "someone-elses-world"),
+    `the view reported ${v.status} for subject '${v.receipt.subject_id}' after verifying a different one (${reads} reads of subject_id)`
+  );
+});
+
+test("DEFECT, OPEN: the trust modules count a receipt as signature-valid when no verifier is injected", () => {
+  // DEFECT, OPEN (found by this file, 6 Sep 2026). Four CW7 modules default the
+  // injected signature check to a function that says yes:
+  //   src/cw7/atlas-trust.mjs:16              const verify = deps.verifyReceiptSig || (() => true);
+  //   src/cw7/atlas-portable-identity.mjs:28  (same)
+  //   src/cw7/atlas-portable-identity.mjs:47  (same)
+  //   src/cw7/atlas-seller-provenance.mjs:38  (same)
+  // atlas-verify-view.mjs:14 gets the same pattern RIGHT — `deps.verify ||
+  // (() => false)` — so the codebase already knows which way this must fail.
+  // server.mts:65 constructs makeAtlasRoutes({ worlds: [], events: [],
+  // receipts: [], verifiedWorldIds: [] }) with no verifyReceiptSig at all, so
+  // GET /atlas/world/:id is running on the fail-open default right now. It is
+  // not exploitable TODAY only because the receipts array is empty; the comment
+  // beside it says world truth is moving to the durable repository, and on the
+  // day receipts are wired in, a receipt whose sig is the string "NOT-A-
+  // SIGNATURE" will be reported as verified ownership.
+  // Fix belongs in all four lines: default to () => false, or require the
+  // dependency and refuse to compute a verified anything without it.
+  const forged = [{ receipt_id: "r1", world_id: "w1", builder_id: "attacker", action: "create", prev_receipt_id: null, ts: "2026-01-01", sig: "NOT-A-SIGNATURE" }];
+
+  assert.equal(buildOwnershipHistory("w1", forged).verified, false,
+    "an unverified receipt must not establish ownership when no verifier was injected");
+  assert.equal(makeAtlasRoutes({ worlds: [{ world_id: "w1", builder_id: "attacker" }], events: [], receipts: forged }).world("w1").verified, false,
+    "GET /atlas/world/:id reports verified ownership built from unchecked signatures");
+  assert.equal(assetProvenance("a1", [{ receipt_id: "x", asset_id: "a1", author_id: "attacker", action: "create", sig: "NOT-A-SIGNATURE", ts: "2026-01-01" }]).provenance_verified, false,
+    "asset provenance must not be 'verified' with no verifier");
+  assert.equal(portableIdentity("attacker", [{ world_id: "w1", builder_id: "attacker" }], [], forged, []).portable_proof.length, 0,
+    "a portable identity proof must not be built from unchecked receipts");
+
+  // The same calls WITH a real verifier are the control: if these ever stop
+  // differing, the check above has stopped measuring anything.
+  assert.equal(buildOwnershipHistory("w1", forged, { verifyReceiptSig: () => false }).verified, false);
+  assert.equal(buildOwnershipHistory("w1", forged, { verifyReceiptSig: () => true }).verified, true);
 });

@@ -196,7 +196,13 @@ export function createSubscriptionsService(env = process.env) {
     if (row.status !== "comped") return false;
     if (row.revoked_at) return false;
     if (!row.expires_at) return false;
-    if (Date.now() > new Date(row.expires_at).getTime()) return false;
+    // An unparseable expiry gives NaN, and EVERY comparison against NaN is
+    // false — so `Date.now() > NaN` said "not expired" and a grant dated
+    // "whenever" was reported as in force forever. A date we cannot read is not
+    // a date we can honour.
+    const until = new Date(row.expires_at).getTime();
+    if (!Number.isFinite(until)) return false;
+    if (Date.now() > until) return false;
     return true;
   }
 
@@ -464,6 +470,12 @@ export function createSubscriptionsService(env = process.env) {
         if (!s.granted_by) problems.push(`subscription ${who} records no granter`);
         if (!PLAN_IDS.includes(s.plan)) problems.push(`subscription ${who} is on unknown plan '${s.plan}'`);
         if (!s.expires_at) problems.push(`subscription ${who} never expires, so it outlives the internal window`);
+        // Same NaN hole as isLive: an expiry that will not parse slipped past
+        // the window check silently, because a comparison with NaN is false.
+        // assertDark must report what it cannot verify, not skip it.
+        if (s.expires_at && !Number.isFinite(new Date(s.expires_at).getTime())) {
+          problems.push(`subscription ${who} has an expiry that is not a date (${JSON.stringify(s.expires_at)}), so it cannot be shown to end inside the internal window`);
+        }
         if (s.expires_at && new Date(s.expires_at).getTime() > new Date(INTERNAL_WINDOW_ENDS + "T23:59:59Z").getTime()) {
           problems.push(`subscription ${who} outlives the internal window`);
         }
