@@ -103,7 +103,10 @@ export function createMarketplaceService(env = process.env) {
     async unlist(sellerId, listingId) {
       const l = await listings.one((x) => x.id === listingId);
       if (!l) throw Errors.notFound(`listing ${listingId}`);
-      if (l.seller_id !== sellerId) throw Errors.forbidden("that listing belongs to another creator");
+      // Same answer as a thing that does not exist. A 403 here confirms the id
+      // is real to somebody who may not see it — the existence oracle already
+      // closed on worlds and on retained versions, one surface along.
+      if (l.seller_id !== sellerId) throw Errors.notFound(`listing ${listingId}`);
       return await listings.update((x) => x.id === listingId, (x) => ({ ...x, active: false }));
     },
 

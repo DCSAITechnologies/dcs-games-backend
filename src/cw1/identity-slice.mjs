@@ -112,12 +112,32 @@ export async function handleIdentity(req, res, ctx) {
   const uid = (p) => p + "_" + (++db.seq) + Math.random().toString(36).slice(2,6);
 
   // auth
+  // auth — RETIRED.
+  //
+  // These took the principal id and display name FROM THE REQUEST BODY with no
+  // credential of any kind, so an anonymous caller could create or rename any
+  // principal's identity record: POST /auth/login {id:"user-owner",name:"PWNED"}
+  // answered 200, and that principal's own /me — presented with their real,
+  // valid token — then returned the attacker's name.
+  //
+  // They also returned `{token: <that id>}`, which is not a credential: present
+  // it and the real resolver answers 401 "malformed token". A client that
+  // treated that field as a session token was broken by design.
   if (path === "/auth/login" || path === "/auth/signup" || path === "/auth/ensure") {
-    const b = await body(req); let id = b.id || "u_new";
-    if (!db.users.has(id)) db.users.set(id, { id, name:b.name||"New Player", email_verified:false, atlas_score:0, dcs_plus:false, published_count:0 });
-    send(res, 200, { token:id, user: buildMe(db.users.get(id)) }); return true;
+    send(res, 410, {
+      ok: false, error: "gone",
+      detail: "This route accepted a principal id from the request body with no credential, so anyone could create or rename anyone's identity record. It also returned an id where a token belongs, which never authenticated anything.",
+      superseded_by: "the Supabase-backed /auth/signup and /auth/login in server.mts; every private route authenticates through src/core/principal.mjs",
+    });
+    return true;
   }
-  if (path === "/me" && m === "GET") { send(res, 200, buildMe(db.users.get(who(req)))); return true; }
+  if (path === "/me" && m === "GET") {
+    // buildMe(undefined) produced a complete-looking profile with no id — an
+    // invented record, indistinguishable from a real empty one.
+    const rec = db.users.get(who(req));
+    if (!rec) { send(res, 404, { ok:false, error:"not_found", detail:"no identity record for this principal" }); return true; }
+    send(res, 200, buildMe(rec)); return true;
+  }
   if (seg[0]==="profile" && m==="GET") { const p=db.profiles.get(seg[1]); send(res, p?200:404, p||{error:"not_found"}); return true; }
 
   // friends / parties / teams / studios / orgs — RETIRED (see RETIRED_SOCIAL above).
@@ -131,7 +151,7 @@ export async function handleIdentity(req, res, ctx) {
 
   // subscriptions (DARK)
   if (path==="/subscriptions"&&m==="GET") { const me=who(req); send(res,200,db.subscriptions.get(me)||{plan:"free",status:"none",_shadow:true}); return true; }
-  if (path==="/subscriptions"&&m==="POST") { send(res,200,{status:"dark",note:"written by CW8 payments; DARK until DK flips",_shadow:true}); return true; }
+  if (path==="/subscriptions"&&m==="POST") { who(req); send(res,200,{status:"dark",note:"written by CW8 payments; DARK until DK flips",_shadow:true}); return true; }
 
   // verification (P2) → feeds level
   // SECURITY (6 Sep 2026): this route returned the verification code in its own

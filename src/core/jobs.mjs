@@ -95,7 +95,10 @@ export function createJobService(env = process.env) {
     async get(jobId, requesterId = null) {
       const j = await jobs.one((x) => x.id === jobId);
       if (!j) throw Errors.notFound(`job ${jobId}`);
-      if (requesterId && j.owner_id !== requesterId) throw Errors.forbidden("that job belongs to another principal");
+      // Same answer as a thing that does not exist. A 403 here confirms the id
+      // is real to somebody who may not see it — the existence oracle already
+      // closed on worlds and on retained versions, one surface along.
+      if (requesterId && j.owner_id !== requesterId) throw Errors.notFound(`job ${jobId}`);
       return withProgress(j);
     },
 

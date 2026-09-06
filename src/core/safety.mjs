@@ -243,16 +243,47 @@ export function createSafetyService(env = process.env) {
      * Record consent for voice, likeness or avatar material. Generation without
      * a matching, unrevoked grant is refused — see requireMediaConsent.
      */
-    async grantMediaConsent(principalId, { mediaKind, source, evidenceRef = null }) {
+    /**
+     * Record that a person consented to their voice or likeness being used.
+     *
+     * @param grantedBy  who is making this record. REQUIRED, and required to be
+     *                   the subject: consent given on someone's behalf, by
+     *                   somebody they did not authorise, is not consent. This
+     *                   used to take the subject from the caller's request body
+     *                   with no check at all, so any authenticated account could
+     *                   grant a likeness consent for anyone and then generate
+     *                   their voice — the A5 gate defeated by the person it
+     *                   exists to protect the subject from.
+     *
+     * The granter is recorded either way, because a row nobody is accountable
+     * for cannot be audited after the fact, and this one could not even be
+     * attributed.
+     */
+    async grantMediaConsent(principalId, { mediaKind, source, evidenceRef = null, grantedBy = null }) {
+      if (!principalId) throw Errors.validation("a consent needs a subject");
+      if (!grantedBy) throw Errors.unauthenticated("a media consent must be attributable to whoever granted it");
+      if (String(grantedBy) !== String(principalId)) {
+        throw Errors.forbidden(
+          "a person's voice and likeness consent can only be granted by that person",
+          { meta: { subject_id: principalId, granted_by: grantedBy } }
+        );
+      }
       if (!MEDIA_KINDS.includes(mediaKind)) throw Errors.validation(`media_kind must be one of: ${MEDIA_KINDS.join(", ")}`);
       if (!CONSENT_SOURCES.includes(source)) throw Errors.validation(`source must be one of: ${CONSENT_SOURCES.join(", ")}`);
-      const row = { id: id(), principal_id: principalId, media_kind: mediaKind, source, evidence_ref: evidenceRef, granted_at: new Date().toISOString(), revoked_at: null };
+      const row = { id: id(), principal_id: principalId, media_kind: mediaKind, source, evidence_ref: evidenceRef, granted_by: grantedBy, granted_at: new Date().toISOString(), revoked_at: null };
       await media.insert(row);
       return row;
     },
-    async revokeMediaConsent(consentId) {
+    /** Only the subject may withdraw their own consent. */
+    async revokeMediaConsent(consentId, revokedBy = null) {
+      const existing = await media.one((m) => m.id === consentId);
+      if (!existing) throw Errors.notFound(`media consent ${consentId}`);
+      if (revokedBy != null && String(existing.principal_id) !== String(revokedBy)) {
+        // Same answer as a consent that does not exist: whose consents exist is
+        // not something to disclose to someone who may not touch them.
+        throw Errors.notFound(`media consent ${consentId}`);
+      }
       const r = await media.update((m) => m.id === consentId, (m) => ({ ...m, revoked_at: new Date().toISOString() }));
-      if (!r) throw Errors.notFound(`media consent ${consentId}`);
       return r;
     },
     /**

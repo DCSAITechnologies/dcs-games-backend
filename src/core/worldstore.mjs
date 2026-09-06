@@ -484,7 +484,9 @@ export class WorldRepository {
     // ownerId could overwrite anyone's world, and a stored row with a null
     // owner could be overwritten — and re-published — by any caller. An absent
     // owner is not permission; it is the absence of evidence of permission.
-    if (existing && existing.owner_id !== (ownerId ?? null)) {
+    // Same as the read gate: an unowned row must not be writable — or
+    // publishable — by an anonymous caller just because both owners are null.
+    if (existing && !(ownerId != null && existing.owner_id != null && existing.owner_id === ownerId)) {
       throw Errors.forbidden("this world belongs to another creator");
     }
     if (expected_version != null && existing && Number(existing.version) !== Number(expected_version)) {
@@ -557,9 +559,12 @@ export class WorldRepository {
     // Fail CLOSED on both, for the same reason as upsert: a world with no owner
     // recorded used to satisfy requireOwner for every caller, and an unowned
     // draft used to be readable by anyone.
-    if (r && requireOwner && r.owner_id !== requesterId) throw Errors.forbidden("this world belongs to another creator");
+    // `!==` alone let ANONYMOUS through on a row with no owner: both sides are
+    // null, so null === null satisfied the gate. Ownership needs a named owner
+    // AND a named caller who are the same person — nobody is not somebody.
+    if (r && requireOwner && !(requesterId != null && r.owner_id != null && r.owner_id === requesterId)) throw Errors.forbidden("this world belongs to another creator");
     // Published worlds are readable by anyone; drafts only by their owner (IDOR guard).
-    if (!r || (!requireOwner && r.state !== "published" && requesterId !== r.owner_id)) {
+    if (!r || (!requireOwner && r.state !== "published" && !(requesterId != null && r.owner_id != null && r.owner_id === requesterId))) {
       throw Errors.notFound(`world ${worldId}`);
     }
     return r;
@@ -573,7 +578,7 @@ export class WorldRepository {
    * state, so it is treated as private.
    */
   _versionVisible(v, world, requesterId) {
-    if (world.owner_id != null && world.owner_id === requesterId) return true;
+    if (requesterId != null && world.owner_id != null && world.owner_id === requesterId) return true;
     return v.state === "published";
   }
 

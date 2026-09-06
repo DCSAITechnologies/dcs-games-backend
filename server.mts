@@ -248,13 +248,21 @@ async function mustBeInternalTester(req: http.IncomingMessage, cid: string) {
   return p;
 }
 
-async function supaGet(pathq: string): Promise<any[]> {
+async function supaGet(pathq: string, cid?: string): Promise<any[]> {
   if (!HAS_SUPA) return [];
+  // A rejected key, a missing table and a genuinely empty result used to be one
+  // answer — an empty array, which the handlers then sent as
+  // {ok:true, count:0, source:"supabase"}. That is a fabricated measurement of
+  // zero, and it is exactly what errors.mjs exists to prevent: a degraded read
+  // must be visible. An upstream failure is now an upstream failure.
+  let r: Response;
   try {
-    const r = await fetch(SUPA + "/rest/v1/" + pathq, { headers: { apikey: KEY, Authorization: "Bearer " + KEY } });
-    if (!r.ok) return [];
-    return await r.json();
-  } catch { return []; }
+    r = await fetch(SUPA + "/rest/v1/" + pathq, { headers: { apikey: KEY, Authorization: "Bearer " + KEY } });
+  } catch (e: any) {
+    throw Errors.upstream("supabase", String(e?.message || e), { correlationId: cid });
+  }
+  if (!r.ok) throw Errors.upstream("supabase", `HTTP ${r.status} for ${pathq.split("?")[0]}`, { correlationId: cid });
+  return await r.json();
 }
 /** Build a media prompt from the world itself, so nothing is invented about it. */
 function mediaPromptFor(manifest: any, target: string, b: any): string {
@@ -286,7 +294,7 @@ const server = http.createServer(async (req, res) => {
   res.setHeader("X-Correlation-Id", cid);
   try {
     if (method === "OPTIONS") return send(res, 204, {});
-    if (url === "/health") return send(res, 200, {
+    if (url === "/health" && method === "GET") return send(res, 200, {
       ok: true, service: "dcs-games-backend", payments_live: PAYMENTS_LIVE,
       auth: auth.mode,
       auth_header_fallback_removed: true,      // A1: x-user-id impersonation path deleted 6 Sep 2026
@@ -344,8 +352,14 @@ const server = http.createServer(async (req, res) => {
 
     // ---- dashboard data routes (real Supabase reads; honest empty until data flows) ----
     if (url === "/api/public/worlds" && method === "GET") {
-      const rows = await supaGet("dcsgames_base_worlds?select=*&limit=50");
-      return send(res, 200, { ok: true, count: rows.length, worlds: rows, source: HAS_SUPA ? "supabase" : "empty" });
+      // This asked the database for EVERY row with EVERY column and answered it
+      // to an anonymous caller: no state filter, no owner filter, whole
+      // manifests. Unpublished drafts, in other words, on a route named public.
+      // It was invisible to every test because in file mode supaGet returns [].
+      // It now goes through the repository, which applies the same permission
+      // rules as every other read and returns discovery cards, not manifests.
+      const worlds = await repo.listPublished(50);
+      return send(res, 200, { ok: true, count: worlds.length, worlds, source: repo.kind });
     }
     if (url === "/worlds/mine" && method === "GET") {
       const me = await mustBe(req, cid);                       // A1: 401 when unauthenticated
@@ -532,7 +546,19 @@ const server = http.createServer(async (req, res) => {
     if (url === "/safety/consent/media" && method === "POST") {
       const me = await mustBe(req, cid);
       const b = await readBody(req);
-      const r = await safety.grantMediaConsent(b.subject_id || me.id, { mediaKind: b.media_kind, source: b.source, evidenceRef: b.evidence_ref });
+      // The subject is the CALLER, and naming somebody else is REFUSED rather
+      // than quietly redirected — a caller who believes they recorded a consent
+      // for another person must be told they did not. This used to take the
+      // subject from the request body with no check, so any account could grant
+      // a voice-and-likeness consent for anybody and then pass the gate that
+      // consent exists to hold shut.
+      if (b.subject_id != null && String(b.subject_id) !== String(me.id)) {
+        throw Errors.forbidden(
+          "a person's voice and likeness consent can only be recorded by that person",
+          { correlationId: cid, meta: { subject_id: b.subject_id } }
+        );
+      }
+      const r = await safety.grantMediaConsent(me.id, { mediaKind: b.media_kind, source: b.source, evidenceRef: b.evidence_ref, grantedBy: me.id });
       return send(res, 201, { ok: true, consent: r, correlation_id: cid });
     }
     if (url === "/safety/consent/media" && method === "GET") {
@@ -843,8 +869,12 @@ const server = http.createServer(async (req, res) => {
     {
       let mm = url.match(/^\/social\/studios\/([^/]+)$/);
       if (mm && method === "GET") {
-        await mustBeInternalTester(req, cid);
-        return send(res, 200, { ok: true, studio: await social.getStudio(mm[1]) });
+        // Membership, not merely the tester allowlist: this returned the member
+        // list with each member's principal id, role and revenue split to any
+        // internal tester. Its three siblings — org, team and party — were all
+        // closed this sprint; this is the one that was missed.
+        const me = await mustBeInternalTester(req, cid);
+        return send(res, 200, { ok: true, studio: await social.getStudio(mm[1], me.id) });
       }
       mm = url.match(/^\/social\/studios\/([^/]+)\/members$/);
       if (mm && method === "POST") {
@@ -877,11 +907,16 @@ const server = http.createServer(async (req, res) => {
       const mm = url.match(/^\/v3\/worlds\/([^/]+)\/play$/);
       if (mm && method === "POST") {
         // Recording a play is what makes discovery honest: no row, no ranking.
-        const me = await whoOrNull(req, cid);
+        // Which is exactly why it must be ATTRIBUTABLE. Anonymously, 25 requests
+        // took a world from 0 to 25 plays and 360,000 seconds of watch time —
+        // no credential, no rate limit, no dedupe — and /v3/discover ranks on
+        // that. An engagement signal anyone can move without being anyone is
+        // not a measurement.
+        const me = await mustBe(req, cid);
         const b = await readBody(req);
-        const rec = await repo.get(mm[1], { requesterId: me?.id ?? null });
-        await social.recordPlay(mm[1], me?.id ?? null, b.seconds);
-        if (me) {
+        const rec = await repo.get(mm[1], { requesterId: me.id });
+        await social.recordPlay(mm[1], me.id, b.seconds);
+        {
           // The server placed this player at the world's spawn, so it can say so.
           // optional(), not required(): a progress-store failure must never fail a
           // play, and the degradation is honest — live state then reports the
@@ -905,7 +940,14 @@ const server = http.createServer(async (req, res) => {
     }
     {
       const mm = url.match(/^\/v3\/worlds\/([^/]+)\/stats$/);
-      if (mm && method === "GET") return send(res, 200, { ok: true, world_id: mm[1], stats: await social.worldStats(mm[1]) });
+      if (mm && method === "GET") {
+        // The ONLY world route that answered without asking whether the caller
+        // may see the world. A draft's play counts, unique players and rating
+        // were readable by anyone with the id — and it answered for worlds that
+        // do not exist too. Every sibling route takes this permission check.
+        await repo.get(mm[1], { requesterId: principal?.id ?? null });
+        return send(res, 200, { ok: true, world_id: mm[1], stats: await social.worldStats(mm[1]) });
+      }
     }
 
     // ================= DCS GAMES V3 =====================================

@@ -108,7 +108,7 @@ test("P1: reconciliation does not disturb jobs that already finished", async () 
 test("P1 GATE: a job is private to its owner", async () => {
   const svc = createJobService(tmp());
   const j = await svc.create({ kind: "world_generate", principalId: "u1" });
-  await assert.rejects(() => svc.get(j.id, "u2"), (e) => e.httpStatus === 403);
+  await assert.rejects(() => svc.get(j.id, "u2"), (e) => e.httpStatus === 404, "another principal's job answers exactly as one that does not exist");
   assert.equal((await svc.get(j.id, "u1")).id, j.id);
   assert.equal((await svc.listFor("u2")).length, 0);
   assert.equal((await svc.listFor("u1")).length, 1);

@@ -595,7 +595,10 @@ export function createSocialService(env = process.env, deps = {}) {
       //
       // An INVITE-ONLY party is private, full stop: refused, as an org is.
       if (!p.open) {
-        throw Errors.forbidden("this party is invite-only and is visible only to its members", {
+      // Same answer as a thing that does not exist. A 403 here confirms the id
+      // is real to somebody who may not see it — the existence oracle already
+      // closed on worlds and on retained versions, one surface along.
+        throw Errors.notFound(`party ${partyId}`, {
           meta: { action: "get_party", party_id: partyId },
         });
       }
@@ -624,7 +627,9 @@ export function createSocialService(env = process.env, deps = {}) {
         const p = await readParty(partyId);
         if (p.closed_at) throw Errors.conflict("this party has closed");
         if (p.members.includes(meId)) return { ...p, idempotent: true };
-        if (!p.open) throw Errors.forbidden("this party is invite-only");
+        // Same answer as a party that does not exist: refusing a join with a
+      // distinguishable status confirms the id to someone who may not see it.
+      if (!p.open) throw Errors.notFound(`party ${partyId}`);
         // A party is a shared room. Joining one that holds someone you blocked —
         // or who blocked you — puts the two of you back together, which is the
         // thing the block exists to prevent, so it is refused here rather than
@@ -711,7 +716,9 @@ export function createSocialService(env = process.env, deps = {}) {
     async getTeam(teamId, requesterId = null) {
       const t = await readTeam(teamId);
       if (!requesterId || !t.members.some((m) => m.member_id === requesterId)) {
-        throw Errors.forbidden("this team is visible only to its members", {
+        // Same answer as a thing that does not exist: a 403 confirms the id is real
+      // to somebody who may not see it.
+      throw Errors.notFound(`team ${teamId}`, {
           meta: { action: "get_team", team_id: teamId },
         });
       }
@@ -771,13 +778,23 @@ export function createSocialService(env = process.env, deps = {}) {
       const studio = { id: id("std"), name: String(name).trim().slice(0, 60), owner_id: meId, created_at: new Date().toISOString() };
       await studios.insert(studio);
       await studioMembers.insert({ studio_id: studio.id, member_id: meId, role: "owner", split_bps: 10000, joined_at: studio.created_at });
-      return await svc.getStudio(studio.id);
+      return await svc.getStudio(studio.id, meId);
     },
 
-    async getStudio(studioId) {
+    /**
+     * @param requesterId  who is asking. A studio's member list carries each
+     *   member's principal id, role and REVENUE SPLIT — the same shape that was
+     *   closed on orgs, teams and parties this sprint. A caller who is not a
+     *   member gets the same answer as one asking about a studio that does not
+     *   exist, so this cannot be used to confirm a studio id either.
+     */
+    async getStudio(studioId, requesterId = null) {
       const s = await studios.one((x) => x.id === studioId);
       if (!s) throw Errors.notFound(`studio ${studioId}`);
       const members = await studioMembers.find((m) => m.studio_id === studioId);
+      if (!requesterId || !members.some((m) => m.member_id === requesterId)) {
+        throw Errors.notFound(`studio ${studioId}`);
+      }
       return {
         ...s,
         members,
@@ -798,7 +815,7 @@ export function createSocialService(env = process.env, deps = {}) {
      */
     async setStudioSplit(meId, studioId, splits) {
       return await studioLock(studioId, async () => {
-        const s = await svc.getStudio(studioId);
+      const s = await svc.getStudio(studioId, meId);
         const mine = s.members.find((m) => m.member_id === meId);
         if (!mine || !["owner", "admin"].includes(mine.role)) throw Errors.forbidden("only an owner or admin can configure the split");
         if (!Array.isArray(splits) || !splits.length) throw Errors.validation("splits must be a non-empty array of { member_id, split_bps }");
@@ -817,14 +834,14 @@ export function createSocialService(env = process.env, deps = {}) {
           if (bps === m.split_bps) continue;
           await studioMembers.update((r) => r.studio_id === studioId && r.member_id === m.member_id, (r) => ({ ...r, split_bps: bps }));
         }
-        return await svc.getStudio(studioId);
+      return await svc.getStudio(studioId, meId);
       });
     },
 
     async addStudioMember(meId, studioId, memberId, role = "member") {
       if (!STUDIO_ROLES.includes(role)) throw Errors.validation(`role must be one of: ${STUDIO_ROLES.join(", ")}`);
       if (!memberId) throw Errors.validation("member_id is required");
-      const s = await svc.getStudio(studioId);
+      const s = await svc.getStudio(studioId, meId);
       const mine = s.members.find((m) => m.member_id === meId);
       if (!mine || !["owner", "admin"].includes(mine.role)) throw Errors.forbidden("only an owner or admin can add members");
       if (role === "owner") throw Errors.forbidden("a studio has exactly one owner");
@@ -842,7 +859,7 @@ export function createSocialService(env = process.env, deps = {}) {
           return { studio_id: studioId, member_id: memberId, role, split_bps: 0, joined_at: new Date().toISOString() };
         },
       );
-      const after = await svc.getStudio(studioId);
+      const after = await svc.getStudio(studioId, meId);
       return created ? after : { ...after, idempotent: true };
     },
 
@@ -871,7 +888,9 @@ export function createSocialService(env = process.env, deps = {}) {
       // entirely — the one case that most needs it. No caller relies on that:
       // every route and every internal path passes a principal.
       if (!requesterId || !members.some((m) => m.member_id === requesterId)) {
-        throw Errors.forbidden("this org is visible only to its members");
+        // Same answer as a thing that does not exist: a 403 confirms the id is real
+      // to somebody who may not see it.
+      throw Errors.notFound(`org ${orgId}`);
       }
       const used = members.length;
       return {

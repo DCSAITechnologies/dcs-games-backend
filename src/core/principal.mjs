@@ -36,6 +36,21 @@ function lookupHeader(headers, name) {
   return undefined;
 }
 
+/**
+ * Read `exp` out of a JWT without verifying it.
+ *
+ * Only ever used to make the verification cache expire EARLIER. A forged exp
+ * can shorten a cache entry, never lengthen one past its own TTL, and the token
+ * itself is verified by Supabase on every miss.
+ */
+function decodeJwtExp(token) {
+  try {
+    const p = String(token).split(".")[1];
+    if (!p) return NaN;
+    return Number(JSON.parse(Buffer.from(p, "base64url").toString("utf8")).exp);
+  } catch { return NaN; }
+}
+
 function hashToken(t) {
   return crypto.createHash("sha256").update(t).digest("base64url");
 }
@@ -190,10 +205,45 @@ export function createPrincipalResolver(cfg = {}) {
         // Verification could not be performed. Fail closed — never guess.
         throw Errors.upstream("supabase-auth", String(e?.message || e), { correlationId });
       }
-      if (!r.ok) throw Errors.invalidToken("supabase rejected the token", { correlationId, meta: { upstream_status: r.status } });
+      if (!r.ok) {
+        // A 5xx or a 429 from GoTrue is an OUTAGE, not a verdict on the token.
+        // Reporting it as invalid_token logs every correct client out during an
+        // incident; the unreachable branch four lines above already gets this
+        // right, and these two must agree.
+        if (r.status >= 500 || r.status === 429) {
+          throw Errors.upstream("supabase-auth", `HTTP ${r.status}`, { correlationId, meta: { retryable: true } });
+        }
+        throw Errors.invalidToken("supabase rejected the token", { correlationId, meta: { upstream_status: r.status } });
+      }
       const u = await r.json().catch(() => null);
       if (!u || !u.id) throw Errors.invalidToken("supabase returned no subject", { correlationId });
-      principal = decorate(u.id, "supabase", u.email, { ...(u.user_metadata || {}), ...(u.app_metadata || {}) });
+      // PRIVILEGE COMES FROM app_metadata ONLY.
+      //
+      // user_metadata is writable BY THE USER through GoTrue's own
+      // PUT /auth/v1/user. It was spread into the claims decorate() reads, so
+      // anyone could set user_metadata.roles = ["internal_tester"] and become
+      // one — with an empty allowlist — which gates the trust-and-safety
+      // console, the moderation queue, world generation and the org surface.
+      // app_metadata is service-role only, so that is where a role may come
+      // from. Everything else in user_metadata is harmless profile decoration
+      // and still travels.
+      const app = u.app_metadata || {};
+      const userMeta = { ...(u.user_metadata || {}) };
+      delete userMeta.roles;
+      delete userMeta.role;
+      delete userMeta.age_tier;
+      delete userMeta.ageTier;
+      delete userMeta.is_internal_tester;
+      principal = decorate(u.id, "supabase", u.email, { ...userMeta, ...app });
+      // The same expiry bound the local branch applies. Without it a revoked
+      // session still resolved for the full cache TTL, from cache, with no wire
+      // traffic — while the comment on the cache claimed otherwise.
+      const supaExp = Number(u.exp ?? u.session?.expires_at ?? NaN);
+      if (Number.isFinite(supaExp)) tokenExpSeconds = supaExp;
+      else {
+        const claimed = decodeJwtExp(token);
+        if (Number.isFinite(claimed)) tokenExpSeconds = claimed;
+      }
     } else {
       const claims = verifyLocalToken(secret, token); // throws AppError on any failure
       principal = decorate(claims.sub, "local-hs256", claims.email, claims);

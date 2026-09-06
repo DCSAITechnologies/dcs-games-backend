@@ -143,7 +143,7 @@ test("B15: an unlisted item can no longer be acquired", async () => {
 test("B15: only the seller can unlist", async () => {
   const m = svc();
   const l = await listed(m, "seller");
-  await assert.rejects(() => m.unlist("someone-else", l.id), (e) => e.httpStatus === 403);
+  await assert.rejects(() => m.unlist("someone-else", l.id), (e) => e.httpStatus === 404);
 });
 
 // =============================================================== storefronts

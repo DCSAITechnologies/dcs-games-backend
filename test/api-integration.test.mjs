@@ -381,10 +381,22 @@ test("B15 GATE: discovery ranks on measured activity and labels honest zeros", a
 
 test("B15: recording a play then reading stats reflects it", async () => {
   await req(`/v3/worlds/${generatedId}/play`, { method: "POST", headers: json(ALICE), body: JSON.stringify({ seconds: 90 }) });
-  const s = await (await req(`/v3/worlds/${generatedId}/stats`)).json();
+  // Read as the owner: this world is a draft, and a draft's engagement counts
+  // are no more public than its manifest. /stats used to be the one world route
+  // that answered without asking whether the caller may see the world at all.
+  const s = await (await req(`/v3/worlds/${generatedId}/stats`, { headers: auth(ALICE) })).json();
   assert.equal(s.stats.plays, 1);
   assert.equal(s.stats.total_seconds, 90);
   assert.equal(s.stats.rating_avg, null, "an unrated world has no average, not a default");
+});
+
+test("B15 GATE: a draft world's engagement counts are not public", async () => {
+  const anon = await req(`/v3/worlds/${generatedId}/stats`);
+  assert.equal(anon.status, 404, "a draft's play counts must not be readable without permission");
+  // And a world that does not exist answers exactly the same, so this cannot be
+  // used to confirm an id either.
+  const missing = await req(`/v3/worlds/w3_no_such_world_at_all/stats`);
+  assert.equal(missing.status, 404);
 });
 
 test("B15: a studio split must total 100% and settles nothing", async () => {
@@ -450,7 +462,7 @@ test("P1: the asynchronously generated world is really there and loads", async (
 });
 
 test("P1: a job is private, and listing shows only your own", async () => {
-  assert.equal((await req(`/v3/jobs/${asyncJobId}`, { headers: auth(MALLORY) })).status, 403);
+  assert.equal((await req(`/v3/jobs/${asyncJobId}`, { headers: auth(MALLORY) })).status, 404);
   assert.equal((await req(`/v3/jobs/${asyncJobId}`)).status, 401);
   const mine = await (await req("/v3/jobs", { headers: auth(ALICE) })).json();
   assert.ok(mine.jobs.some((j) => j.id === asyncJobId));

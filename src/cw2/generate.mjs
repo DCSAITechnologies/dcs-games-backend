@@ -98,7 +98,13 @@ export function generateWorld(prompt, opts = {}) {
   const { genre, size, title } = parsePrompt(prompt);
   const r = rng(seed);
   const pal = PALETTE[genre] || PALETTE.adventure;
-  const world_id = "world_" + crypto.createHash("sha256").update(seed).digest("hex").slice(0, 12);
+  // The id used to be sha256(prompt), which made it derivable by anyone who
+  // guessed the prompt — and made "generate from this prompt" answer 403 when
+  // somebody else had already used it, which is a prompt-space existence
+  // oracle. The world's CONTENT is still deterministic in `seed`, which is what
+  // reproducibility needs; its identity is not content and must not be
+  // guessable. The v3 path already uses a random id.
+  const world_id = opts.world_id || ("world_" + crypto.randomUUID().replace(/-/g, "").slice(0, 12));
 
   const W = size.w, H = size.h, hw = Math.floor(W / 2), hh = Math.floor(H / 2);
   // deterministic placements (deeper world): 3 spawns, 6 objects, 5 npcs

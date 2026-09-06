@@ -181,18 +181,18 @@ test("synthetic media needs no subject consent", async () => {
 
 test("a recorded consent permits generation, and revoking it stops generation", async () => {
   const s = svc();
-  const g = await s.grantMediaConsent("founder-id", { mediaKind: "voice", source: "founder", evidenceRef: "signed-2026-09-06" });
+  const g = await s.grantMediaConsent("founder-id", { mediaKind: "voice", source: "founder", evidenceRef: "signed-2026-09-06", grantedBy: "founder-id" });
   const ok = await s.requireMediaConsent({ subjectId: "founder-id", mediaKind: "voice", source: "founder" });
   assert.equal(ok.permitted, true);
   assert.equal(ok.basis, "founder");
-  await s.revokeMediaConsent(g.id);
+  await s.revokeMediaConsent(g.id, "founder-id");
   await assert.rejects(() => s.requireMediaConsent({ subjectId: "founder-id", mediaKind: "voice", source: "founder" }), (e) => e.httpStatus === 403);
 });
 
 test("an unrecognised consent source or media kind is rejected", async () => {
   const s = svc();
-  await assert.rejects(() => s.grantMediaConsent("u", { mediaKind: "voice", source: "scraped_from_youtube" }), (e) => e.httpStatus === 422);
-  await assert.rejects(() => s.grantMediaConsent("u", { mediaKind: "fingerprint", source: "staff" }), (e) => e.httpStatus === 422);
+  await assert.rejects(() => s.grantMediaConsent("u", { mediaKind: "voice", source: "scraped_from_youtube", grantedBy: "u" }), (e) => e.httpStatus === 422);
+  await assert.rejects(() => s.grantMediaConsent("u", { mediaKind: "fingerprint", source: "staff", grantedBy: "u" }), (e) => e.httpStatus === 422);
 });
 
 test("safety records survive a restart", async () => {
@@ -203,4 +203,30 @@ test("safety records survive a restart", async () => {
   const b = createSafetyService({ DCS_DATA_DIR: dir });   // new service object, same disk
   assert.equal((await b.ageStatus("u1")).age_tier, "adult");
   assert.equal((await b.listReports({}))[0].id, r.id);
+});
+
+test("A5 GATE: nobody can record a voice or likeness consent on someone else's behalf", async () => {
+  // The A5 gate was opt-in by the caller it protects the subject FROM. Any
+  // authenticated account could POST a consent naming any principal as the
+  // subject, and the media route then honoured it: request a person's voice ->
+  // 403; forge their consent -> 201; request again -> 200. The row was not even
+  // attributable, because nothing recorded who granted it.
+  const s = svc();
+  await assert.rejects(
+    () => s.grantMediaConsent("victim", { mediaKind: "voice", source: "explicit_consent", grantedBy: "attacker" }),
+    (e) => e.httpStatus === 403,
+    "a consent granted by someone other than its subject is not consent",
+  );
+  await assert.rejects(
+    () => s.grantMediaConsent("victim", { mediaKind: "voice", source: "explicit_consent" }),
+    (e) => e.httpStatus === 401,
+    "and an unattributable consent must not be recordable at all",
+  );
+
+  // The victim's own grant works, and carries who made it.
+  const ok = await s.grantMediaConsent("victim", { mediaKind: "voice", source: "explicit_consent", grantedBy: "victim" });
+  assert.equal(ok.granted_by, "victim", "every consent must say who granted it, or it cannot be audited");
+
+  // And a stranger cannot revoke it either — nor learn that it exists.
+  await assert.rejects(() => s.revokeMediaConsent(ok.id, "attacker"), (e) => e.httpStatus === 404);
 });

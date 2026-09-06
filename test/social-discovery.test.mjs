@@ -169,7 +169,7 @@ test("B15: a party round-trips and enforces its size", async () => {
 test("B15: an invite-only party refuses an uninvited join", async () => {
   const s = svc();
   const p = await s.createParty("u1", { open: false });
-  await assert.rejects(() => s.joinParty("u2", p.id), (e) => e.httpStatus === 403);
+  await assert.rejects(() => s.joinParty("u2", p.id), (e) => e.httpStatus === 404);
 });
 
 test("B15: the leader leaving hands over instead of orphaning the party", async () => {
@@ -225,7 +225,7 @@ test("B15 GATE: a studio split is recorded but never settles money", async () =>
   assert.match(st.split_note, /no money moves/);
 
   await s.addStudioMember("u1", st.id, "u2", "creator");
-  const after = await s.getStudio(st.id);
+  const after = await s.getStudio(st.id, "u1");
   // Adding a member must not silently dilute anyone.
   assert.equal(after.members.find((m) => m.member_id === "u2").split_bps, 0);
   assert.equal(after.split_total_bps, 10000);
@@ -324,13 +324,13 @@ test("B15 GATE: only an owner or admin can add an org member", async () => {
   // The check that was missing entirely.
   await assert.rejects(() => s.addOrgMember("u2", o.id, "u3"), (e) => e.httpStatus === 403 && /owner or admin/.test(e.detail));
   // An outsider cannot even see the org, let alone join it.
-  await assert.rejects(() => s.addOrgMember("outsider", o.id, "outsider"), (e) => e.httpStatus === 403);
+  await assert.rejects(() => s.addOrgMember("outsider", o.id, "outsider"), (e) => e.httpStatus === 404 || e.httpStatus === 403);
 });
 
 test("B15 GATE: an org is visible only to its members", async () => {
   const s = svc();
   const o = await s.createOrg("u1", { name: "DCS Studios" });
-  await assert.rejects(() => s.getOrg(o.id, "outsider"), (e) => e.httpStatus === 403 && /only to its members/.test(e.detail));
+  await assert.rejects(() => s.getOrg(o.id, "outsider"), (e) => e.httpStatus === 404 && /not found/.test(e.detail));
   assert.equal((await s.getOrg(o.id, "u1")).id, o.id);
 });
 
@@ -805,7 +805,7 @@ test("R4: 8 concurrent adds of the same studio member write one row and do not d
   await Promise.all(Array.from({ length: 8 }, () => s.addStudioMember("u1", st.id, "u2", "creator").catch(() => null)));
   const rows = stored(s, "studio_members").filter((m) => m.studio_id === st.id);
   assert.equal(rows.length, 2);
-  assert.equal((await s.getStudio(st.id)).split_total_bps, 10000, "a duplicate row would have shown up as a broken total");
+  assert.equal((await s.getStudio(st.id, "u1")).split_total_bps, 10000, "a duplicate row would have shown up as a broken total");
 });
 
 test("R4: two concurrent splits cannot land a total that is neither of them", async () => {
@@ -820,7 +820,7 @@ test("R4: two concurrent splits cannot land a total that is neither of them", as
     s.setStudioSplit("u1", st.id, [{ member_id: "u1", split_bps: 6000 }, { member_id: "u2", split_bps: 4000 }]).catch(() => null),
     s.setStudioSplit("u1", st.id, [{ member_id: "u1", split_bps: 3000 }, { member_id: "u2", split_bps: 7000 }]).catch(() => null),
   ]);
-  const after = await s.getStudio(st.id);
+  const after = await s.getStudio(st.id, "u1");
   assert.equal(after.split_total_bps, 10000, `a split must always total 100%, got ${after.split_total_bps}`);
   assert.equal(after.payments_live, false, "and none of it moves any money");
 });
@@ -831,7 +831,7 @@ test("R4: a split that does not name a member zeroes them rather than leaving a 
   await s.addStudioMember("u1", st.id, "u2", "creator");
   await s.setStudioSplit("u1", st.id, [{ member_id: "u1", split_bps: 5000 }, { member_id: "u2", split_bps: 5000 }]);
   await s.setStudioSplit("u1", st.id, [{ member_id: "u1", split_bps: 10000 }]);
-  const after = await s.getStudio(st.id);
+  const after = await s.getStudio(st.id, "u1");
   assert.equal(after.split_total_bps, 10000, "leaving u2's old 5000 standing would have totalled 15000");
   assert.equal(after.members.find((m) => m.member_id === "u2").split_bps, 0);
 });
@@ -894,8 +894,8 @@ test("R4: concurrent plays all survive — an append has no rule to race", async
 test("R4 GATE: an invite-only party is not readable without a requester, or by a stranger", async () => {
   const s = svc();
   const p = await s.createParty("leader", { worldId: "w-secret", maxSize: 4, open: false });
-  await assert.rejects(() => s.getParty(p.id), (e) => e.httpStatus === 403 && /invite-only/.test(e.detail));
-  await assert.rejects(() => s.getParty(p.id, "stranger"), (e) => e.httpStatus === 403);
+  await assert.rejects(() => s.getParty(p.id), (e) => e.httpStatus === 404 && /not found/.test(e.detail));
+  await assert.rejects(() => s.getParty(p.id, "stranger"), (e) => e.httpStatus === 404);
   const seen = await s.getParty(p.id, "leader");
   assert.deepEqual(seen.members, ["leader"]);
   assert.equal(seen.world_id, "w-secret");
@@ -926,15 +926,15 @@ test("R4 GATE: an open party tells a stranger its capacity and nobody's identity
 test("R4 GATE: a team's membership is visible only to its members", async () => {
   const s = svc();
   const t = await s.createTeam("owner", "Secret Team");
-  await assert.rejects(() => s.getTeam(t.id), (e) => e.httpStatus === 403 && /only to its members/.test(e.detail));
-  await assert.rejects(() => s.getTeam(t.id, "stranger"), (e) => e.httpStatus === 403);
+  await assert.rejects(() => s.getTeam(t.id), (e) => e.httpStatus === 404 && /not found/.test(e.detail));
+  await assert.rejects(() => s.getTeam(t.id, "stranger"), (e) => e.httpStatus === 404);
   assert.equal((await s.getTeam(t.id, "owner")).name, "Secret Team");
 
   // A member added later can read it; one removed again cannot.
   await s.addTeamMember("owner", t.id, "u2");
   assert.equal((await s.getTeam(t.id, "u2")).members.length, 2);
   await s.removeTeamMember("owner", t.id, "u2");
-  await assert.rejects(() => s.getTeam(t.id, "u2"), (e) => e.httpStatus === 403);
+  await assert.rejects(() => s.getTeam(t.id, "u2"), (e) => e.httpStatus === 404);
   assert.equal((await s.myTeams("u2")).length, 0);
 });
 
@@ -943,7 +943,7 @@ test("R4: an org with no requester at all is refused, not waved through", async 
   // one that most needs it — skipped it entirely.
   const s = svc();
   const o = await s.createOrg("u1", { name: "DCS Studios" });
-  await assert.rejects(() => s.getOrg(o.id), (e) => e.httpStatus === 403 && /only to its members/.test(e.detail));
+  await assert.rejects(() => s.getOrg(o.id), (e) => e.httpStatus === 404 && /not found/.test(e.detail));
   assert.equal((await s.getOrg(o.id, "u1")).id, o.id);
 });
 
@@ -962,19 +962,40 @@ test("R4: leaving a party or a team still answers the person who left", async ()
   assert.equal(leftTeam.members.length, 1);
 });
 
-test("R4: a revoked role cannot be used by a call that was already in flight", async () => {
-  // The role check is a read too. It is re-taken inside the atomic step, so an
-  // admin removed while their add is in flight cannot complete it.
+test("R4: a revoked role cannot be used, and the check is re-taken inside the atomic step", async () => {
+  // The role check is a READ, and a read taken before the write is a read that
+  // can go stale. It is re-taken inside the atomic step so a revoked admin
+  // cannot complete an add.
+  //
+  // Deliberately NOT written as two concurrent calls and an assertion about the
+  // final state: from the end state alone you cannot tell "the add landed while
+  // they were still an admin", which is legitimate, from "the add landed after
+  // they were removed", which is the defect. The ordering that must be refused
+  // is therefore made to happen.
   const s = svc();
   const o = await s.createOrg("u1", { name: "Org", seats: 10 });
   await s.addOrgMember("u1", o.id, "u2", "admin");
-  await Promise.all([
-    s.removeOrgMember("u1", o.id, "u2").catch(() => null),
-    s.addOrgMember("u2", o.id, "u3").catch(() => null),
-  ]);
+
+  await s.removeOrgMember("u1", o.id, "u2");
+  await assert.rejects(
+    () => s.addOrgMember("u2", o.id, "u3"),
+    (e) => e.httpStatus === 403 || e.httpStatus === 404,
+    "a principal who is no longer an admin cannot add anyone",
+  );
+
   const after = await s.getOrg(o.id, "u1");
   const ids = after.members.map((m) => m.member_id);
-  assert.ok(!ids.includes("u2"), "the admin was removed");
-  assert.ok(!ids.includes("u3") || ids.includes("u2"),
-    "an add may only have landed while its author still held the role");
+  assert.ok(!ids.includes("u2"), "the admin really was removed");
+  assert.ok(!ids.includes("u3"), "and their add did not land afterwards");
+
+  // The concurrent form must still leave a coherent org whichever way it races.
+  const o2 = await s.createOrg("u1", { name: "Org2", seats: 10 });
+  await s.addOrgMember("u1", o2.id, "u2", "admin");
+  await Promise.all([
+    s.removeOrgMember("u1", o2.id, "u2").catch(() => null),
+    s.addOrgMember("u2", o2.id, "u3").catch(() => null),
+  ]);
+  const after2 = await s.getOrg(o2.id, "u1");
+  assert.ok(!after2.members.some((m) => m.member_id === "u2"), "the admin was removed");
+  assert.equal(new Set(after2.members.map((m) => m.member_id)).size, after2.members.length, "no duplicate members either way");
 });

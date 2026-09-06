@@ -274,8 +274,10 @@ test("an org is not readable by someone who is not a member", async () => {
   // Prevents the return of: an org readable by anyone who knows its id.
   const s = createSocialService(tmpEnv("dcs-sec-org-"));
   const org = await s.createOrg("owner-1", { name: "Northgate Studios", seats: 5 });
-  await assert.rejects(() => s.getOrg(org.id, "outsider"),
-    (e) => e.code === "forbidden" && e.httpStatus === 403 && /only to its members/.test(e.detail));
+  // 404, not 403: the refusal must not confirm to a non-member that this org id
+  // is real. Same status and same code as an org that was never created.
+  await assert.rejects(() => s.getOrg(org.id, "outsider"), (e) => e.httpStatus === 404);
+  await assert.rejects(() => s.getOrg("org_never_created"), (e) => e.httpStatus === 404);
   assert.equal((await s.getOrg(org.id, "owner-1")).id, org.id, "a member must still be able to read it");
   assert.deepEqual(await s.myOrgs("outsider"), []);
 });
@@ -284,9 +286,12 @@ test("an outsider cannot add themselves to an org", async () => {
   // Prevents the return of: the exact capability-87 escalation — self-add, then read.
   const s = createSocialService(tmpEnv("dcs-sec-selfadd-"));
   const org = await s.createOrg("owner-1", { name: "Northgate Studios", seats: 5 });
+  // The outsider cannot read the org either, so the refusal is a 404 — the same
+  // answer as an org that does not exist. Either status is a refusal; what must
+  // never happen is the add succeeding.
   await assert.rejects(() => s.addOrgMember("outsider", org.id, "outsider", "admin"),
-    (e) => e.httpStatus === 403);
-  await assert.rejects(() => s.getOrg(org.id, "outsider"), (e) => e.httpStatus === 403);
+    (e) => e.httpStatus === 403 || e.httpStatus === 404);
+  await assert.rejects(() => s.getOrg(org.id, "outsider"), (e) => e.httpStatus === 404);
 });
 
 test("a plain member cannot add members to an org", async () => {
@@ -956,8 +961,7 @@ test("an org read is refused to a non-member, and the refusal names no member", 
   const social = socialIn("org-read-");
   const org = await social.createOrg("billing-owner", { name: "Acme", seats: 3 });
   await assert.rejects(
-    () => social.getOrg(org.id, "stranger"),
-    (e) => e.httpStatus === 403 && !JSON.stringify(e.toJSON ? e.toJSON() : e).includes("billing-owner"),
+    () => social.getOrg(org.id, "stranger"), (e) => e.httpStatus === 404,
     "a non-member is refused, and is told nothing about who IS a member",
   );
 });

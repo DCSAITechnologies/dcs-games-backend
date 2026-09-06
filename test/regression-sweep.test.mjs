@@ -949,6 +949,8 @@ test("a block stops a friendship forming through every path", async () => {
 
   // A party is a shared room, so it is closed too.
   const party = await social.createParty("bob");
+  // A block is a 403: the blocker and the blocked both know the other exists,
+  // so refusing plainly leaks nothing and saying "not found" would be a lie.
   await assert.rejects(() => social.joinParty("alice", party.id), (e) => e.httpStatus === 403);
 
   // A block check cannot be constructed away.
