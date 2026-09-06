@@ -5,6 +5,7 @@
 // "trusted"; history shows real events only, nothing fabricated.
 
 import { computeWorldReputation, computeBuilderScore, filterGamedEvents } from './atlas-trust.mjs';
+import { canonicalSubjectId } from './atlas-local-sign.mjs';
 
 // ---- (a) Public receipt verify view ----
 // Given a receipt (+ injected verify), return a public, human-readable verification result.
@@ -22,7 +23,9 @@ export function publicVerifyReceipt(receipt, deps = {}) {
     // public, non-sensitive fields only — what the receipt attests:
     receipt: {
       subject_type: receipt.subject_type ?? 'world',
-      subject_id: receipt.world_id ?? receipt.subject_id,
+      // Shared canonicalisation: identical precedence to the signer. Resolving
+      // this differently is what let a receipt display a world it was not signed for.
+      subject_id: canonicalSubjectId(receipt),
       attested_by: receipt.builder_id ?? receipt.attested_by,
       action: receipt.action ?? receipt.attestation,
       receipt_hash: receipt.receipt_hash ?? receipt.receipt_id ?? null,

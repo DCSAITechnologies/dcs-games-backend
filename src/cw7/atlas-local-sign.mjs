@@ -67,7 +67,7 @@ export function canonicalBody(r) {
     attested_by:  r.attested_by ?? r.builder_id ?? null,
     prev_hash:    r.prev_hash ?? null,
     subject_type: r.subject_type ?? "world",
-    subject_id:   r.subject_id ?? r.world_id ?? null,
+    subject_id:   canonicalSubjectId(r),
   };
   return JSON.stringify(b, Object.keys(b).sort());
 }
@@ -82,9 +82,36 @@ export function signReceipt(body) {
   catch (e) { return null; }
 }
 
+/**
+ * The ONE place a receipt's subject is resolved. Everything that signs, verifies
+ * or DISPLAYS a receipt must call this.
+ *
+ * Defect found 6 Sep 2026 by the flagship E2E: the signer resolved
+ * `subject_id ?? world_id` while the public verify view resolved
+ * `world_id ?? subject_id` — the opposite precedence. A receipt legitimately
+ * signed for world A, with `world_id: "B"` appended, verified against A and was
+ * DISPLAYED as a verified receipt for B. Two canonicalisations is one too many.
+ */
+export function canonicalSubjectId(r) {
+  return r?.subject_id ?? r?.world_id ?? null;
+}
+
+/**
+ * Reject a receipt carrying an unsigned alias that contradicts a signed field.
+ * The signature alone cannot catch this: the alias is outside the signed body.
+ */
+export function hasConflictingAlias(receipt) {
+  if (!receipt) return false;
+  if (receipt.world_id != null && receipt.subject_id != null && String(receipt.world_id) !== String(receipt.subject_id)) return true;
+  return false;
+}
+
 // verify(receipt) -> bool. Injected into the /verify route + atlas verify view.
 export function verifyReceipt(receipt) {
   load(); if (!_pub || !receipt || !receipt.sig) return false;
+  // An unsigned alias that contradicts the signed subject is a forgery attempt,
+  // even though the signature over the canonical body is intact.
+  if (hasConflictingAlias(receipt)) return false;
   try { return crypto.verify(null, Buffer.from(canonicalBody(receipt), "utf8"), _pub, Buffer.from(receipt.sig, "base64")); }
   catch (e) { return false; }
 }

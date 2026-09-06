@@ -7,7 +7,7 @@
   "scripts": {
     "start": "tsx server.mts",
     "dev": "tsx server.mts",
-    "test": "npm run test:unit && npm run test:api && npm run test:browser",
+    "test": "npm run test:unit && npm run test:api && npm run test:browser && npm run test:e2e",
     "test:unit": "node --test test/auth-principal.test.mjs test/world-persistence.test.mjs test/safety.test.mjs test/schema-migrations.test.mjs test/manifest-v3.test.mjs test/assembly-router.test.mjs test/playtest.test.mjs test/evolution.test.mjs",
     "test:api": "node --import tsx --test test/api-integration.test.mjs",
     "test:browser": "node --test --test-concurrency=1 test/frontend-truth.test.mjs test/runtime-v3.test.mjs",
@@ -17,7 +17,8 @@
     "staging": "./scripts/staging.sh",
     "secret-scan": "node scripts/secret-scan.mjs . ../../dcs-games-LIVE",
     "release-manifest": "node scripts/release-manifest.mjs",
-    "providers": "node tools/live-provider-check.mjs"
+    "providers": "node tools/live-provider-check.mjs",
+    "test:e2e": "node --import tsx --test --test-concurrency=1 test/flagship-e2e.test.mjs"
   },
   "dependencies": {
     "tsx": "^4.22.4"
