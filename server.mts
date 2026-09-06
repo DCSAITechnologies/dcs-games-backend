@@ -178,12 +178,87 @@ console.log("A1 auth mode:", auth.mode);
 
 const atlasKey = makeKeyEndpoint({ publicKey: () => atlasPublicKeyBase64() || process.env.ATLAS_PUBLIC_KEY || "" }); // prefer the raw key derived from the signer (matches sig + browser-embed verifiable)
 
+/**
+ * Which origins may call this API from a browser.
+ *
+ * Every response used to carry `Access-Control-Allow-Origin: *` unconditionally,
+ * which made the ALLOWED_ORIGINS variable dead configuration — it sat in the
+ * Railway environment looking exactly like a security control and enforced
+ * nothing. A setting that appears to restrict something and does not is worse
+ * than no setting, because it is believed.
+ *
+ * With ALLOWED_ORIGINS unset the answer is still `*`. That is deliberate: a
+ * local or freshly provisioned instance should not be mysteriously unreachable,
+ * and /health says which mode is in force so it cannot be assumed. When the
+ * variable IS set, only the listed origins are echoed; anything else gets no
+ * ACAO header at all and the browser blocks the read.
+ *
+ * A leading `*.` entry matches one level of subdomain, which is what Cloudflare
+ * preview deployments need — every preview gets a fresh `<hash>.<project>.pages.dev`
+ * host, so listing them individually is impossible.
+ */
+const ALLOWED_ORIGINS: string[] = String(process.env.ALLOWED_ORIGINS || "")
+  .split(",").map((o) => o.trim()).filter(Boolean);
+export const CORS_MODE = ALLOWED_ORIGINS.length ? "allowlist" : "open";
+
+export function originAllowed(origin: string, allowed: string[] = ALLOWED_ORIGINS): boolean {
+  if (!allowed.length) return true;
+  if (!origin) return false;
+
+  // Split scheme from host on both sides. An earlier version tested
+  // `entry.startsWith("*.")`, which is false for the way these are actually
+  // written — `https://*.dcs-games.pages.dev` — so no wildcard ever matched
+  // and every preview would have been blocked.
+  const split = (v: string) => {
+    const m = /^(https?:\/\/)?(.*)$/.exec(v.trim());
+    return { scheme: (m?.[1] || "").toLowerCase(), host: (m?.[2] || "").toLowerCase() };
+  };
+  const o = split(origin);
+
+  for (const raw of allowed) {
+    if (raw === "*") return true;
+    const e = split(raw);
+    if (e.scheme && o.scheme && e.scheme !== o.scheme) continue;
+    if (e.host === o.host) return true;
+    if (e.host.startsWith("*.")) {
+      const suffix = e.host.slice(1);                // "*.example.com" -> ".example.com"
+      // Exactly one level. The dot is required, so "evil-example.com" cannot
+      // pass as ".example.com", and "a.b.example.com" is a different host.
+      if (o.host.endsWith(suffix)) {
+        const label = o.host.slice(0, -suffix.length);
+        if (label.length > 0 && !label.includes(".")) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** CORS headers for this particular response, based on the origin that asked. */
+function corsFor(res: http.ServerResponse) {
+  const origin = (res as any).__dcsOrigin || "";
+  if (!ALLOWED_ORIGINS.length) {
+    return { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "*", "Access-Control-Allow-Methods": "*" };
+  }
+  const h: Record<string, string> = {
+    "Access-Control-Allow-Headers": "*",
+    "Access-Control-Allow-Methods": "*",
+    // The answer depends on the request's Origin, so caches must key on it.
+    Vary: "Origin",
+  };
+  if (originAllowed(origin)) h["Access-Control-Allow-Origin"] = origin;
+  return h;
+}
+
 function send(res: http.ServerResponse, code: number, body: any) {
-  res.writeHead(code, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "*", "Access-Control-Allow-Methods": "*" });
+  res.writeHead(code, { "Content-Type": "application/json", ...corsFor(res) });
   res.end(JSON.stringify(body));
 }
 function sendHTML(res: http.ServerResponse, code: number, html: string) {
-  res.writeHead(code, { "Content-Type": "text/html; charset=utf-8", "Access-Control-Allow-Origin": "*" });
+  const { "Access-Control-Allow-Origin": acao, Vary } = corsFor(res) as any;
+  const h: Record<string, string> = { "Content-Type": "text/html; charset=utf-8" };
+  if (acao) h["Access-Control-Allow-Origin"] = acao;
+  if (Vary) h.Vary = Vary;
+  res.writeHead(code, h);
   res.end(html);
 }
 function readBody(req: http.IncomingMessage): Promise<any> {
@@ -303,11 +378,15 @@ const server = http.createServer(async (req, res) => {
   // A4: one correlation id per request, echoed on every response and every log line.
   const cid = (req.headers["x-correlation-id"] as string) || newCorrelationId();
   res.setHeader("X-Correlation-Id", cid);
+  // Carried on the response, not in a module variable: handlers await, and a
+  // shared variable would hand one request's origin to another's reply.
+  (res as any).__dcsOrigin = (req.headers.origin as string) || "";
   try {
     if (method === "OPTIONS") return send(res, 204, {});
     if (url === "/health" && method === "GET") return send(res, 200, {
       ok: true, service: "dcs-games-backend", payments_live: PAYMENTS_LIVE,
       build: BUILD_INFO,
+      cors: { mode: CORS_MODE, allowed: ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS : null },
       auth: auth.mode,
       auth_header_fallback_removed: true,      // A1: x-user-id impersonation path deleted 6 Sep 2026
       internal_testing_window_ends: "2026-09-30",
