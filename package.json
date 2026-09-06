@@ -19,7 +19,8 @@
     "release-manifest": "node scripts/release-manifest.mjs",
     "providers": "node tools/live-provider-check.mjs",
     "test:e2e": "node --import tsx --test --test-concurrency=1 test/flagship-e2e.test.mjs",
-    "verify-release": "node scripts/verify-release.mjs"
+    "verify-release": "node scripts/verify-release.mjs",
+    "monitor-dark": "node scripts/monitor-dark.mjs"
   },
   "dependencies": {
     "tsx": "^4.22.4"
