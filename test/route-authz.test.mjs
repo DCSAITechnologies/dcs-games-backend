@@ -1086,6 +1086,10 @@ test("CLOSED: /health advertises the surface and every advertised route answers 
       .replace(/\/:id$/, `/${F.pubWorld}`)
       .replace("/:username", "/owner")
       .replace("/:channel/", "/email/")
+      // ...and at the end of a path too: DELETE /verify/:channel revokes a
+      // verification. Substituting only the mid-path form left the trailing one
+      // literal, which read as drift in a route that exists.
+      .replace(/\/:channel$/, "/email")
       .replace(/\/:npc\b/, "/npc_any")
       .replace(/\/:n\b/, "/1");
     assert.doesNotMatch(url, /\/:/, `the drift probe left a placeholder unsubstituted in ${tmpl}`);

@@ -408,12 +408,12 @@ const server = http.createServer(async (req, res) => {
         world: ["POST /v3/worlds/generate", "POST /v3/worlds/generate/async", "GET /v3/worlds/:id/manifest", "POST /v3/worlds/:id/playtest", "POST /v3/worlds/:id/expand", "POST /v3/worlds/:id/edit", "POST /v3/worlds/:id/stitch", "POST /v3/worlds/:id/fork", "GET /v3/worlds/:id/versions", "POST /v3/worlds/:id/rollback", "GET /v3/worlds/:id/diff", "GET /v3/worlds/:id/memory", "POST /v3/worlds/:id/companion", "POST /v3/worlds/:id/media", "GET /v3/worlds/:id/attribution", "GET /v3/worlds/:id/parts", "POST /v3/worlds/:id/quests/generate", "POST /v3/worlds/:id/stitch/preview", "GET /v3/worlds/:id/versions/:n", "GET /v3/worlds/:id/npcs/:npc/memory"],
         discovery: ["GET /v3/discover", "GET /api/public/worlds", "POST /v3/worlds/:id/play", "POST /v3/worlds/:id/rate", "GET /v3/worlds/:id/stats"],
         identity: ["POST /auth/signup", "POST /auth/login", "GET /me/profile", "GET /me/achievements", "GET /me/streak", "GET /me/dashboard", "GET /profiles/:username", "GET /verify/status", "POST /verify/:channel/start", "POST /verify/:channel/confirm"],
-        social: ["GET /social/friends", "POST /social/friends/accept", "GET /social/parties", "GET /social/teams", "POST /social/studios", "GET /social/orgs", "GET /social/orgs/:id", "GET /social/orgs/:id/members", "POST /social/orgs/:id/seats", "GET /social/parties/:id", "POST /social/parties/:id/join", "POST /social/parties/:id/leave", "GET /social/studios/:id", "GET /social/studios/:id/members", "GET /social/studios/:id/split", "GET /social/teams/:id", "GET /social/teams/:id/members"],
-        marketplace: ["GET /v3/marketplace", "GET /v3/marketplace/split", "POST /v3/marketplace/storefronts", "POST /v3/marketplace/listings", "GET /v3/marketplace/listings/:id", "POST /v3/marketplace/listings/:id/acquire", "GET /v3/marketplace/owned", "GET /v3/marketplace/ledger", "GET /v3/marketplace/assert-dark"],
+        social: ["GET /social/friends", "POST /social/friends/accept", "GET /social/parties", "GET /social/teams", "POST /social/studios", "GET /social/orgs", "GET /social/orgs/:id", "POST /social/orgs/:id/members", "DELETE /social/orgs/:id/members", "POST /social/orgs/:id/seats", "GET /social/parties/:id", "POST /social/parties/:id/join", "POST /social/parties/:id/leave", "GET /social/studios/:id", "POST /social/studios/:id/members", "POST /social/studios/:id/split", "GET /social/teams/:id", "POST /social/teams/:id/members", "DELETE /social/teams/:id/members"],
+        marketplace: ["GET /v3/marketplace", "GET /v3/marketplace/split", "POST /v3/marketplace/storefronts", "POST /v3/marketplace/listings", "DELETE /v3/marketplace/listings/:id", "POST /v3/marketplace/listings/:id/acquire", "GET /v3/marketplace/owned", "GET /v3/marketplace/ledger", "GET /v3/marketplace/assert-dark"],
         subscriptions: ["GET /v3/subscriptions/plans", "POST /v3/subscriptions/subscribe", "POST /v3/subscriptions/grant", "POST /v3/subscriptions/revoke", "GET /v3/subscriptions/grants", "GET /v3/subscriptions/assert-dark", "GET /me/subscription", "GET /me/entitlements"],
         safety: ["GET /safety/age", "GET /safety/blocks", "POST /safety/consent/parental", "POST /safety/report", "GET /safety/reports", "POST /safety/block", "GET /safety/consent/media", "GET /safety/moderation-history", "POST /safety/reports/:id/moderate"],
         jobs: ["GET /v3/jobs", "GET /v3/jobs/:id"],
-        trust: ["GET /health", "GET /atlas/key", "GET /verify/:id", "GET /atlas/receipt/:id", "GET /verify", "GET /v3/providers"],
+        trust: ["GET /health", "GET /atlas/key", "DELETE /verify/:channel", "GET /atlas/receipt/:id", "GET /verify", "GET /v3/providers"],
         retired: ["GET /api/marketplace (410)", "GET /api/me/payouts (410)", "GET /me/revenue (410)", ...retiredSocialRoutes(), "POST /verify/:channel/{start,confirm} on the legacy identity slice (410)"],
       },
       manifest_version: MANIFEST_VERSION,
@@ -1738,7 +1738,40 @@ const server = http.createServer(async (req, res) => {
       const b = await readBody(req);
       if (b && b.manifest) {
         // A3: full-manifest save — durable, lossless, ownership-checked, idempotent.
-        const saved = await repo.upsert({ worldId: m[1], ownerId: me.id, manifest: b.manifest, state: b.state || "draft", expected_version: b.expected_version ?? null });
+        //
+        // `state` is NOT taken from the body, and a request that sends one is
+        // refused rather than quietly ignored.
+        //
+        // It used to be `state: b.state || "draft"`, which was two defects in
+        // one expression. Sending "published" created a published, discoverable
+        // world while walking past every gate the publish route exists to
+        // enforce — internal-tester check, ownership, the playtest gate, and
+        // the Atlas signing key, which publish refuses to proceed without
+        // precisely so that nothing is ever marked published-and-verified
+        // unsigned. And because `repo.upsert`'s owner check only fires when a
+        // record already exists, any authenticated account could do it on an
+        // unclaimed id. The `|| "draft"` half was the mirror image: an ordinary
+        // save of an ALREADY published world silently unpublished it.
+        //
+        // Publishing is a separate authorised action. Saving is saving.
+        if (b.state !== undefined) {
+          throw Errors.validation(
+            "a save cannot change a world's state; publish it with POST /worlds/:id/publish, which checks ownership and signs an Atlas receipt",
+            { correlationId: cid, meta: { rejected_state: String(b.state) } }
+          );
+        }
+        // The manifest is what every later stage trusts. validateManifest was
+        // imported and never called, so a structurally broken world could be
+        // stored and only fail much later, somewhere that could not explain it.
+        const v = validateManifest(b.manifest);
+        if (!v.ok) {
+          throw Errors.validation("the manifest is not a valid WorldManifestV3", {
+            correlationId: cid,
+            meta: { errors: v.errors.slice(0, 8).map((e: any) => `${e.path}: ${e.message}`) },
+          });
+        }
+        const prior = await repo.get(m[1], { requesterId: me.id }).catch(() => null);
+        const saved = await repo.upsert({ worldId: m[1], ownerId: me.id, manifest: b.manifest, state: prior?.state || "draft", expected_version: b.expected_version ?? null });
         return send(res, 200, { ok: true, world_id: m[1], world_version: saved.version, manifest_hash: saved.manifest_hash, idempotent: saved.idempotent, persistence_degraded: saved._mirrored === false ? saved._mirror_error : undefined, correlation_id: cid });
       }
       // The runtime-delta path. Two things must be true and neither was checked:
