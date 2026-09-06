@@ -199,7 +199,7 @@ const server = http.createServer(async (req, res) => {
         products: crossProductStatus === "AVAILABLE" ? ["games", "sports"] : ["games"],
         note: crossProductStatus === "AVAILABLE" ? null : "No second product is wired, so a cross-product reputation cannot be computed. The endpoint returns an honest empty result rather than a score.",
       },
-      marketplace: market.describe(),
+      marketplace: { ...market.describe(), legacy_cw6_routes: "retired (410)" },
       jobs: { async_generation: true, boot_id: BOOT_ID, interrupted_on_boot: bootReconcile.interrupted },
       v3: { assembly_router: true, playtest_gate: true, expansion_delta: true, world_memory: true, companion: true, chat_edit: true },
       safety: { age_gating: true, report_block: true, parental_consent: true, media_consent: true, automated_content_moderation: false, minor_onboarding_enabled: false },
@@ -272,15 +272,28 @@ const server = http.createServer(async (req, res) => {
       if (method === vm) { const mm = apiPath.match(re); if (mm) return send(res, 200, fn(mm)); }
     }
 
-    // CW6 v3.0 — economy routes (DARK). Uses CW6's non-express fallback router; we shim req/res. money DARK, honest empty until a supabase client is wired.
+    // CW6 economy routes — RETIRED in favour of /v3/marketplace.
+    //
+    // Round-2 called this "doubly dark": the router was constructed with no
+    // database client so its live branch was unreachable, and its three tables
+    // did not exist. Its checkout also derived the buyer from the x-user-id
+    // header, which is the impersonation path A1 removed.
+    //
+    // /v3/marketplace replaces it with a durable store, real authorisation, and
+    // a money guard enforced by CHECK constraints rather than by convention.
+    // Keeping two economy surfaces alive is how one of them quietly rots, so
+    // this one answers 410 and names its replacement.
     {
       const r = (econRouter as any)._routes.find((x: any) => x.method === method && x.path === apiPath);
       if (r) {
-        const me = await mustBeInternalTester(req, cid);      // economy surface: gated to authorized internal testers, money DARK
-        const body = (method === "POST") ? await readBody(req) : {};
-        const shimRes: any = { _c: 200, status(c: number) { this._c = c; return this; }, json(b: any) { return send(res, this._c, b); } };
-        await r.handler({ user: { id: me.id }, body }, shimRes);
-        return;
+        const replacement = apiPath.startsWith("/api/me/payouts") ? "/v3/marketplace/ledger" : "/v3/marketplace";
+        return send(res, 410, {
+          ok: false, error: "gone",
+          detail: "this economy surface had no durable store and derived its buyer from the x-user-id header; it has been retired",
+          superseded_by: replacement,
+          payments_live: PAYMENTS_LIVE,
+          correlation_id: cid,
+        });
       }
     }
 

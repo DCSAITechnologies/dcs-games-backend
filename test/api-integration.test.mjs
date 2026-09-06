@@ -447,3 +447,18 @@ test("P1: health reports the async job runner and what it reconciled at boot", a
   assert.ok(b.jobs.boot_id);
   assert.equal(typeof b.jobs.interrupted_on_boot, "number");
 });
+
+test("the legacy CW6 economy surface is retired and names its replacement", async () => {
+  // It had no durable store and derived its buyer from the x-user-id header.
+  for (const [path, method, expected] of [
+    ["/api/marketplace", "GET", "/v3/marketplace"],
+    ["/api/marketplace/checkout", "POST", "/v3/marketplace"],
+    ["/api/me/payouts", "GET", "/v3/marketplace/ledger"],
+  ]) {
+    const r = await req(path, { method, headers: json(ALICE), body: method === "POST" ? "{}" : undefined });
+    const b = await r.json();
+    assert.equal(r.status, 410, `${path} should be retired`);
+    assert.equal(b.superseded_by, expected);
+    assert.equal(b.payments_live, false);
+  }
+});
