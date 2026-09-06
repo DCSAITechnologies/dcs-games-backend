@@ -20,6 +20,7 @@ const BASE = `http://127.0.0.1:${PORT}`;
 const ALICE = signLocalToken(SECRET, { sub: "user-alice", email: "alice@dcsai.ai", roles: ["internal_tester"] }, 3600);
 const MALLORY = signLocalToken(SECRET, { sub: "user-mallory", email: "mallory@example.com" }, 3600);
 const MALLORY_TESTER = signLocalToken(SECRET, { sub: "user-mallory", email: "mallory@example.com", roles: ["internal_tester"] }, 3600);
+const BOB = signLocalToken(SECRET, { sub: "user-bob", email: "bob@example.com" }, 3600);
 
 let proc;
 
@@ -277,4 +278,99 @@ test("health advertises the safety posture truthfully", async () => {
   assert.equal(b.safety.minor_onboarding_enabled, false);
   assert.equal(b.safety.automated_content_moderation, false);
   assert.equal(b.internal_testing_window_ends, "2026-09-30");
+});
+
+// ------------------------------------------------------- B11 media + B15 social
+test("B11: media generation produces a LABELLED placeholder when no provider exists", async () => {
+  const r = await req(`/v3/worlds/${generatedId}/media`, { method: "POST", headers: json(ALICE), body: JSON.stringify({ kind: "image", target: "thumbnail" }) });
+  const b = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(b));
+  assert.equal(b.generated, true);
+  assert.equal(b.placeholder, true, "offline, the placeholder must be labelled as one");
+  assert.equal(b.status, "FALLBACK", "and the provenance must say FALLBACK, not AVAILABLE");
+});
+
+test("B11 GATE: voice generation is refused without a recorded consent grant", async () => {
+  const r = await req(`/v3/worlds/${generatedId}/media`, {
+    method: "POST", headers: json(ALICE),
+    body: JSON.stringify({ kind: "voice", target: "narration", subject_id: "some-real-person", source: "explicit_consent" }),
+  });
+  const b = await r.json();
+  assert.equal(r.status, 403);
+  assert.match(b.detail, /unrestricted cloning is disabled/);
+});
+
+test("B11: synthetic narration needs no subject consent, and reports honestly when it cannot be made", async () => {
+  const r = await req(`/v3/worlds/${generatedId}/media`, {
+    method: "POST", headers: json(ALICE),
+    body: JSON.stringify({ kind: "narration", target: "narration", source: "synthetic" }),
+  });
+  const b = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(b));
+  // There is no offline audio synthesis, so it must say so rather than return silence.
+  assert.equal(b.generated, false);
+  assert.match(b.reason, /no media provider/);
+});
+
+test("B11: the media asset never changes the manifest SHAPE", async () => {
+  const m = await (await req(`/v3/worlds/${generatedId}/manifest`, { headers: auth(ALICE) })).json();
+  assert.ok(m.manifest.media, "media stays a first-class, always-present block");
+  assert.equal(m.manifest.media.thumbnail_is_placeholder, true);
+  assert.ok(m.manifest.assets.some((a) => a.id === "asset_media_thumbnail"));
+});
+
+test("B15: the profile is durable and reports money as dark", async () => {
+  const r = await req("/me/profile", { headers: auth(ALICE) });
+  const b = await r.json();
+  assert.equal(r.status, 200);
+  assert.equal(b.economy.payments_live, false);
+  assert.ok(b.worlds_created >= 1, "generating a world moved the real counter");
+  assert.equal((await req("/me/profile")).status, 401, "the profile is private");
+});
+
+test("B15: friends round-trip through the API", async () => {
+  // Deliberately NOT user-mallory: an earlier test blocks them, and a blocked
+  // person must not be friendable. That interaction is asserted separately below.
+  const a = await req("/social/friends", { method: "POST", headers: json(ALICE), body: JSON.stringify({ friend_id: "user-bob" }) });
+  assert.equal(a.status, 201);
+  const mine = await (await req("/social/friends", { headers: auth(ALICE) })).json();
+  assert.ok(mine.outgoing.some((x) => x.id === "user-bob"));
+  const accepted = await req("/social/friends/accept", { method: "POST", headers: json(BOB), body: JSON.stringify({ friend_id: "user-alice" }) });
+  assert.equal(accepted.status, 200);
+  const after = await (await req("/social/friends", { headers: auth(ALICE) })).json();
+  assert.ok(after.friends.some((x) => x.id === "user-bob"));
+});
+
+test("B15 GATE: a blocked person cannot be sent a friend request", async () => {
+  // user-mallory was blocked by the A5 test above.
+  const r = await req("/social/friends", { method: "POST", headers: json(ALICE), body: JSON.stringify({ friend_id: "user-mallory" }) });
+  assert.equal(r.status, 403, "blocking must actually prevent contact, not merely hide it");
+});
+
+test("B15 GATE: discovery ranks on measured activity and labels honest zeros", async () => {
+  const r = await req("/v3/discover?sort=most_played");
+  const b = await r.json();
+  assert.equal(r.status, 200);
+  assert.equal(typeof b.count, "number");
+  if (b.count && b.worlds.every((w) => w.stats.plays === 0)) {
+    assert.match(b.note, /real zeros, not placeholders/);
+  }
+});
+
+test("B15: recording a play then reading stats reflects it", async () => {
+  await req(`/v3/worlds/${generatedId}/play`, { method: "POST", headers: json(ALICE), body: JSON.stringify({ seconds: 90 }) });
+  const s = await (await req(`/v3/worlds/${generatedId}/stats`)).json();
+  assert.equal(s.stats.plays, 1);
+  assert.equal(s.stats.total_seconds, 90);
+  assert.equal(s.stats.rating_avg, null, "an unrated world has no average, not a default");
+});
+
+test("B15: a studio split must total 100% and settles nothing", async () => {
+  const st = await (await req("/social/studios", { method: "POST", headers: json(ALICE), body: JSON.stringify({ name: "NovaStudio" }) })).json();
+  assert.equal(st.studio.payments_live, false);
+  const bad = await req(`/social/studios/${st.studio.id}/split`, { method: "POST", headers: json(ALICE), body: JSON.stringify({ splits: [{ member_id: "user-alice", split_bps: 4000 }] }) });
+  assert.equal(bad.status, 422);
+  const ok = await req(`/social/studios/${st.studio.id}/split`, { method: "POST", headers: json(ALICE), body: JSON.stringify({ splits: [{ member_id: "user-alice", split_bps: 10000 }] }) });
+  assert.equal(ok.status, 200);
+  assert.equal((await ok.json()).payments_live, false);
 });

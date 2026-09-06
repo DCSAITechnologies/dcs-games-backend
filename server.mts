@@ -19,6 +19,7 @@ import { makeKeyEndpoint } from "./src/cw7/atlas-key.mjs";       // CW7: GET /at
 import { atlasReady, verifyReceipt, atlasPublicKeyBase64, issueWorldReceipt } from "./src/cw7/atlas-local-sign.mjs"; // CW7: local ed25519 sign+verify (off-chain, no gas)
 import { makeCrossProductRouter } from "./src/cw7/atlas-cross-product.mjs"; // CW7 v4.0: cross-product reputation (node-http routeTable)
 import { createEconomyRouter } from "./src/cw6/economy-router.mjs";          // CW6 v3.0: economy routes (DARK), non-express fallback router
+import { LANES } from "./src/v3/providers/contract.mjs";                        // B11: media lane
 import { createAssemblyRouter } from "./src/v3/router/assembly.mjs";            // B1: multi-provider world assembly
 import { validateManifest, MANIFEST_VERSION } from "./src/v3/manifest/schema.mjs"; // B0: canonical world contract
 import { ensureV3 } from "./src/v3/manifest/migrate.mjs";                       // B0: v1 -> v3 upgrade
@@ -124,6 +125,27 @@ async function supaGet(pathq: string): Promise<any[]> {
     return await r.json();
   } catch { return []; }
 }
+/** Build a media prompt from the world itself, so nothing is invented about it. */
+function mediaPromptFor(manifest: any, target: string, b: any): string {
+  const m = manifest?.meta || {};
+  const zones = (manifest?.zones || []).map((z: any) => z.name).slice(0, 4).join(", ");
+  switch (target) {
+    case "thumbnail":
+      return `Key art for the game world "${m.title}". ${m.style || ""}. Districts: ${zones}. Weather: ${manifest?.environment?.weather || "clear"}.`.slice(0, 500);
+    case "portrait": {
+      const npc = (manifest?.npcs || []).find((n: any) => n.id === b.npc_id) || (manifest?.npcs || [])[0];
+      return `Character portrait of ${npc?.name || "a resident"}, ${npc?.role || "villager"}, in the world "${m.title}". ${m.style || ""}.`.slice(0, 500);
+    }
+    case "narration":
+      return `${m.title}. ${m.description || m.gameplay_loop || "A world to explore."}`.slice(0, 500);
+    case "trailer":
+    case "intro":
+      return `A short cinematic establishing shot of "${m.title}". ${m.style || ""}. Districts: ${zones}.`.slice(0, 500);
+    default:
+      return `${m.title}. ${m.style || ""}`.slice(0, 500);
+  }
+}
+
 const server = http.createServer(async (req, res) => {
   if ((req.url || "").startsWith("/api/") && !(req.url || "").startsWith("/api/public/")) req.url = "/" + req.url.slice(5);
   const url = (req.url || "").split("?")[0];
@@ -584,6 +606,70 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, { ok: true, world_id: rec.world_id, summary: plan.summary, intent: plan.intent, world_version: gate.manifest.world_version, record_version: saved.version, playtest: gate.verdict, correlation_id: cid });
       }
 
+      // ---- B11 KINIX/Kynex media -----------------------------------------
+      // The media lane never blocks a world. A missing provider yields a labelled
+      // placeholder, and WorldManifestV3 does not change shape either way.
+      mm = url.match(/^\/v3\/worlds\/([^/]+)\/media$/);
+      if (mm && method === "POST") {
+        const me = await mustBeInternalTester(req, cid);
+        const b = await readBody(req);
+        const kind = b.kind || "image";
+        const rec = await repo.get(mm[1], { requesterId: me.id, requireOwner: true });
+        const { manifest } = ensureV3(rec.manifest, { worldVersion: rec.version, creatorId: rec.owner_id });
+
+        // A5 gate: voice and likeness need a recorded, unrevoked consent grant.
+        // Fully synthetic material is exempt; anything tied to a real person is not.
+        if (kind === "voice" || kind === "narration" || kind === "avatar") {
+          await safety.requireCapability(me.id, "voice");
+          await safety.requireMediaConsent({
+            subjectId: b.subject_id ?? me.id,
+            mediaKind: kind === "narration" ? "voice" : kind,
+            source: b.source || "synthetic",
+          });
+        }
+
+        const target = b.target || "thumbnail";
+        const prompt = b.prompt || mediaPromptFor(manifest, target, b);
+        const r = await v3.lanes[LANES.MEDIA].run({
+          kind, target, prompt, label: manifest.meta.title,
+          subjectId: b.subject_id ?? null, style: manifest.meta.style,
+          width: b.width, height: b.height, durationS: b.duration_s, language: b.language,
+        });
+
+        if (!r.value?.uri) {
+          // Honest: no provider could produce this, and we say which kind failed.
+          return send(res, 200, {
+            ok: true, generated: false, target, kind,
+            reason: r.value?.unavailable_reason || "no media provider could produce this asset",
+            provider: r.provenance.provider, status: r.provenance.status, correlation_id: cid,
+          });
+        }
+
+        const assetId = `asset_media_${target}`;
+        manifest.assets = (manifest.assets || []).filter((a: any) => a.id !== assetId);
+        manifest.assets.push({
+          id: assetId, kind: kind === "image" ? "effect" : "audio", format: "external", uri: r.value.uri,
+          license: { source: r.provenance.provider, commercial_use: "internal-testing-only" },
+          provenance: { lane: "media", provider: r.provenance.provider, model: r.provenance.model, placeholder: !!r.value.placeholder, at: r.provenance.at },
+        });
+        // A v3 manifest saved through /worlds/:id/save may legitimately omit
+        // optional blocks. Assuming they exist made this route 500.
+        manifest.media = manifest.media || {};
+        manifest.provenance = manifest.provenance || { generated_by: [], source_prompt_hash: null, manifest_hash: null };
+        (manifest.media as any)[target + "_ref"] = assetId;
+        (manifest.media as any)[target + "_is_placeholder"] = !!r.value.placeholder;
+        manifest.provenance.generated_by = [...(manifest.provenance.generated_by || []), r.provenance];
+
+        const saved = await repo.upsert({ worldId: rec.world_id, ownerId: me.id, manifest, state: rec.state, title: manifest.meta.title });
+        return send(res, 200, {
+          ok: true, generated: true, target, kind, asset_id: assetId,
+          // A placeholder is ALWAYS labelled, so it can never pass as generated art.
+          placeholder: !!r.value.placeholder,
+          provider: r.provenance.provider, status: r.provenance.status,
+          world_version: saved.version, correlation_id: cid,
+        });
+      }
+
       mm = url.match(/^\/v3\/worlds\/([^/]+)\/memory$/);
       if (mm && method === "GET") {
         await repo.get(mm[1], { requesterId: principal?.id ?? null });   // read permission
@@ -636,6 +722,9 @@ const server = http.createServer(async (req, res) => {
       const saved = await repo.upsert({ worldId: world.world_id, ownerId: me.id, manifest: runtime, state: "draft", title: (world as any)?.meta?.title });
       const base = { world_id: world.world_id, objects: (world.objects || []).map((o: any) => ({ object_id: o.object_id, kind: o.kind, transform: o.transform || { x: 0, y: 0, z: 0 }, owner_id: o.owner_id ?? null })) };
       await persistence.registerBaseWorld(base);
+      // Creating a world counts however it was created, so /me stays measured.
+      await social.ensureProfile(me);
+      await social.recordWorldCreated(me.id);
       return send(res, 200, {
         ok: true, world_id: world.world_id, status: "ready", owner: me.id,
         world_version: saved.version, manifest_hash: saved.manifest_hash,
