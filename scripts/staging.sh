@@ -39,5 +39,17 @@ echo "==> post-deploy smoke"
 node scripts/smoke.mjs "http://127.0.0.1:${STAGING_PORT}"
 
 echo
+echo "==> internal-tester token for this staging run"
+node --input-type=module -e "
+import { signLocalToken } from './src/core/principal.mjs';
+const secret = process.env.DCS_AUTH_SECRET || 'staging-local-secret';
+const tok = signLocalToken(secret, { sub: 'founder', email: (process.env.DCS_INTERNAL_TESTERS||'ndusadftb@gmail.com').split(',')[0].trim(), roles: ['internal_tester'] }, 86400);
+console.log();
+console.log('  localStorage.setItem(\"dcs_access_token\", \"' + tok + '\");');
+console.log();
+console.log('  Paste that in the browser console on the site, along with:');
+console.log('  window.DCS_API_BASE = \"http://127.0.0.1:${STAGING_PORT}\";');
+"
+
 echo "staging is up at http://127.0.0.1:${STAGING_PORT} (db: ${STAGING_DB}). Ctrl-C to stop."
 wait $SRV
