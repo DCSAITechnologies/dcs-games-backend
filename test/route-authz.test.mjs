@@ -986,7 +986,13 @@ test("CLOSED: money is dark on every surface that could report otherwise", async
 });
 
 test("CLOSED: the retired surfaces stay retired for every caller", async () => {
-  for (const [method, url] of [["GET", "/me/revenue"], ["GET", "/friends"], ["GET", "/parties"], ["GET", "/teams"], ["GET", "/studios/x"], ["GET", "/orgs/x"], ["POST", "/verify/email/start"], ["POST", "/verify/email/confirm"]]) {
+  // POST /verify/email/{start,confirm} were in this list and should never have
+  // been. They are the LIVE P2 surface (server.mts:783, 791). The legacy identity
+  // slice was answering 410 on the same path in front of them, so this test was
+  // pinning that defect rather than a retirement — see the note in
+  // src/cw1/identity-slice.mjs. Removed with the Lead's sign-off, 7 Sep 2026;
+  // test/cw1-identity.test.mjs now asserts they are reachable.
+  for (const [method, url] of [["GET", "/me/revenue"], ["GET", "/friends"], ["GET", "/parties"], ["GET", "/teams"], ["GET", "/studios/x"], ["GET", "/orgs/x"]]) {
     for (const who of CALLERS) {
       const r = await call(who, method, url, method === "POST" ? {} : undefined);
       assert.equal(r.status, 410, `${who} ${method} ${url} -> ${r.status}`);

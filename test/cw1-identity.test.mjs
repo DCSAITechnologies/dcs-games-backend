@@ -495,3 +495,160 @@ test("a retired identity route is retired on every verb, not only the one it use
       `${m} ${p} should be retired too`);
   }
 });
+
+// ==========================================================================
+// 7. A retirement notice must not sit on the path of its own replacement.
+//
+// The slice's /verify/:channel/{start,confirm} handler returned the code as
+// `_devCode` and was deleted, correctly. What was left was a 410 ON THE SAME
+// PATH, naming "/verify/:channel/start" as the replacement — the exact path it
+// was refusing. handleIdentity runs at server.mts:414 and the real P2 routes are
+// at 783 and 791, so the notice stood in front of its own replacement and the
+// replacement was never reached. Reproduced 7 Sep 2026:
+//
+//   POST /verify/email/start   -> 410 "...use POST /verify/email/{start,confirm}
+//                                 on the current service"  <- this request
+//   POST /verify/email/confirm -> 410, same
+//   DELETE /verify/email       -> 404 from the REAL service — reachable on every
+//                                 verb except the two the notice sat on
+//   GET  /verify/status        -> 200, the real service
+//
+// start and confirm are the only ways to CREATE a verification, so
+// src/core/verification.mjs was unreachable over HTTP, email_verified could
+// never become true, and computeLevel pinned every principal at `explorer`.
+// ==========================================================================
+
+test("the P2 verification routes are reachable, not shadowed by a retirement notice", async () => {
+  // With no delivery provider configured this must NOT succeed — but it must
+  // fail as the verification service, not as a retirement. The distinction is
+  // the whole defect: a 410 here is the legacy slice answering.
+  for (const p of ["/verify/email/start", "/verify/email/confirm"]) {
+    const r = await call("POST", p, { destination: "alice@dcsai.ai", code: "000000" });
+    assert.notEqual(r.status, 410, `${p} is the live P2 surface and must not answer a retirement`);
+    assert.notEqual(r.body.error, "gone", `${p} answered a retirement notice: ${JSON.stringify(r.body)}`);
+    assert.ok(!("superseded_by" in r.body), `${p} must not name a replacement — it IS the replacement`);
+  }
+});
+
+test("with no provider configured the verification service refuses as itself, and never returns a code", async () => {
+  // The honest refusal, from src/core/verification.mjs: there is no provider, so
+  // no challenge is issued. What matters is that this is the SERVICE speaking.
+  const r = await call("POST", "/verify/email/start", { destination: "alice@dcsai.ai" });
+  assert.notEqual(r.status, 200, "no provider is configured, so a challenge cannot be issued");
+  const body = JSON.stringify(r.body);
+  assert.equal(/_devCode/.test(body), false, "the defect this route was retired for must stay closed");
+  assert.equal(/"code"\s*:\s*"?\d{4,}/.test(body), false, "a verification code must never reach a client");
+
+  // The status and revoke verbs of the same service still answer, which is what
+  // made the shadow visible in the first place.
+  assert.equal((await call("GET", "/verify/status")).status, 200);
+  assert.equal((await call("DELETE", "/verify/email")).status, 404, "the real service, reporting no verification to revoke");
+});
+
+test("nothing /health advertises as LIVE may answer a retirement notice", async () => {
+  // The invariant that would have caught this without anyone looking for it. A
+  // route can legitimately answer 401, 403, 404, 422 or 503 — what it may never
+  // do is answer 410 while /health lists it as part of the live surface, because
+  // that means two handlers are fighting over one path and the dead one is
+  // winning.
+  const h = await (await fetch(BASE + "/health")).json();
+  const live = Object.entries(h.routes)
+    .filter(([group]) => group !== "retired")
+    .flatMap(([, entries]) => entries);
+  assert.ok(live.length > 20, "health should advertise a real surface, not a handful of routes");
+
+  // DEFECT, OPEN, owned by the Lead (server.mts) — reported 7 Sep 2026.
+  //
+  // This invariant found a SECOND instance of the same shape as /verify, and it
+  // is listed rather than silently skipped so that it cannot quietly grow to
+  // cover anything else.
+  //
+  // server.mts serves /auth/signup and /auth/login from Supabase at ~line 396,
+  // ahead of handleIdentity. That block is conditional on Supabase being
+  // configured. When it is not, the request falls through to this slice's
+  // legacy-auth retirement, which answers 410 with a superseded_by reading "the
+  // Supabase-backed /auth/signup and /auth/login in server.mts" — the route the
+  // caller just called. Same failure as /verify: a retirement notice standing in
+  // for an implementation that is not there.
+  //
+  // The retirement itself is right (the legacy handler took a principal id from
+  // the request body with no credential). What is missing is an honest
+  // not-configured branch in server.mts for the case where no auth provider is
+  // wired, which is that file's to add. Staging and production configure
+  // Supabase, so the live surface is correct there; this harness does not.
+  const SHADOWED_WHEN_NO_AUTH_PROVIDER = ["POST /auth/signup", "POST /auth/login"];
+
+  const checked = [];
+  const excused = [];
+  for (const entry of live) {
+    const m = entry.match(/^(GET|POST|PUT|PATCH|DELETE)\s+(\/\S*)$/);
+    if (!m) continue;
+    const [, method, template] = m;
+    // Only paths that can be driven without inventing an id. A template with a
+    // parameter would need a real object to be meaningful, and the retired-route
+    // check above already covers the parameterised legacy paths.
+    if (template.includes(":") || template.includes("*")) continue;
+    const r = await call(method, template, method === "GET" || method === "DELETE" ? undefined : {});
+    if (r.status === 410 && SHADOWED_WHEN_NO_AUTH_PROVIDER.includes(`${method} ${template}`)) {
+      // Excused ONLY in the exact state that causes it. If this harness ever
+      // gains an auth provider, or the 410 starts coming from somewhere else,
+      // the excuse stops applying and the assertion below fires.
+      assert.equal(h.persistence, "file",
+        `${method} ${template} answered 410 with an auth provider configured — that is not the known defect`);
+      assert.match(r.body.superseded_by || "", /Supabase-backed/,
+        `${method} ${template} answered a 410 that is not the known legacy-auth retirement`);
+      excused.push(`${method} ${template}`);
+      continue;
+    }
+    assert.notEqual(r.status, 410,
+      `/health advertises ${method} ${template} as live, but it answers 410 — a retired handler is shadowing it`);
+    checked.push(`${method} ${template}`);
+  }
+  assert.ok(checked.length >= 15, `expected to have probed a real slice of the surface, probed ${checked.length}`);
+  assert.ok(excused.length <= SHADOWED_WHEN_NO_AUTH_PROVIDER.length,
+    `the excuse list may not grow: ${excused.join(", ")}`);
+});
+
+test("a route advertised as both live and retired resolves in favour of live, and the stale entry is named", async () => {
+  // /health said POST /verify/:channel/start was live under `identity` AND
+  // retired under `retired`, in the same document. One of them was wrong and the
+  // wrong one was winning at runtime. Comparing the two lists literally does not
+  // catch it — the retired list writes "{start,confirm}" where the live list
+  // writes "start" — so the braces are expanded first.
+  const h = await (await fetch(BASE + "/health")).json();
+  const pathOf = (e) => (e.match(/(\/[A-Za-z0-9/_:.{},*-]+)/) || [])[1];
+  /** "/a/{x,y}" -> ["/a/x", "/a/y"] */
+  const expand = (p) => {
+    const m = p && p.match(/^(.*)\{([^}]*)\}(.*)$/);
+    return m ? m[2].split(",").map((alt) => `${m[1]}${alt.trim()}${m[3]}`) : (p ? [p] : []);
+  };
+  const live = new Set(Object.entries(h.routes)
+    .filter(([g]) => g !== "retired")
+    .flatMap(([, es]) => es.flatMap((e) => expand(pathOf(e))))
+    .filter(Boolean));
+
+  // KNOWN STALE, owned by the Lead (server.mts routes.retired) — reported
+  // 7 Sep 2026 with the fix that made these live again. The entry is a leftover
+  // from the retirement that used to shadow the real P2 routes; it is listed
+  // here rather than tolerated silently, and this test fails if the overlap
+  // grows beyond it or if the route goes back to answering 410.
+  const KNOWN_STALE = ["/verify/:channel/start", "/verify/:channel/confirm"];
+
+  const overlaps = [];
+  for (const entry of h.routes.retired || []) {
+    for (const p of expand(pathOf(entry))) {
+      if (!live.has(p)) continue;
+      overlaps.push(p);
+      assert.ok(KNOWN_STALE.includes(p),
+        `/health lists ${p} as both live and retired: "${entry}"`);
+    }
+  }
+  // Whatever is claimed by both must behave as LIVE. That is the half that
+  // matters: a stale line in a route inventory is a documentation defect; a
+  // retirement that actually answers is a dead product surface.
+  for (const p of overlaps) {
+    const probe = p.replace(":channel", "email");
+    const r = await call("POST", probe, { destination: "alice@dcsai.ai", code: "000000" });
+    assert.notEqual(r.status, 410, `${probe} is claimed by both lists and answers as RETIRED, which is the wrong one`);
+  }
+});

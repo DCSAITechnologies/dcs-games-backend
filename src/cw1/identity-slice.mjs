@@ -25,11 +25,12 @@
 // functions a row out of a seeded demo store. src/core/social.mjs calls the
 // same identity-core rules over the DURABLE profile row, which is where the
 // level and the publish allowance are now computed exactly once.
-// createVerificationStore is deliberately NOT imported any more: the only routes
-// that used it (/verify/:channel/{start,confirm}) are retired below, so the
-// module-level store it built was a third in-memory challenge store that nothing
-// could read. An unused store is one a future route can start writing to by
-// accident, which is exactly how the duplication above happened.
+// createVerificationStore is deliberately NOT imported any more: the slice's own
+// /verify/:channel/{start,confirm} handler is gone, so the module-level store it
+// built was a third in-memory challenge store that nothing could read. An unused
+// store is one a future route can start writing to by accident, which is exactly
+// how the duplication above happened. Verification now lives entirely in
+// src/core/verification.mjs, behind the routes at server.mts:783 and 791.
 
 // ---- identity store (merge into the shared mock's db, or keep namespaced) ----
 // NOTE: friends/parties/teams/studios/orgs are no longer read or written by any
@@ -85,10 +86,11 @@ export function createIdentityStore() {
 //     read back — the slice has no GET /teams/:id and server.mts has none
 //     either, so /teams was a write-only store.
 //
-// Retired the way the CW6 economy routes and the legacy /verify/:channel/*
-// routes were: 410 Gone naming the replacement, so a caller still on the old
-// path is told where to go instead of being handed a silent 404 or, worse,
-// a second set of books.
+// Retired the way the CW6 economy routes were: 410 Gone naming the replacement,
+// so a caller still on the old path is told where to go instead of being handed
+// a silent 404 or, worse, a second set of books. The replacement must live at a
+// DIFFERENT path for that to work — see the /verify note below for what happens
+// when it does not.
 // Exported so server.mts's /health `routes.retired` list can be generated from the
 // same table the guard uses. A hand-copied list drifts; this one cannot.
 export const RETIRED_SOCIAL = {
@@ -252,18 +254,40 @@ export async function handleIdentity(req, res, ctx) {
     return true;
   }
 
-  // verification (P2) → feeds level
-  // SECURITY (6 Sep 2026): this route returned the verification code in its own
-  // response body as `_devCode`. Any authenticated user could therefore verify
-  // their own address without receiving anything, and computeLevel treats
-  // email_verified as a TRUST signal that unlocks the `publisher` level and its
-  // publish credits. A verification you can grant yourself is not a
-  // verification. Both routes now refuse and point at the replacement, which
-  // never returns a code in any mode.
-  if (seg[0]==="verify"&&(seg[2]==="start"||seg[2]==="confirm")&&m==="POST") {
-    send(res,410,{ok:false,error:"gone",detail:"this endpoint returned the verification code to the caller and has been removed; use POST /verify/"+seg[1]+"/{start,confirm} on the current service",superseded_by:"/verify/:channel/start"});
-    return true;
-  }
+  // verification (P2) — the retirement notice that ATE ITS OWN REPLACEMENT.
+  //
+  // SECURITY (6 Sep 2026): this slice's /verify/:channel/{start,confirm} handler
+  // returned the verification code in its own response body as `_devCode`, so
+  // any authenticated user could verify their own address without receiving
+  // anything. That handler was deleted, correctly. What was left behind was a
+  // 410 ON THE SAME PATH, whose superseded_by named "/verify/:channel/start" —
+  // the exact path it was refusing.
+  //
+  // handleIdentity runs at server.mts:414. The REAL P2 routes are at
+  // server.mts:783 and 791, after it. So the retirement notice sat in front of
+  // its own replacement and the replacement was never reached. Reproduced
+  // 7 Sep 2026 against a booted server:
+  //
+  //   POST /verify/email/start   -> 410 "...use POST /verify/email/{start,confirm}
+  //                                 on the current service"   <- this request
+  //   POST /verify/email/confirm -> 410, same
+  //   DELETE /verify/email       -> 404 "a verified email not found"  <- the real
+  //                                 service, reachable on every verb EXCEPT the
+  //                                 two the notice sat on
+  //   GET  /verify/status        -> 200, the real service
+  //
+  // start and confirm are the only ways to CREATE a verification, so
+  // src/core/verification.mjs — a whole service with a provider seam, hashed
+  // codes, rate limits, attempt caps and destination masking — was unreachable
+  // over HTTP. email_verified could never become true; computeLevel reads it as
+  // the gate for `builder` and `publisher`, so every principal was pinned at
+  // `explorer` with one publish credit. Masked only because no delivery provider
+  // is configured today; the moment staging gets one, the route still 410s.
+  //
+  // There is nothing here to retire any more. The dangerous handler is gone, and
+  // a retirement must never occupy the path of the thing that replaced it, so
+  // this falls through to the live routes. /health's routes.identity has been
+  // advertising them as live all along.
 
   return false; // not an identity route — let the shared mock handle it
 }
