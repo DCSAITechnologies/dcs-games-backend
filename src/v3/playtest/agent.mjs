@@ -682,6 +682,17 @@ export function repair(manifest, findings) {
   m.interactions = m.interactions.filter((i) => behaviorIds.has(i.behavior_ref) && entityIds.has(i.target_ref));
   if (m.interactions.length < beforeI) applied.push({ fix: "prune_dangling_interactions", removed: beforeI - m.interactions.length });
 
+  // An NPC points at its behaviour too, and `wire_or_drop` can legitimately
+  // delete a behaviour that is genuinely defunct. `behavior_ref` is optional in
+  // the schema but must resolve when present, so the NPC gives up the reference
+  // rather than the world giving up validity. The NPC itself is untouched: the
+  // character is real, it is the wiring that went.
+  let clearedRefs = 0;
+  for (const n of m.npcs) {
+    if (n.behavior_ref && !behaviorIds.has(n.behavior_ref)) { n.behavior_ref = null; clearedRefs++; }
+  }
+  if (clearedRefs) applied.push({ fix: "clear_dangling_npc_behavior_refs", cleared: clearedRefs });
+
   const npcIds = new Set(m.npcs.map((n) => n.id));
   let prunedSteps = 0;
   const droppedQuests = [];

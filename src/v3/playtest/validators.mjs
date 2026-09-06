@@ -304,7 +304,18 @@ export function validateGameplayLoop(m) {
   }
 
   // A behaviour nothing triggers will never run.
+  //
+  // An interaction is not the only thing that drives one. `npc.behavior_ref` is
+  // an ownership edge the assembler writes deliberately (assembly.mjs attaches
+  // the behaviour to its NPC "so the runtime does not have to search"), and the
+  // NPC runs it whether or not a proximity or interact trigger also points at
+  // it. Counting only `interactions[].behavior_ref` called those behaviours
+  // orphans, `wire_or_drop` then deleted them, and every NPC in the world was
+  // left holding a `behavior_ref` to a behaviour that no longer existed — a
+  // schema BLOCKER manufactured by the repair pass itself, out of a MINOR
+  // finding, on a manifest that had been valid when it arrived.
   const used = new Set((m.interactions || []).map((i) => i.behavior_ref));
+  for (const n of m.npcs || []) if (n.behavior_ref) used.add(n.behavior_ref);
   for (const b of m.behaviors || []) {
     if (!used.has(b.id)) out.push(finding("orphan_behavior", SEVERITY.MINOR, `behaviour '${b.id}' is never triggered by anything`, { where: b.id, fix: "wire_or_drop" }));
   }

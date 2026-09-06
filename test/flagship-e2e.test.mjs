@@ -261,48 +261,72 @@ test("E2E 12-14 — the world expands as a delta, old state survives, version in
 });
 
 // --------------------------------------------------------- 15/16/17. playtest
-test("E2E 15-17 — the playtest gate passes a good world and REJECTS a broken one", async () => {
+test("E2E 15-17 — the playtest gate passes a good world, REPAIRS a recoverable one and REJECTS an empty one", async () => {
   const good = await call(`/v3/worlds/${W.id}/playtest`, { method: "POST", body: {} });
   assert.equal(good.status, 200);            // 17. a valid world passes
   assert.equal(good.body.verdict, "PASSED");
 
-  // 16. a broken world must fail. Break it through the ordinary save path.
   const m = (await call(`/v3/worlds/${W.id}/manifest`)).body.manifest;
-  const broken = structuredClone(m);
-  broken.quests[0].steps[0].target = null;                      // a dead quest
-  broken.behaviors = [];
-  broken.interactions = [];
-  const saved = await call(`/worlds/${W.id}/save`, { method: "POST", body: { manifest: broken } });
-  assert.equal(saved.status, 200);
+
+  // ---- the recoverable case: a world whose WIRING is gone ------------------
+  //
+  // This fixture used to assert a 422 here, and it got one — but for a reason
+  // that has since been fixed rather than for the reason it claimed. Stripping
+  // the behaviours left every `npc.behavior_ref` pointing at nothing, and the
+  // resulting schema BLOCKER is what failed the world; the repair pass never
+  // got to show whether it could put the wiring back. It can: the NPCs, the
+  // structures and the items are all still there, so the world is genuinely
+  // recoverable and repairing it is the CORRECT outcome. A gate that rejects a
+  // world it could have fixed is a false rejection, which is a defect in its
+  // own right.
+  const recoverable = structuredClone(m);
+  recoverable.quests[0].steps[0].target = null;     // a dead quest step
+  recoverable.behaviors = [];                       // nothing to do
+  recoverable.interactions = [];                    // nothing to touch
+  const savedRecoverable = await call(`/worlds/${W.id}/save`, { method: "POST", body: { manifest: recoverable } });
+  assert.equal(savedRecoverable.status, 200);
+
+  const fixed = await call(`/v3/worlds/${W.id}/playtest`, { method: "POST", body: {} });
+  assert.equal(fixed.status, 200, `a recoverable world must be repaired, not rejected: ${JSON.stringify(fixed.body).slice(0, 400)}`);
+  assert.equal(fixed.body.ok, true);
+  // Either passing verdict is a pass — `passed` is blocker-free AND major-free,
+  // and PASSED_WITH_NOTES simply means minor notes survived the repair. What is
+  // being asserted is that the world SHIPS, not how tidy it ended up.
+  assert.ok(["PASSED", "PASSED_WITH_NOTES"].includes(fixed.body.verdict), `verdict was ${fixed.body.verdict}`);
+  // It must have PASSED by being repaired, not by never having been broken.
+  const fixes = fixed.body.repairs.map((r) => r.fix);
+  assert.ok(fixes.includes("add_behaviors"), `the gate must have rebuilt the gameplay layer; it applied: ${fixes.join(", ")}`);
+  assert.ok(fixes.includes("drop_quest"), `the dead quest must have been removed rather than given an invented target; applied: ${fixes.join(", ")}`);
+
+  // ---- the unrepairable case: a world with no content at all --------------
+  //
+  // Broken by DESIGN rather than by omission. `UNREPAIRABLE` in the repair pass
+  // declares add_npcs and add_structures deliberate non-repairs, because
+  // fabricating characters and buildings would let a world pass the gate while
+  // staying empty. So a world stripped of its cast is one the gate must refuse
+  // and can never quietly paper over — and the assertion survives whatever
+  // repairs are added later.
+  const empty = structuredClone(m);
+  empty.npcs = []; empty.structures = []; empty.items = [];
+  empty.behaviors = []; empty.interactions = []; empty.quests = [];
+  await call(`/worlds/${W.id}/save`, { method: "POST", body: { manifest: empty } });
 
   const bad = await call(`/v3/worlds/${W.id}/playtest`, { method: "POST", body: {} });
-  assert.equal(bad.status, 422, "a broken world must NOT pass");
+  assert.equal(bad.status, 422, "a world that is nothing but landscape must NOT pass");
   assert.equal(bad.body.ok, false);
   assert.equal(bad.body.verdict, "REJECTED");
   const findings = bad.body.rounds.at(-1).findings;
   const ids = findings.map((f) => f.id);
   assert.ok(findings.some((f) => f.severity === "blocker"), `a rejected world must report a blocker: ${ids.join(", ")}`);
-  // Nulling a quest target also breaks the schema, so accept either signal —
-  // what matters is that the gate refuses, and says something actionable.
-  assert.ok(
-    ids.includes("no_gameplay") || ids.includes("quest_not_completable") || ids.includes("schema_error") || ids.includes("no_interactions"),
-    `findings: ${ids.join(", ")}`
-  );
+  assert.ok(ids.includes("no_gameplay"), `the gate must name the missing gameplay loop; saw: ${ids.join(", ")}`);
+  assert.ok(ids.includes("no_npcs") && ids.includes("no_structures"), `the gate must name what the world is missing; saw: ${ids.join(", ")}`);
 
-  // And a world broken ONLY in gameplay (schema still valid) is rejected too.
-  const noGameplay = structuredClone(m);
-  noGameplay.behaviors = [];
-  noGameplay.interactions = [];
-  await call(`/worlds/${W.id}/save`, { method: "POST", body: { manifest: noGameplay } });
-  const bad2 = await call(`/v3/worlds/${W.id}/playtest`, { method: "POST", body: {} });
-  assert.equal(bad2.status, 422, "scenery with no gameplay must not pass");
-  // Look across every round: the repair pass runs between rounds, so a finding
-  // it partially addressed appears in round 1 and not in the last one. The
-  // world is still rejected, which is what the gate is for.
-  const allFindings = bad2.body.rounds.flatMap((r) => r.findings);
-  assert.ok(allFindings.some((f) => f.id === "no_gameplay"),
-    `the gate must name the missing gameplay loop; saw: ${[...new Set(allFindings.map((f) => f.id))].join(", ")}`);
-  assert.equal(bad2.body.verdict, "REJECTED");
+  // And it must be refused as a STATED decision, not because a repair happened
+  // to be absent. This is the assertion that stops a future "helpful" repair
+  // from inventing a cast and turning this 422 into a 200.
+  const declined = bad.body.rounds.flatMap((r) => r.skipped_repairs || []).filter((s) => s.declined).map((s) => s.fix);
+  assert.ok(declined.includes("add_npcs"), `fabricating NPCs must be a declared refusal; declined: ${declined.join(", ")}`);
+  assert.ok(declined.includes("add_structures"), `fabricating structures must be a declared refusal; declined: ${declined.join(", ")}`);
 
   // Put the good world back so the remaining steps run against it.
   await call(`/worlds/${W.id}/save`, { method: "POST", body: { manifest: m } });
@@ -310,9 +334,10 @@ test("E2E 15-17 — the playtest gate passes a good world and REJECTS a broken o
   assert.equal(restored.body.verdict, "PASSED");
   record(15, "quality gate can fail", {
     good: good.body.verdict,
-    broken_schema_and_quest: bad.body.verdict,
-    broken_gameplay_only: bad2.body.verdict,
-    findings: [...new Set(allFindings.map((f) => f.id))].slice(0, 6),
+    recoverable_was_repaired: fixes,
+    empty_world: bad.body.verdict,
+    declined_repairs: declined,
+    findings: [...new Set(ids)].slice(0, 6),
   });
 });
 

@@ -842,3 +842,84 @@ test("B4: link_zone does not pile up duplicate links round after round", () => {
   assert.equal(second.manifest.navigation.links.length, 1, "a second pass must not append the same link again");
   assert.match(second.skipped.find((s) => s.fix === "link_zone").why, /already reachable/);
 });
+
+// ------------------------------------------- the behaviour an NPC owns is not an orphan
+
+test("B4 GATE: a behaviour its NPC drives is not reported as an orphan", async () => {
+  // `orphan_behavior` counted only `interactions[].behavior_ref`. But the
+  // assembler also attaches a behaviour directly to its NPC — assembly.mjs
+  // writes `npc.behavior_ref` "so the runtime does not have to search" — and
+  // the NPC runs it with or without a trigger pointing at it. Under the narrow
+  // definition, dropping the interactions turned every NPC behaviour in the
+  // world into an orphan.
+  const m = await goodWorld("Orphan Probe", "w_orphan");
+  const owner = m.npcs.find((n) => n.behavior_ref);
+  assert.ok(owner, "the assembler is expected to attach a behaviour to at least one NPC");
+
+  m.interactions = [];
+  const orphans = validateGameplayLoop(m).filter((f) => f.id === "orphan_behavior").map((f) => f.where);
+  assert.ok(!orphans.includes(owner.behavior_ref),
+    `'${owner.behavior_ref}' is driven by NPC '${owner.id}', so nothing may call it untriggered`);
+});
+
+test("B4 GATE: dropping behaviours never leaves an NPC pointing at one that is gone", async () => {
+  // The failure this closes: a MINOR finding (`orphan_behavior`) was escalated
+  // by the repair pass into a schema BLOCKER. `wire_or_drop` deleted the
+  // behaviour, `npc.behavior_ref` was left naming it, and validateManifest then
+  // rejected a manifest that had been perfectly valid when it arrived. A 300-
+  // trial damage sweep hit it twelve times, always through the same door:
+  // clear the interactions and every NPC behaviour looks unused.
+  const m = await goodWorld("Drop Probe", "w_drop");
+  const owner = m.npcs.find((n) => n.behavior_ref);
+  assert.ok(owner, "the assembler is expected to attach a behaviour to at least one NPC");
+  assert.ok(validateManifest(m).ok, "the probe world must start valid or it proves nothing");
+
+  // Ask for the drop directly, so the test holds even if the validator stops
+  // raising the finding for this shape.
+  const r = repair(m, [{ id: "orphan_behavior", severity: "minor", where: owner.behavior_ref, fix: "wire_or_drop" }]);
+  const v = validateManifest(r.manifest);
+  assert.ok(v.ok, `repair turned a valid world invalid: ${JSON.stringify((v.errors || []).slice(0, 3))}`);
+
+  const after = r.manifest.npcs.find((n) => n.id === owner.id);
+  const ids = new Set(r.manifest.behaviors.map((b) => b.id));
+  assert.ok(!after.behavior_ref || ids.has(after.behavior_ref),
+    "an NPC may hold no behaviour, but never a reference to one that does not exist");
+});
+
+test("B4 GATE: a valid world stays valid through a full repair pass, however it is damaged", async () => {
+  // A property, not a case. The single sharpest invariant the repair pass has:
+  // whatever it does to a world that arrived schema-valid, the world it hands
+  // back is still schema-valid. Anything else converts a finding the gate could
+  // report into a hard generation failure somewhere downstream.
+  const damages = [
+    ["interactions cleared", (m) => { m.interactions = []; }],
+    ["behaviours cleared", (m) => { m.behaviors = []; }],
+    ["quests cleared", (m) => { m.quests = []; }],
+    ["navigation links cleared", (m) => { m.navigation.links = []; }],
+    ["spawn removed", (m) => { m.spawn.player_spawns = []; }],
+    ["spawn out of bounds", (m) => { const p = m.spawn.player_spawns[0].position; p.x = m.terrain.size.w + 500; p.z = -400; }],
+    ["structures floated", (m) => { for (const s of m.structures) s.transform.position.y += 40; }],
+    ["structures stacked", (m) => { if (m.structures.length > 1) m.structures[1].transform.position = { ...m.structures[0].transform.position }; }],
+    ["collision stripped", (m) => { for (const a of m.assets) delete a.collision; }],
+    ["every NPC muted", (m) => { for (const n of m.npcs) n.dialogue = { seed: "", lines: [] }; }],
+    ["an NPC placed in no zone", (m) => { if (m.npcs.length) m.npcs[0].zone = null; }],
+    ["a zone starved of walkable ground", (m) => { m.navigation.walkable_zones = [{ zone: m.zones[0].id, walkable_fraction: 0.02 }]; }],
+    ["a pickup for an item nobody has", (m) => { m.behaviors.push({ id: "behavior_pickup_ghost", kind: "pickup", spec: { item: "ghost_item" } }); }],
+    ["a door locked by a key nobody has", (m) => { m.behaviors.push({ id: "behavior_door_ghost", kind: "door", spec: { locked_by: "ghost_key" } }); }],
+  ];
+
+  const failures = [];
+  for (const prompt of ["Ashfall Harbour, a rainy nordic port town", "a neon cyberpunk megacity", "a lush jungle temple complex"]) {
+    const base = await goodWorld(prompt, "w_prop");
+    assert.ok(validateManifest(base).ok, `${prompt} did not assemble into a valid world`);
+    for (const [label, damage] of damages) {
+      const m = structuredClone(base);
+      damage(m);
+      if (!validateManifest(m).ok) continue;   // the damage itself broke the schema; not this invariant's business
+      const out = await playtestAndRepair(m);
+      const v = validateManifest(out.manifest);
+      if (!v.ok) failures.push(`${prompt} / ${label}: ${(v.errors || []).slice(0, 2).map((e) => `${e.path} ${e.message}`).join("; ")}`);
+    }
+  }
+  assert.deepEqual(failures, [], `repair produced a manifest the schema rejects:\n  ${failures.join("\n  ")}`);
+});
