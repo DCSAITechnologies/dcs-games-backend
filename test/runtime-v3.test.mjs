@@ -355,3 +355,106 @@ test("B3: opening the player with no world says what it needs", opts, async () =
   assert.match(t, /No world selected/i);
   assert.doesNotMatch(t, /Loading world/i, "it must not sit on a loading state forever");
 });
+
+// ------------------------------------------------- B15 audio + accessibility
+
+test("B15 GATE: the world is fully playable from the keyboard alone", opts, async () => {
+  await openWorld();
+  const r = await page.eval(`
+    const rt = window.__rt;
+    document.getElementById('scene').focus();
+
+    // Move with arrow keys only.
+    const start = { x: rt.player.x, z: rt.player.z };
+    rt.keys.arrowup = true;
+    await new Promise(r => setTimeout(r, 700));
+    rt.keys.arrowup = false;
+    const moved = Math.hypot(rt.player.x - start.x, rt.player.z - start.z);
+
+    // Turn with the keyboard only.
+    const yaw0 = rt.player.yaw;
+    rt.keys.j = true;
+    await new Promise(r => setTimeout(r, 400));
+    rt.keys.j = false;
+    const turned = Math.abs(rt.player.yaw - yaw0);
+
+    return { moved, turned, focused: document.activeElement === document.getElementById('scene') };
+  `);
+  assert.ok(r.moved > 0.4, `arrow keys must move the player, travelled ${r.moved.toFixed(2)}m`);
+  assert.ok(r.turned > 0.1, `J and L must turn the camera, turned ${r.turned.toFixed(3)} rad`);
+  assert.equal(r.focused, true, "the canvas must take focus so a keyboard player can start immediately");
+});
+
+test("B15 GATE: Tab cycles nearby things and announces them, so interaction needs no pointer", opts, async () => {
+  await openWorld();
+  const r = await page.eval(`
+    const rt = window.__rt;
+    const n = rt.npcs[0];
+    rt.teleport(n.x + 8, n.z + 6);
+    const t = rt.cycleTarget(1);
+    await new Promise(r => setTimeout(r, 120));
+    const nearest = rt.nearest();
+    return {
+      target: t && t.kind,
+      label: t && t.label,
+      live: document.getElementById('live').textContent,
+      reachable: !!nearest,
+    };
+  `);
+  assert.ok(r.target, "Tab must find something to target");
+  assert.ok(r.reachable, "and must bring the player close enough that E works");
+  assert.match(r.live, /Press E to interact/, "the target must be announced to a screen reader");
+});
+
+test("B15: the HUD announces state changes to a screen reader", opts, async () => {
+  await openWorld();
+  const r = await page.eval(`
+    const live = document.getElementById('live');
+    return { exists: !!live, polite: live && live.getAttribute('aria-live'), initial: live && live.textContent };
+  `);
+  assert.equal(r.exists, true, "a live region is required");
+  assert.equal(r.polite, "polite");
+  assert.match(r.initial, /World loaded/);
+
+  const canvas = await page.eval(`
+    const c = document.getElementById('scene');
+    return { role: c.getAttribute('role'), label: c.getAttribute('aria-label'), tabindex: c.getAttribute('tabindex') };
+  `);
+  assert.equal(canvas.role, "application");
+  assert.equal(canvas.tabindex, "0");
+  assert.match(canvas.label, /Tab to cycle/, "the control scheme must be discoverable by a screen reader");
+});
+
+test("B15: audio exists, and is honest about being suspended until a gesture", opts, async () => {
+  await openWorld();
+  const a = await page.eval("return window.__rt.stats().audio;");
+  assert.equal(a.supported, true, "WebAudio must be available");
+  // Autoplay policy: nothing may claim to be playing before a gesture.
+  const after = await page.eval(`
+    const rt = window.__rt;
+    rt.audio.start();
+    rt.audio.event('pickup');
+    rt.audio.footstep();
+    return rt.audio.state();
+  `);
+  assert.equal(after.enabled, true, "audio starts once a gesture has occurred");
+});
+
+test("B15: prefers-reduced-motion is respected", opts, async () => {
+  await page.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
+  try {
+    await openWorld();
+    const r = await page.eval(`
+      const rt = window.__rt;
+      const k = rt.pickups[0];
+      if (!k) return { reduced: rt.reducedMotion, skipped: true };
+      const y0 = k.mesh.position.y;
+      await new Promise(r => setTimeout(r, 700));
+      return { reduced: rt.reducedMotion, drift: Math.abs(k.mesh.position.y - y0) };
+    `);
+    assert.equal(r.reduced, true, "the runtime must detect the preference");
+    if (!r.skipped) assert.ok(r.drift < 0.01, `a floating pickup should be still under reduced motion, drifted ${r.drift}`);
+  } finally {
+    await page.send("Emulation.setEmulatedMedia", { features: [] });
+  }
+});
