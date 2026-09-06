@@ -124,7 +124,25 @@ test("A1/doctrine: builder surfaces refuse a non-tester with 403 and name the wi
 // ------------------------------------------------------- A3 gate + A4 honesty
 let generatedId;
 
+test("A5: creation is refused until an age tier permits it", async () => {
+  const r = await req("/worlds/generate", { method: "POST", headers: json(ALICE), body: JSON.stringify({ prompt: "x" }) });
+  const b = await r.json();
+  assert.equal(r.status, 403, "an unknown age tier must not be able to create");
+  assert.equal(b.meta?.required_action, "record an age assurance");
+});
+
+test("A5: an under-13 age assurance is recorded honestly and refused", async () => {
+  const r = await req("/safety/age", { method: "POST", headers: json(MALLORY_TESTER), body: JSON.stringify({ date_of_birth: "2020-01-01", method: "synthetic_test" }) });
+  const b = await r.json();
+  assert.equal(r.status, 403);
+  assert.equal(b.age_tier, "under13");
+  assert.equal(b.onboarding_permitted, false);
+  assert.ok(!("date_of_birth" in b), "the raw date of birth is never returned");
+});
+
 test("A3: an internal tester can generate a world and it is stamped with a real owner", async () => {
+  const age = await req("/safety/age", { method: "POST", headers: json(ALICE), body: JSON.stringify({ date_of_birth: "1990-04-04" }) });
+  assert.equal((await age.json()).age_tier, "adult");
   const r = await req("/worlds/generate", { method: "POST", headers: json(ALICE), body: JSON.stringify({ prompt: "Ashfall Harbour, a rainy nordic port" }) });
   const b = await r.json();
   assert.equal(r.status, 200, JSON.stringify(b));
@@ -213,4 +231,50 @@ test("payments stay dark: revenue is zero and flagged, never fabricated", async 
   assert.equal(b.total_minor, 0);
   assert.deepEqual(b.payouts, []);
   assert.equal(b.dark, true);
+});
+
+// ---------------------------------------------------------------- A5 surface
+test("A5: reporting requires authentication and persists", async () => {
+  assert.equal((await req("/safety/report", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ subject_type: "world", subject_id: "w", reason: "spam" }) })).status, 401);
+  const r = await req("/safety/report", { method: "POST", headers: json(ALICE), body: JSON.stringify({ subject_type: "world", subject_id: generatedId, reason: "harassment" }) });
+  const b = await r.json();
+  assert.equal(r.status, 201);
+  assert.equal(b.status, "open");
+});
+
+test("A5 GATE: a child-safety report escalates immediately", async () => {
+  const b = await (await req("/safety/report", { method: "POST", headers: json(ALICE), body: JSON.stringify({ subject_type: "user", subject_id: "u-suspect", reason: "grooming" }) })).json();
+  assert.equal(b.escalated, true);
+});
+
+test("A5: the moderation queue is staff-only, but the moderation LOG is public and honest", async () => {
+  assert.equal((await req("/safety/reports", { headers: json(MALLORY) })).status, 403);
+  const pub = await req("/safety/moderation-history");
+  const b = await pub.json();
+  assert.equal(pub.status, 200);
+  assert.equal(b.automated_moderation, false, "the API must not claim moderation it does not perform");
+  assert.equal(b.count, 0, "no moderation decision has been taken, and the log says so");
+});
+
+test("A5 GATE: voice generation consent is required and recorded", async () => {
+  const r = await req("/safety/consent/media", { method: "POST", headers: json(ALICE), body: JSON.stringify({ media_kind: "voice", source: "founder", evidence_ref: "signed-2026-09-06" }) });
+  assert.equal(r.status, 201);
+  const list = await (await req("/safety/consent/media", { headers: json(ALICE) })).json();
+  assert.equal(list.consents.length, 1);
+  assert.equal(list.consents[0].source, "founder");
+  const bad = await req("/safety/consent/media", { method: "POST", headers: json(ALICE), body: JSON.stringify({ media_kind: "voice", source: "scraped_from_the_internet" }) });
+  assert.equal(bad.status, 422, "an unrecognised consent source must be refused");
+});
+
+test("A5: blocking round-trips", async () => {
+  await req("/safety/block", { method: "POST", headers: json(ALICE), body: JSON.stringify({ blocked_id: "user-mallory" }) });
+  const b = await (await req("/safety/blocks", { headers: json(ALICE) })).json();
+  assert.deepEqual(b.blocked, ["user-mallory"]);
+});
+
+test("health advertises the safety posture truthfully", async () => {
+  const b = await (await req("/health")).json();
+  assert.equal(b.safety.minor_onboarding_enabled, false);
+  assert.equal(b.safety.automated_content_moderation, false);
+  assert.equal(b.internal_testing_window_ends, "2026-09-30");
 });

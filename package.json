@@ -3,12 +3,20 @@
   "version": "3.1.0",
   "private": true,
   "type": "module",
-  "description": "DCS Games Core API — CW1 identity + CW2 generation + CW5 persistence + CW7 atlas + V3 world stack. Money DARK.",
+  "description": "DCS Games Core API \u2014 CW1 identity + CW2 generation + CW5 persistence + CW7 atlas + V3 world stack. Money DARK.",
   "scripts": {
     "start": "tsx server.mts",
     "dev": "tsx server.mts",
-    "test": "node --import tsx --test test/*.test.mjs",
-    "test:unit": "node --test test/auth-principal.test.mjs test/world-persistence.test.mjs"
+    "test": "npm run test:unit && npm run test:api && npm run test:browser",
+    "test:unit": "node --test test/auth-principal.test.mjs test/world-persistence.test.mjs test/safety.test.mjs test/schema-migrations.test.mjs",
+    "test:api": "node --import tsx --test test/api-integration.test.mjs",
+    "test:browser": "node --test --test-concurrency=1 test/frontend-truth.test.mjs",
+    "test:ci": "npm run test:unit && npm run test:api",
+    "smoke": "node scripts/smoke.mjs",
+    "migrate": "node scripts/migrate.mjs",
+    "staging": "./scripts/staging.sh",
+    "secret-scan": "node scripts/secret-scan.mjs . ../../dcs-games-LIVE",
+    "release-manifest": "node scripts/release-manifest.mjs"
   },
   "dependencies": {
     "tsx": "^4.22.4"

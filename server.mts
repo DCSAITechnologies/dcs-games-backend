@@ -18,6 +18,7 @@ import { makeKeyEndpoint } from "./src/cw7/atlas-key.mjs";       // CW7: GET /at
 import { atlasReady, verifyReceipt, atlasPublicKeyBase64, issueWorldReceipt } from "./src/cw7/atlas-local-sign.mjs"; // CW7: local ed25519 sign+verify (off-chain, no gas)
 import { makeCrossProductRouter } from "./src/cw7/atlas-cross-product.mjs"; // CW7 v4.0: cross-product reputation (node-http routeTable)
 import { createEconomyRouter } from "./src/cw6/economy-router.mjs";          // CW6 v3.0: economy routes (DARK), non-express fallback router
+import { createSafetyService } from "./src/core/safety.mjs";                    // A5: age tiers, consent, report/block, moderation audit
 import { assertSchema, currentVersion } from "./src/core/schema.mjs";           // A2: boot-time schema assertion — refuse to serve an unsupported schema
 import { createWorldRepository } from "./src/core/worldstore.mjs";          // A3: durable, lossless, idempotent, ownership-aware world persistence
 import { createPrincipalResolver } from "./src/core/principal.mjs";         // A1: PARENT-OWNED canonical principal. No x-user-id fallback, ever.
@@ -43,6 +44,7 @@ const idb = createIdentityStore();
 const atlas = makeAtlasRoutes({ worlds: [], events: [], receipts: [], verifiedWorldIds: [] }); // CW7 read surface; world truth now comes from the durable repository
 const crossProduct = makeCrossProductRouter({ resolveProductIdentities: (_id: string) => [] }); // CW7 v4.0: Sports identity wired later; honest empty until then
 const econRouter: any = createEconomyRouter({}); // CW6 v3.0: DARK; supabase + signReceipt injected later → honest empty + unsigned receipts, no fabricated sales
+const safety = createSafetyService();                                        // A5: real persistence, so moderation output can never be faked
 const repo = createWorldRepository();                                        // A3: replaces the process-local Map + swallowed best-effort insert
 console.log("A3 world store:", repo.kind);
 
@@ -127,7 +129,8 @@ const server = http.createServer(async (req, res) => {
       generation: GEN_MODE,
       lanes: ["cw1-identity", "cw2-generation", "cw5-persistence", "cw7-atlas"],
       schema: "runtime-ready (cw2 toRuntimeWorld; zero runtime patches)",
-      routes: ["/api/public/worlds", "/api/worlds/mine", "/api/me/revenue", "/worlds/generate", "/worlds/:id/manifest", "/atlas/key", "/verify"],
+      routes: ["/api/public/worlds", "/api/worlds/mine", "/api/me/revenue", "/worlds/generate", "/worlds/:id/manifest", "/atlas/key", "/verify", "/safety/age", "/safety/report", "/safety/block", "/safety/consent/media"],
+      safety: { age_gating: true, report_block: true, parental_consent: true, media_consent: true, automated_content_moderation: false, minor_onboarding_enabled: false },
       netcode: "ws-separate-service", ts: new Date().toISOString(),
     });
 
@@ -209,8 +212,79 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    // ---- A5 safety surface (ENGINEERING_COMPLETE + INTERNAL_ONLY) ----------
+    if (url === "/safety/age" && method === "GET") {
+      const me = await mustBe(req, cid);
+      return send(res, 200, { ok: true, ...(await safety.ageStatus(me.id)) });
+    }
+    if (url === "/safety/age" && method === "POST") {
+      const me = await mustBe(req, cid);
+      const b = await readBody(req);
+      const st = await safety.recordAge(me.id, { dateOfBirth: b.date_of_birth, method: b.method || "self_declared" });
+      // Under-13 is recorded and then refused: the tier is honest, and access is not granted.
+      return send(res, st.onboarding_permitted ? 200 : 403, { ok: st.onboarding_permitted, ...st, correlation_id: cid });
+    }
+    if (url === "/safety/report" && method === "POST") {
+      const me = await mustBe(req, cid);
+      const b = await readBody(req);
+      const r = await safety.report(me.id, { subjectType: b.subject_type, subjectId: b.subject_id, reason: b.reason, detail: b.detail });
+      return send(res, 201, { ok: true, report_id: r.id, status: r.status, escalated: r.escalated, correlation_id: cid });
+    }
+    if (url === "/safety/reports" && method === "GET") {
+      await mustBeInternalTester(req, cid);              // moderation queue is staff-only
+      const rows = await safety.listReports({});
+      return send(res, 200, { ok: true, count: rows.length, reports: rows });
+    }
+    {
+      const mm = url.match(/^\/safety\/reports\/([^/]+)\/moderate$/);
+      if (mm && method === "POST") {
+        const me = await mustBeInternalTester(req, cid);
+        const b = await readBody(req);
+        const r = await safety.moderate(mm[1], b.action, me.id);
+        return send(res, 200, { ok: true, report: r, correlation_id: cid });
+      }
+    }
+    if (url === "/safety/moderation-history" && method === "GET") {
+      // Deliberately public: an empty list is an honest "nothing was moderated",
+      // and the UI must be able to prove that rather than imply activity.
+      const q = new URLSearchParams((req.url || "").split("?")[1] || "");
+      const rows = await safety.moderationHistory(q.get("subject_type"), q.get("subject_id"));
+      return send(res, 200, { ok: true, count: rows.length, actions: rows, automated_moderation: false, note: "DCS Games runs no automated content moderation; this log contains human decisions only." });
+    }
+    if (url === "/safety/block" && method === "POST") {
+      const me = await mustBe(req, cid);
+      const b = await readBody(req);
+      return send(res, 200, { ok: true, ...(await safety.block(me.id, b.blocked_id)) });
+    }
+    if (url === "/safety/block" && method === "DELETE") {
+      const me = await mustBe(req, cid);
+      const b = await readBody(req);
+      return send(res, 200, { ok: true, ...(await safety.unblock(me.id, b.blocked_id)) });
+    }
+    if (url === "/safety/blocks" && method === "GET") {
+      const me = await mustBe(req, cid);
+      return send(res, 200, { ok: true, blocked: await safety.blockList(me.id) });
+    }
+    if (url === "/safety/consent/parental" && method === "POST") {
+      const me = await mustBe(req, cid);
+      const b = await readBody(req);
+      const r = await safety.requestParentalConsent(b.minor_id || me.id, { guardianEmail: b.guardian_email, scope: b.scope || [], isSynthetic: b.is_synthetic !== false });
+      return send(res, 201, { ok: true, consent: r, correlation_id: cid });
+    }
+    if (url === "/safety/consent/media" && method === "POST") {
+      const me = await mustBe(req, cid);
+      const b = await readBody(req);
+      const r = await safety.grantMediaConsent(b.subject_id || me.id, { mediaKind: b.media_kind, source: b.source, evidenceRef: b.evidence_ref });
+      return send(res, 201, { ok: true, consent: r, correlation_id: cid });
+    }
+    if (url === "/safety/consent/media" && method === "GET") {
+      const me = await mustBe(req, cid);
+      return send(res, 200, { ok: true, consents: await safety.mediaConsents(me.id) });
+    }
+
     if (url === "/worlds/generate" && method === "POST") {
       const me = await mustBeInternalTester(req, cid);        // creation is a builder surface: internal testers only until 30 Sep 2026
+      await safety.requireCapability(me.id, "create");        // A5: age tier must permit creation
       const b = await readBody(req);
       const world = await generateVia(b.prompt || "Pirate Island"); // adapter seam: Cerebras hybrid when keyed, else seeder (always C1-valid)
       // A4: signing is genuinely optional, but a failure is now logged and reported,

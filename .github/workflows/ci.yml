@@ -1,0 +1,122 @@
+# A7 — the first real CI for DCS Games. Round-2 found zero automated tests and no
+# pipeline. Every job below is an exit gate from the Phase 1 survival foundation;
+# a red job means a defect the audit already found has come back.
+name: DCS Games CI
+
+on:
+  push:
+    branches: [sprint/2026-09-canonical, main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  PAYMENTS_LIVE: "0"
+  NODE_ENV: test
+
+jobs:
+  security:
+    name: Security gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      - run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+
+      - name: Secret scan
+        run: node scripts/secret-scan.mjs .
+
+      - name: Dependency audit
+        run: npm audit --audit-level=high
+
+      - name: Auth regression suite (the x-user-id impersonation must stay dead)
+        run: node --test test/auth-principal.test.mjs
+
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      - run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+      - name: Persistence, safety and auth
+        run: npm run test:unit
+
+  schema:
+    name: Schema is reproducible
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+        ports: ["5432:5432"]
+    env:
+      DCS_PG_ADMIN_DSN: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      - run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+      - name: Build staging schema from migrations only, then prove restore
+        run: node --test test/schema-migrations.test.mjs
+
+  api:
+    name: API integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      - run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+      - name: Boot the real server and exercise the Phase 1 gates
+        run: npm run test:api
+
+      - name: Post-deploy smoke against the freshly booted service
+        run: |
+          DCS_AUTH_SECRET=ci-secret DCS_DATA_DIR="$RUNNER_TEMP/dcs" PORT=8099 node --import tsx server.mts &
+          for i in $(seq 1 60); do curl -sf http://127.0.0.1:8099/health >/dev/null && break; sleep 1; done
+          node scripts/smoke.mjs http://127.0.0.1:8099
+
+  frontend:
+    name: Frontend truth gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      - name: Check out the canonical frontend alongside the backend
+        uses: actions/checkout@v4
+        with:
+          repository: DCSAITechnologies/dcs-games-frontend
+          path: ../dcs-games-LIVE
+        continue-on-error: true
+      - name: Diligence crawl — no fabricated public claim may reappear
+        run: |
+          if [ -f ../dcs-games-LIVE/tools/diligence-crawl.mjs ]; then
+            cd ../dcs-games-LIVE && node tools/diligence-crawl.mjs
+          else
+            echo "frontend repo not reachable from CI yet; run tools/diligence-crawl.mjs in the frontend pipeline"
+          fi
+
+  release:
+    name: Release manifest
+    runs-on: ubuntu-latest
+    needs: [security, unit, schema, api]
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      - run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+      - run: node scripts/release-manifest.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-manifest
+          path: ../../DCS_GAMES_SPRINT_SEP2026/RELEASE_MANIFEST.json
+        continue-on-error: true
