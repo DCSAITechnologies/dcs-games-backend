@@ -1076,11 +1076,19 @@ test("CLOSED: /health advertises the surface and every advertised route answers 
   const missing = [];
   for (const entry of advertised) {
     const [method, tmpl] = entry.split(" ");
+    // Every placeholder must be substituted, or the probe tests the router's
+    // handling of a literal ":n" rather than the route. `:n` is a VERSION
+    // NUMBER and the router matches it with (\d+), so leaving it literal made a
+    // route that exists (server.mts, /v3/worlds/:id/versions/(\d+)) look like
+    // drift. `\b` stops `/:n` from eating the `:n` inside `/:npc`.
     const url = tmpl
       .replace("/:id/", `/${F.pubWorld}/`)
       .replace(/\/:id$/, `/${F.pubWorld}`)
       .replace("/:username", "/owner")
-      .replace("/:channel/", "/email/");
+      .replace("/:channel/", "/email/")
+      .replace(/\/:npc\b/, "/npc_any")
+      .replace(/\/:n\b/, "/1");
+    assert.doesNotMatch(url, /\/:/, `the drift probe left a placeholder unsubstituted in ${tmpl}`);
     const r = await call("OWNER", method, url, method === "GET" ? undefined : {});
     // Any answer but "the router has no such route" proves the advertisement is real.
     if (r.status === 404 && r.body?.path) missing.push(`${entry} -> router 404 at ${r.body.path}`);
