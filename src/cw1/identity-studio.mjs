@@ -17,6 +17,18 @@ export function can(role, capability) {
  * validateSplit — revenue-split config across collaborators (M-P6).
  * splits: [{ user_id, pct }]. Must sum to exactly 100, each 0<pct<=100, owner present.
  * Returns {valid, reason, normalized?}.
+ *
+ * NOT THE LIVE RULE. The deployed split is src/core/social.mjs setStudioSplit,
+ * which works in basis points over [{ member_id, split_bps }] and persists to
+ * the durable studio_members rows. This percentage form governs only the two
+ * CW1 entrypoints that import it — src/cw1/service.mjs and the development
+ * fixture src/cw1/mock-server.mjs — neither of which is the deployed server.
+ *
+ * The two are kept in step on the checks that matter, and this one is where the
+ * duplicate-member and per-share range rules were already written down: the
+ * live path was missing both, and a body of [{a,6000},{a,4000}] was accepted
+ * there and persisted as a 40% split. If you change a rule here, change it
+ * there; if you delete an entrypoint, delete this with it.
  */
 export function validateSplit(splits, ownerId) {
   if (!Array.isArray(splits) || splits.length === 0)

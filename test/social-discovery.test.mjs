@@ -999,3 +999,138 @@ test("R4: a revoked role cannot be used, and the check is re-taken inside the at
   assert.ok(!after2.members.some((m) => m.member_id === "u2"), "the admin was removed");
   assert.equal(new Set(after2.members.map((m) => m.member_id)).size, after2.members.length, "no duplicate members either way");
 });
+
+// =====================================================================
+// A split that totals 100% on the way in, and does not on the way out.
+//
+// setStudioSplit checked the total over the array it was handed and then wrote
+// through a Map keyed on member_id, so the last entry for a member won and the
+// earlier one was discarded AFTER the total had been checked. It also checked
+// no share individually. Reproduced 7 Sep 2026 against the running server, all
+// three answered 200 and all three persisted:
+//
+//   POST /social/studios/:id/split
+//     [{user-a,6000},{user-a,4000}]  -> 200, persisted a:4000 b:0 — TOTAL 4000
+//     [{user-a,20000},{user-b,-10000}] -> 200, a holds 200%, b holds -100%
+//     [{user-a,5000.5},{user-b,4999.5}] -> 200, fractional basis points
+//
+// This method takes a per-studio lock so that validate-and-write is one step;
+// the invariant was still breakable by a single well-formed request.
+// =====================================================================
+
+/** A studio owned by u1 with u2 and u3 as members. */
+async function studioOfThree(s) {
+  const st = await s.createStudio("u1", "Split Studio");
+  await s.addStudioMember("u1", st.id, "u2");
+  await s.addStudioMember("u1", st.id, "u3");
+  return st;
+}
+const totalBps = (studio) => studio.members.reduce((a, m) => a + Number(m.split_bps || 0), 0);
+
+test("a member named twice is refused, rather than silently collapsing the split", async () => {
+  const s = svc();
+  const st = await studioOfThree(s);
+  await s.setStudioSplit("u1", st.id, [{ member_id: "u1", split_bps: 5000 }, { member_id: "u2", split_bps: 5000 }]);
+
+  await assert.rejects(
+    () => s.setStudioSplit("u1", st.id, [{ member_id: "u1", split_bps: 6000 }, { member_id: "u1", split_bps: 4000 }]),
+    (e) => e.httpStatus === 422 && /appears more than once/.test(e.detail),
+  );
+
+  // The refusal must leave the previous, valid split exactly as it was — this
+  // used to answer 200 and persist a total of 4000.
+  const after = await s.getStudio(st.id, "u1");
+  assert.equal(totalBps(after), 10000, "a refused split must not have been half-written");
+  assert.equal(after.members.find((m) => m.member_id === "u1").split_bps, 5000);
+  assert.equal(after.members.find((m) => m.member_id === "u2").split_bps, 5000);
+});
+
+test("no share may be negative or exceed the whole", async () => {
+  const s = svc();
+  const st = await studioOfThree(s);
+  const before = totalBps(await s.getStudio(st.id, "u1"));
+  for (const splits of [
+    [{ member_id: "u1", split_bps: 20000 }, { member_id: "u2", split_bps: -10000 }],
+    [{ member_id: "u1", split_bps: -1 }, { member_id: "u2", split_bps: 10001 }],
+  ]) {
+    await assert.rejects(
+      () => s.setStudioSplit("u1", st.id, splits),
+      (e) => e.httpStatus === 422 && /between 0 and 10000/.test(e.detail),
+      `${JSON.stringify(splits)} must be refused even though it totals 10000`,
+    );
+  }
+  assert.equal(totalBps(await s.getStudio(st.id, "u1")), before, "nothing was written");
+});
+
+test("a basis point is the unit, so a fraction of one is not a share", async () => {
+  const s = svc();
+  const st = await studioOfThree(s);
+  await assert.rejects(
+    () => s.setStudioSplit("u1", st.id, [{ member_id: "u1", split_bps: 5000.5 }, { member_id: "u2", split_bps: 4999.5 }]),
+    (e) => e.httpStatus === 422 && /whole number of basis points/.test(e.detail),
+  );
+  await assert.rejects(
+    () => s.setStudioSplit("u1", st.id, [{ member_id: "u1", split_bps: "5000" }, { member_id: "u2", split_bps: null }]),
+    (e) => e.httpStatus === 422,
+    "a string or a null is not a basis point either",
+  );
+});
+
+test("a split refused for any reason leaves the stored split untouched", async () => {
+  // Each refusal is driven against a studio that already holds a VALID split,
+  // so a partial write shows up as a total that is no longer 10000.
+  const s = svc();
+  const st = await studioOfThree(s);
+  const good = [{ member_id: "u1", split_bps: 4000 }, { member_id: "u2", split_bps: 3000 }, { member_id: "u3", split_bps: 3000 }];
+  await s.setStudioSplit("u1", st.id, good);
+
+  const bad = [
+    [{ member_id: "u1", split_bps: 6000 }, { member_id: "u1", split_bps: 4000 }],   // duplicate
+    [{ member_id: "u1", split_bps: 20000 }, { member_id: "u2", split_bps: -10000 }], // out of range
+    [{ member_id: "u1", split_bps: 5000.5 }, { member_id: "u2", split_bps: 4999.5 }],// fractional
+    [{ member_id: "u1", split_bps: 5000 }],                                          // does not total
+    [{ member_id: "u1", split_bps: 5000 }, { member_id: "stranger", split_bps: 5000 }], // not a member
+    [],                                                                              // empty
+  ];
+  for (const splits of bad) {
+    await assert.rejects(() => s.setStudioSplit("u1", st.id, splits), (e) => e.httpStatus === 422);
+    const after = await s.getStudio(st.id, "u1");
+    assert.equal(totalBps(after), 10000, `${JSON.stringify(splits)} left the studio at ${totalBps(after)}`);
+    assert.deepEqual(
+      after.members.map((m) => [m.member_id, m.split_bps]).sort(),
+      [["u1", 4000], ["u2", 3000], ["u3", 3000]].sort(),
+    );
+  }
+});
+
+test("a body shaped for the OTHER split validator is told which shape this one takes", async () => {
+  // src/cw1/identity-studio.mjs validateSplit takes [{ user_id, pct }] and
+  // totals to 100. Sent here, every split_bps read as absent, so the refusal
+  // said "got 0" for a body that plainly named 100% — a message that sends the
+  // reader looking in the wrong place entirely.
+  const s = svc();
+  const st = await studioOfThree(s);
+  await assert.rejects(
+    () => s.setStudioSplit("u1", st.id, [{ user_id: "u1", pct: 50 }, { user_id: "u2", pct: 50 }]),
+    (e) => e.httpStatus === 422
+      && /split_bps/.test(e.detail)
+      && e.meta.expected_shape === "[{ member_id, split_bps }]"
+      && e.meta.received_keys.includes("pct")
+      && e.meta.received_keys.includes("user_id")
+      && e.meta.got_total_bps === 0,
+    "the refusal must name the shape it wanted and the keys it was given",
+  );
+});
+
+test("a valid split still applies, and still zeroes anyone left out", async () => {
+  // The control. If this stops passing, the checks above have stopped being
+  // checks and started being a wall.
+  const s = svc();
+  const st = await studioOfThree(s);
+  const after = await s.setStudioSplit("u1", st.id, [{ member_id: "u1", split_bps: 7000 }, { member_id: "u3", split_bps: 3000 }]);
+  assert.equal(totalBps(after), 10000);
+  assert.equal(after.members.find((m) => m.member_id === "u2").split_bps, 0, "a member left out of the split holds none of it");
+  // 0 and 10000 are both legal shares at the boundary.
+  const edge = await s.setStudioSplit("u1", st.id, [{ member_id: "u1", split_bps: 10000 }, { member_id: "u2", split_bps: 0 }]);
+  assert.equal(totalBps(edge), 10000);
+});

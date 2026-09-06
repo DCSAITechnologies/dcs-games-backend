@@ -819,10 +819,72 @@ export function createSocialService(env = process.env, deps = {}) {
         const mine = s.members.find((m) => m.member_id === meId);
         if (!mine || !["owner", "admin"].includes(mine.role)) throw Errors.forbidden("only an owner or admin can configure the split");
         if (!Array.isArray(splits) || !splits.length) throw Errors.validation("splits must be a non-empty array of { member_id, split_bps }");
-        const total = splits.reduce((a, x) => a + Number(x.split_bps || 0), 0);
-        if (total !== 10000) throw Errors.validation(`splits must total exactly 10000 basis points (100%), got ${total}`);
+
+        // Every share is checked BEFORE the total, because a total of 10000 is
+        // not by itself evidence of a valid split. Reproduced 7 Sep 2026, all
+        // three answered 200 and all three persisted:
+        //
+        //   [{user-a,20000},{user-b,-10000}] -> a holds 200%, b holds -100%
+        //   [{user-a,5000.5},{user-b,4999.5}] -> fractional basis points, which
+        //     is a contradiction in terms; a basis point is the unit
+        //   [{user-a,6000},{user-a,4000}]    -> totals 10000 on the way in, and
+        //     persists a=4000, b=0. The studio's split ended up at 40%.
+        //
+        // The duplicate is the serious one. `named` below is a Map, so the last
+        // entry for a member wins and the earlier one is silently discarded
+        // AFTER the total has been checked against the un-deduplicated array.
+        // This method takes a lock precisely to make validate-and-write one
+        // step, and a single request could still leave the invariant broken.
+        // The shape first, so a body written for the OTHER split validator is
+        // told so plainly. src/cw1/identity-studio.mjs validateSplit takes
+        // [{ user_id, pct }] totalling 100; sent here, every split_bps read as
+        // absent and the refusal used to say "got 0" for a body that named
+        // 100%, which sends the reader looking in entirely the wrong place.
+        const receivedKeys = [...new Set(splits.flatMap((x) => Object.keys(x || {})))];
+        if (!splits.some((x) => x && Object.prototype.hasOwnProperty.call(x, "split_bps"))) {
+          throw Errors.validation(
+            "splits must be [{ member_id, split_bps }] in basis points; no entry carried a split_bps",
+            { meta: { expected_shape: "[{ member_id, split_bps }]", received_keys: receivedKeys, expected_total_bps: 10000, got_total_bps: 0 } },
+          );
+        }
+
+        const seen = new Set();
         for (const x of splits) {
-          if (!s.members.some((m) => m.member_id === x.member_id)) throw Errors.validation(`'${x.member_id}' is not a member of this studio`);
+          const bps = Number(x.split_bps);
+          if (!Number.isInteger(bps)) {
+            throw Errors.validation(
+              `split_bps must be a whole number of basis points; '${x.member_id}' has ${JSON.stringify(x.split_bps)}`,
+              { meta: { member_id: x.member_id, split_bps: x.split_bps } },
+            );
+          }
+          if (bps < 0 || bps > 10000) {
+            throw Errors.validation(
+              `split_bps must be between 0 and 10000; '${x.member_id}' has ${bps}`,
+              { meta: { member_id: x.member_id, split_bps: bps } },
+            );
+          }
+          if (seen.has(x.member_id)) {
+            throw Errors.validation(
+              `'${x.member_id}' appears more than once; a member has exactly one share`,
+              { meta: { member_id: x.member_id } },
+            );
+          }
+          seen.add(x.member_id);
+          if (!s.members.some((m) => m.member_id === x.member_id)) {
+            throw Errors.validation(`'${x.member_id}' is not a member of this studio`);
+          }
+        }
+        const total = splits.reduce((a, x) => a + Number(x.split_bps), 0);
+        if (total !== 10000) {
+          // The old message read "got 0" for a body that named 110%, because a
+          // body shaped { user_id, pct } — which is what
+          // src/cw1/identity-studio.mjs validateSplit takes — has no split_bps
+          // to add up. Saying which field was read, and what was found, is the
+          // difference between a five-second fix and a hunt.
+          throw Errors.validation(
+            `splits must total exactly 10000 basis points (100%), got ${total}`,
+            { meta: { expected_total_bps: 10000, got_total_bps: total, expected_shape: "[{ member_id, split_bps }]", received_keys: receivedKeys } },
+          );
         }
         // Every named member is rewritten, and anyone not named is zeroed — a
         // split that leaves an old share standing is a split that does not total
