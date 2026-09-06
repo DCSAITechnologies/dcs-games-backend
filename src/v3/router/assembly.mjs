@@ -18,6 +18,7 @@ import { architectAdapters, fastAdapters, gameplayAdapters } from "../providers/
 import { asset3dAdapters } from "../providers/asset3d.mjs";
 import { mediaAdapters } from "../providers/media.mjs";
 import { spatialAdapters } from "../providers/spatial.mjs";
+import { visionAdapters, VISION_LANE, validateImage, conditionPrompt, readingToConstraints } from "../providers/vision.mjs";
 import { emptyManifest, validateManifest, MANIFEST_VERSION } from "../manifest/schema.mjs";
 import { hashString } from "../providers/local-planner.mjs";
 
@@ -36,6 +37,9 @@ export function createAssemblyRouter(env = process.env) {
     [LANES.ASSET_3D]: new Lane(LANES.ASSET_3D, asset3dAdapters(env)),
     [LANES.GAMEPLAY]: new Lane(LANES.GAMEPLAY, gameplayAdapters(env)),
     [LANES.MEDIA]: new Lane(LANES.MEDIA, mediaAdapters(env)),
+    // 9.1 multimodal: a reference image is READ into a description, and the
+    // description conditions generation. No image bytes ever enter the manifest.
+    [VISION_LANE]: new Lane(VISION_LANE, visionAdapters(env)),
   };
 
   return {
@@ -60,6 +64,8 @@ export function createAssemblyRouter(env = process.env) {
       const seed = req.seed ?? hashString(prompt);
       const provenance = [];
       const degraded = [];
+      let visualReading = null;
+      let conditioning = { conditioned: false, reason: "no reference image was supplied" };
 
       const record = (r) => {
         provenance.push(r.provenance);
@@ -67,8 +73,22 @@ export function createAssemblyRouter(env = process.env) {
         return r.value;
       };
 
+      // ---- 0. vision (9.1): read a reference image into a description ----
+      let effectivePrompt = prompt;
+      let constraints = req.constraints || null;
+      if (req.image) {
+        validateImage(req.image);                       // throws before a byte is sent
+        const v = await lanes[VISION_LANE].run({ dataUrl: req.image.dataUrl, prompt });
+        provenance.push(v.provenance);
+        visualReading = v.value;
+        conditioning = conditionPrompt(prompt, visualReading);
+        effectivePrompt = conditioning.prompt;
+        const fromImage = readingToConstraints(visualReading);
+        if (conditioning.conditioned && fromImage) constraints = { ...(constraints || {}), ...fromImage };
+      }
+
       // ---- 1. world architect ------------------------------------------
-      const plan = record(await lanes[LANES.WORLD_ARCHITECT].run({ prompt, seed, style: req.style, constraints: req.constraints }));
+      const plan = record(await lanes[LANES.WORLD_ARCHITECT].run({ prompt: effectivePrompt, seed, style: req.style, constraints }));
 
       // ---- 2. fast inference: metadata -----------------------------------
       const meta = record(await lanes[LANES.FAST_INFERENCE].run({ prompt, title: plan.title, zones: plan.zones }));
@@ -123,8 +143,18 @@ export function createAssemblyRouter(env = process.env) {
       manifest.provenance.generated_by = provenance;
       manifest.provenance.source_prompt_hash = crypto.createHash("sha256").update(prompt).digest("hex");
 
+      // The reading is reported so a creator can see exactly what the system
+      // thought their picture showed, and whether it was used.
+      if (visualReading) {
+        manifest.meta.reference_image = {
+          conditioned: conditioning.conditioned,
+          ...(conditioning.conditioned ? {} : { not_used_because: conditioning.reason }),
+          reading: { kind: visualReading.kind, setting: visualReading.setting, style: visualReading.style, confidence: visualReading.confidence, not_visible: visualReading.not_visible },
+        };
+      }
+
       const validation = validateManifest(manifest);
-      return { manifest, validation, provenance, degraded };
+      return { manifest, validation, provenance, degraded, visual_reading: visualReading, conditioning };
     },
   };
 }

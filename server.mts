@@ -565,7 +565,13 @@ const server = http.createServer(async (req, res) => {
       if (!b.prompt || typeof b.prompt !== "string") throw Errors.validation("prompt is required", { correlationId: cid });
 
       const worldId = "w3_" + crypto.randomUUID().replace(/-/g, "").slice(0, 16);
-      const built = await v3.assemble({ prompt: b.prompt, worldId, creatorId: me.id, seed: b.seed, style: b.style, media: b.media === true });
+      // 9.1 multimodal: an optional reference image is READ into a description
+      // that conditions generation. The bytes never enter the manifest.
+      const built = await v3.assemble({
+        prompt: b.prompt, worldId, creatorId: me.id, seed: b.seed, style: b.style,
+        media: b.media === true,
+        image: b.image_data_url ? { dataUrl: b.image_data_url, mime: b.image_mime } : undefined,
+      });
       if (!built.validation.ok) {
         throw Errors.internal("the assembled world did not satisfy WorldManifestV3", { correlationId: cid, meta: { errors: built.validation.errors.slice(0, 8) } });
       }
@@ -600,6 +606,8 @@ const server = http.createServer(async (req, res) => {
           interactions: gate.manifest.interactions.length, assets: gate.manifest.assets.length,
         },
         provenance: built.provenance,
+        // What the system thought the reference image showed, and whether it was used.
+        reference_image: built.visual_reading ? { conditioned: built.conditioning.conditioned, reason: built.conditioning.reason, reading: built.visual_reading } : undefined,
         degraded: built.degraded.length ? built.degraded : undefined,
         manifest_url: "/v3/worlds/" + worldId + "/manifest",
         correlation_id: cid,

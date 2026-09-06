@@ -21,7 +21,12 @@ const router = () => createAssemblyRouter(OFFLINE);
 
 test("B1 GATE: every lane has a fallback — no lane can hard-depend on a vendor", async () => {
   const d = await router().describe();
-  assert.equal(d.lanes.length, 6, "six lanes: architect, fast, spatial, asset_3d, gameplay, media");
+  // Assert the lanes by NAME rather than by count: adding a lane (vision, for
+  // 9.1 multimodal) is expected, silently losing one is not.
+  const names = d.lanes.map((l) => l.lane);
+  for (const required of ["world_architect", "fast_inference", "spatial", "asset_3d", "gameplay", "media"]) {
+    assert.ok(names.includes(required), `lane '${required}' is missing`);
+  }
   for (const lane of d.lanes) {
     assert.ok(lane.adapters.some((a) => a.is_fallback && a.status === STATUS.FALLBACK),
       `lane ${lane.lane} has no working fallback`);
