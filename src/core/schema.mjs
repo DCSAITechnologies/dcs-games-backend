@@ -197,12 +197,64 @@ export async function listTables(dsn) {
  * Boot-time assertion. Refuses to serve against an unsupported schema rather
  * than failing later, per-request, in a way that looks like empty data.
  */
-export async function assertSchema(dsn, { required = REQUIRED_SCHEMA_VERSION, tables = REQUIRED_TABLES } = {}) {
-  const version = await currentVersion(dsn);
-  const present = new Set(await listTables(dsn));
+/**
+ * Read the schema state through the Supabase Data API instead of psql.
+ *
+ * The boot-time assertion is one of the few things that must work in EVERY
+ * deployed environment, and making it depend on a binary being present in the
+ * runtime image makes it depend on the build system's package configuration —
+ * which differs between builders and silently ignores a config written for the
+ * wrong one. Measured on Railway: nixpacks.toml had no effect, psql was absent,
+ * and the process exited 78 before it ever listened.
+ *
+ * PostgREST can answer both questions with the credential the application
+ * already holds: the migration table gives the version, and the OpenAPI root
+ * gives the exposed table list. Returns null when Supabase is not configured,
+ * so the psql path stays the default everywhere else.
+ */
+async function restSchemaState(env = process.env) {
+  const url = (env.SUPABASE_URL || "").replace(/\/$/, "");
+  const key = env.SUPABASE_SERVICE_ROLE_KEY || "";
+  if (!url || !key) return null;
+  const h = { apikey: key, Authorization: "Bearer " + key };
+  const get = async (path, accept) => {
+    const r = await fetch(url + path, {
+      headers: accept ? { ...h, Accept: accept } : h,
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!r.ok) throw Errors.upstream("supabase", `HTTP ${r.status} for ${path.split("?")[0]}`);
+    return await r.json();
+  };
+  const rows = await get("/rest/v1/dcsgames_schema_migrations?select=version&order=version.desc&limit=1");
+  const root = await get("/rest/v1/", "application/openapi+json");
+  const present = Object.keys(root?.paths || {}).filter((x) => x !== "/").map((x) => x.slice(1));
+  return { version: Number(rows?.[0]?.version || 0), tables: present, via: "supabase-rest" };
+}
+
+export async function assertSchema(dsn, { required = REQUIRED_SCHEMA_VERSION, tables = REQUIRED_TABLES, env = process.env } = {}) {
+  let version, present, via = "psql";
+  try {
+    version = await currentVersion(dsn);
+    present = new Set(await listTables(dsn));
+  } catch (e) {
+    // A missing psql is a deployment fact, not an answer about the schema. If
+    // the Data API can answer instead, the guard keeps working rather than
+    // taking the process down for a reason unrelated to the schema.
+    if (e?.code !== "PSQL_NOT_FOUND") throw e;
+    const rest = await restSchemaState(env);
+    if (!rest) throw e;
+    version = rest.version;
+    present = new Set(rest.tables);
+    via = rest.via;
+    console.warn(JSON.stringify({
+      level: "warn", schema_check_via: via,
+      detail: "psql is not available in this image, so the schema was verified through the Supabase Data API instead. Migrations still require psql.",
+      ts: new Date().toISOString(),
+    }));
+  }
   const missing = tables.filter((t) => !present.has(t));
   const ok = version >= required && missing.length === 0;
-  const report = { ok, version, required, missing };
+  const report = { ok, version, required, missing, via };
   if (!ok) {
     throw Errors.notConfigured(
       `database schema (at v${version}, code requires v${required}${missing.length ? `; missing tables: ${missing.join(", ")}` : ""})`,
