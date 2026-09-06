@@ -397,7 +397,8 @@ test("a draft world is readable only by its creator", async () => {
   await repo.upsert({ worldId: "w1", ownerId: "victim", manifest: { meta: { title: "unreleased" } }, state: "draft" });
   await assert.rejects(() => repo.get("w1", { requesterId: "attacker" }), (e) => e.httpStatus === 404);
   await assert.rejects(() => repo.get("w1", { requesterId: null }), (e) => e.httpStatus === 404);
-  await assert.rejects(() => repo.get("w1", { requesterId: "attacker", requireOwner: true }), (e) => e.httpStatus === 403);
+  // LANE C: a DRAFT the attacker cannot see must not be confirmed by the status.
+  await assert.rejects(() => repo.get("w1", { requesterId: "attacker", requireOwner: true }), (e) => e.httpStatus === 404);
   assert.equal((await repo.get("w1", { requesterId: "victim" })).state, "draft");
   // Publishing changes who may read it, and nothing else about who owns it.
   await repo.upsert({ worldId: "w1", ownerId: "victim", manifest: { meta: { title: "released" } }, state: "published" });

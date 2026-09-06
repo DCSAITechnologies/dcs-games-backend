@@ -798,9 +798,11 @@ test("ownership: a row the primary holds under another owner cannot be overwritt
   assert.match(e.detail, /belongs to another creator/);
   assert.equal(stub.rows("dcsgames_base_worlds")[0].owner_id, "alice");
   assert.equal(stub.rows("dcsgames_base_worlds")[0].state, "draft", "and it was not published out from under her");
-  // requireOwner is a 403 for a caller who owns something else; a plain read is a 404.
+  // LANE C: w1 is a DRAFT, so mallory has no way to learn it exists — requireOwner
+  // now answers exactly what a world that was never created answers. A published
+  // world, which she could already read, still answers 403. A plain read is 404.
   const ro = await repo.get("w1", { requesterId: "mallory", requireOwner: true }).then(() => null, (x) => x);
-  assert.equal(ro.httpStatus, 403);
+  assert.equal(ro.httpStatus, 404);
   const plain = await repo.get("w1", { requesterId: "mallory" }).then(() => null, (x) => x);
   assert.equal(plain.httpStatus, 404);
 });
@@ -820,7 +822,7 @@ test("ownership: a primary row with a NULL owner is not free to take — for a N
   const r = await repo.get("orphan", { requesterId: "mallory" }).then(() => null, (x) => x);
   assert.equal(r.httpStatus, 404, "an unowned draft is not public");
   const ro = await repo.get("orphan", { requesterId: "mallory", requireOwner: true }).then(() => null, (x) => x);
-  assert.equal(ro.httpStatus, 403, "and mallory does not satisfy requireOwner on it");
+  assert.equal(ro.httpStatus, 404, "and mallory does not satisfy requireOwner on it, nor learn the draft exists");
 });
 
 test("FIXED: a NULL-owner row belongs to nobody, so nobody may read, write or publish it", async (t) => {
@@ -856,8 +858,8 @@ test("FIXED: a NULL-owner row belongs to nobody, so nobody may read, write or pu
   );
   await assert.rejects(
     () => repo.get("orphan", { requesterId: null, requireOwner: true }),
-    (e) => e.httpStatus === 403,
-    "and must not satisfy requireOwner on it",
+    (e) => e.httpStatus === 404,
+    "and must not satisfy requireOwner on it, nor learn the unowned draft exists",
   );
   await assert.rejects(
     () => repo.upsert({ worldId: "orphan", manifest: { meta: { title: "Mine" } }, state: "published" }),

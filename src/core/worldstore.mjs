@@ -27,6 +27,67 @@ export function manifestHash(manifest) {
   return crypto.createHash("sha256").update(canonicalize(manifest)).digest("hex");
 }
 
+/**
+ * The default page size, and the one place a caller-supplied `limit` is turned
+ * into a number.
+ *
+ * The three list() implementations each coerced it differently, so the SAME
+ * request answered differently depending on which backing was configured:
+ *   FileWorldStore      slice(0, limit)  -> a negative sliced from the END,
+ *                                          so limit=-5 meant "all but the last
+ *                                          five" and an unusable one meant none
+ *   SupabaseWorldStore  Math.max(0, trunc(n)), default on non-finite  (correct)
+ *   MirroredWorldStore  slice(0, Number.isFinite(n) ? n : 50)  -> negative again
+ * Staging runs on the file store and production on Supabase, which is exactly
+ * the shape of divergence that is invisible until it is live. `?limit=-5`
+ * reaches the store today because server.mts clamps only the top of the range
+ * (Math.min(60, parseInt(...) || 24)). A cap the caller can turn into a
+ * different cap is not a cap, so all three now share this one rule: an unusable
+ * limit falls back to the default, and a negative one is zero rows.
+ */
+const DEFAULT_LIMIT = 50;
+export function clampLimit(limit, fallback = DEFAULT_LIMIT) {
+  const n = Number(limit);
+  return Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : fallback;
+}
+
+/**
+ * The states a world may be in.
+ *
+ * migrations/0003_world_manifest_durability.sql:15 declares
+ *   check (state in ('draft','published','archived'))
+ * and the application never enforced what the database already required. In
+ * FILE mode there is no database, so there was no constraint at all: server.mts
+ * takes `state` straight from the request body on POST /worlds/:id/save
+ * (`state: b.state || "draft"`), so any authenticated caller could store a state
+ * nobody can name — one that the listing gate and _versionVisible, which both
+ * ask `=== "published"`, have no opinion about. Enforced here so the two
+ * backings agree and the file store cannot hold a row Postgres would reject.
+ */
+export const WORLD_STATES = Object.freeze(["draft", "published", "archived"]);
+
+/**
+ * An upstream failure the CALLER may see, with the upstream's own body kept out.
+ *
+ * PostgREST answers a 4xx with a JSON body naming the constraint, the relation,
+ * the offending column and a hint. That body was interpolated straight into the
+ * AppError detail, and server.mts's top-level catch sends an AppError's detail
+ * to the client — so any caller who could provoke a failed write read the
+ * private schema. The body still goes to the log, where an operator can read it
+ * and a stranger cannot.
+ */
+function upstreamWithoutBody(what, r, body) {
+  if (body) {
+    console.warn(JSON.stringify({
+      level: "warn", upstream: "supabase", op: what, status: r.status,
+      detail: String(body).slice(0, 2000),
+      note: "upstream body logged, not returned: it names constraints and columns",
+      ts: new Date().toISOString(),
+    }));
+  }
+  return Errors.upstream("supabase", `${what} (${r.status})`);
+}
+
 /** The one suffix a listing sidecar is allowed to occupy. */
 const SIDECAR_SUFFIX = ".summary.json";
 /** How much of a record file is read to recover its scalar head. */
@@ -313,7 +374,7 @@ export class FileWorldStore {
       } catch { /* a half-written temp file is not a world; skip */ }
     }
     out.sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
-    return out.slice(0, limit);
+    return out.slice(0, clampLimit(limit));
   }
   async delete(id) {
     await fsp.rm(this._p(id), { force: true });
@@ -373,7 +434,7 @@ export class SupabaseWorldStore {
       headers: { ...this._h, Prefer: "resolution=merge-duplicates,return=representation" },
       body: JSON.stringify(record),
     });
-    if (!r.ok) throw Errors.upstream("supabase", `world upsert failed (${r.status}): ${await r.text().catch(() => "")}`);
+    if (!r.ok) throw upstreamWithoutBody("world upsert failed", r, await r.text().catch(() => ""));
     return record;
   }
   async get(id) {
@@ -394,7 +455,8 @@ export class SupabaseWorldStore {
     // `limit` is interpolated into a query string, so it is coerced to a number
     // here. Every call site passes an integer today; one route that forwards a
     // query parameter would otherwise append filters of the caller's choosing.
-    const n = Number.isFinite(Number(limit)) ? Math.max(0, Math.trunc(Number(limit))) : 50;
+    // Shared with the other two backings so all three answer the same. See clampLimit.
+    const n = clampLimit(limit);
     let q = `${this.url}/rest/v1/${this.table}?select=${wantCards ? CARD_PROJECTION : "*"}&limit=${n}&order=updated_at.desc`;
     if (ownerId) q += `&owner_id=eq.${encodeURIComponent(ownerId)}`;
     if (state) q += `&state=eq.${encodeURIComponent(state)}`;
@@ -649,7 +711,7 @@ export class MirroredWorldStore {
     // the wire and the caller used to notice.
     const filtered = rows.filter((r) => (!ownerId || r.owner_id === ownerId) && (!state || r.state === state));
     filtered.sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
-    const page = filtered.slice(0, Number.isFinite(Number(limit)) ? Number(limit) : 50);
+    const page = filtered.slice(0, clampLimit(limit));
     // listPublished's contract is "discovery cards only — the manifest is NOT
     // included in full". A store that cannot honour an option that changes the
     // SHAPE of its answer must not silently drop it.
@@ -794,7 +856,7 @@ export class SupabaseVersionHistoryStore {
       body: JSON.stringify(SupabaseVersionHistoryStore._wire(worldId, version, record)),
     });
     if (r.status === 409) { await r.text().catch(() => ""); return { ...record, already_recorded: true }; }
-    if (!r.ok) throw Errors.upstream("supabase", `world version write failed (${r.status}): ${await r.text().catch(() => "")}`);
+    if (!r.ok) throw upstreamWithoutBody("world version write failed", r, await r.text().catch(() => ""));
     return record;
   }
   async get(worldId, version) {
@@ -899,6 +961,14 @@ export class WorldRepository {
   async _upsert({ worldId, ownerId, manifest, state = "draft", title = null, expected_version = null }) {
     if (!worldId) throw Errors.validation("world_id is required");
     if (!manifest || typeof manifest !== "object") throw Errors.validation("manifest must be an object");
+    // The database already declares this set (migration 0003:15); the
+    // application did not, so in FILE mode there was no constraint at all and
+    // server.mts:1738 takes `state` straight from the request body. A state
+    // nobody can name is a row the listing gate and _versionVisible — which
+    // both ask `=== "published"` — have no opinion about. See WORLD_STATES.
+    if (!WORLD_STATES.includes(state)) {
+      throw Errors.validation(`state must be one of ${WORLD_STATES.join(", ")}; got ${JSON.stringify(state)}`);
+    }
     const existing = await this.store.get(worldId);
     // Fail CLOSED. This was `existing && ownerId && existing.owner_id && ...`,
     // so it skipped entirely when EITHER side was absent: a caller passing no
@@ -989,7 +1059,24 @@ export class WorldRepository {
     // `!==` alone let ANONYMOUS through on a row with no owner: both sides are
     // null, so null === null satisfied the gate. Ownership needs a named owner
     // AND a named caller who are the same person — nobody is not somebody.
-    if (r && requireOwner && !(requesterId != null && r.owner_id != null && r.owner_id === requesterId)) throw Errors.forbidden("this world belongs to another creator");
+    if (r && requireOwner && !(requesterId != null && r.owner_id != null && r.owner_id === requesterId)) {
+      // The 403 is only honest for a world the caller could learn about ANY
+      // OTHER WAY. A published world is readable by everyone, so telling its
+      // non-owner "this belongs to another creator" reveals nothing they could
+      // not already read, and it is the only answer that makes a real ownership
+      // conflict legible.
+      //
+      // A DRAFT is invisible to them, and the id does not have to have come
+      // from their own library: POST /v3/marketplace/listings (server.mts:659)
+      // takes the world id from a free-form BODY field, so a 403-for-exists /
+      // 404-for-missing split let any internal tester enumerate private world
+      // ids by status alone. That is the same existence oracle the read path
+      // was fixed for, one route along, so it gets the same answer: exactly
+      // what a world that was never created gives — same status, same code,
+      // same detail, since a differing message leaks it just as well.
+      if (r.state === "published") throw Errors.forbidden("this world belongs to another creator");
+      throw Errors.notFound(`world ${worldId}`);
+    }
     // Published worlds are readable by anyone; drafts only by their owner (IDOR guard).
     if (!r || (!requireOwner && r.state !== "published" && !(requesterId != null && r.owner_id != null && r.owner_id === requesterId))) {
       throw Errors.notFound(`world ${worldId}`);

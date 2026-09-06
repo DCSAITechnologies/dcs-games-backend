@@ -1024,3 +1024,148 @@ test("A3: a loaded manifest carries the hash of what was actually returned", asy
   const c = { meta: { title: "B" }, zones: [{ id: "z" }] };
   assert.notEqual(manifestHash(a), manifestHash(c));
 });
+
+// ===========================================================================
+// LANE C — security, auth and persistence adversarial closure (sections 10/13)
+// Each test below is the attack, written first and reproduced against the code
+// as it stood before this lane.
+// ===========================================================================
+
+test("LANE C/W1: a PostgREST error body must not be returned to the caller", async (t) => {
+  const w = console.warn; console.warn = () => {}; t.after(() => { console.warn = w; });
+  // ATTACK: trip a constraint on a world upsert and read the schema out of the
+  // 502 the route returns. worldstore.mjs:376 interpolated the raw PostgREST
+  // body — constraint name, relation, offending column, hint — into the
+  // AppError detail, and server.mts's top-level catch sends an AppError's
+  // detail straight to the client. Any caller who can provoke a failed write
+  // reads the private schema.
+  const PG = JSON.stringify({
+    code: "23503",
+    hint: "Key (owner_id)=(x) is not present in table dcsgames_principals",
+    message: 'insert or update on table "dcsgames_base_worlds" violates foreign key constraint "dcsgames_base_worlds_owner_fk"',
+  });
+  const s = new SupabaseWorldStore({
+    url: "https://x.supabase.co", serviceRoleKey: "svc",
+    fetchImpl: async () => ({ ok: false, status: 400, json: async () => JSON.parse(PG), text: async () => PG }),
+  });
+  const err = await s.put({ world_id: "w", owner_id: "x", manifest: {} }).then(() => null, (e) => e);
+  assert.ok(err, "the write must still fail");
+  const seen = JSON.stringify(err.toJSON());
+  assert.doesNotMatch(seen, /dcsgames_base_worlds_owner_fk/, "a constraint name must not reach the caller");
+  assert.doesNotMatch(seen, /is not present in table/, "nor a hint naming another table");
+  assert.doesNotMatch(seen, /23503/, "nor the SQLSTATE");
+  assert.match(seen, /400/, "the upstream status is still reported");
+});
+
+test("LANE C/W2: an absurd `limit` gives the same answer whichever backing is configured", async (t) => {
+  const w = console.warn; console.warn = () => {}; t.after(() => { console.warn = w; });
+  // ATTACK: GET /v3/discover?limit=-5. server.mts clamps only the TOP of the
+  // range (Math.min(60, parseInt(...) || 24)), so a negative reaches the store.
+  // The three list() implementations then disagreed:
+  //   FileWorldStore      slice(0, -5)  -> every published world but the last 5
+  //   SupabaseWorldStore  Math.max(0,n) -> limit=0 on the wire -> nothing
+  //   MirroredWorldStore  slice(0, -5)  over a primary that returned nothing
+  // so the same request answered differently in staging (file) and production
+  // (supabase). A cap that can be turned into a different cap by the caller is
+  // not a cap; the three must agree.
+  const dir = tmp();
+  const file = new FileWorldStore(path.join(dir, "w"));
+  const repo = new WorldRepository(file, new VersionHistoryStore(path.join(dir, "v")));
+  for (const id of ["a", "b", "c", "d", "e", "f", "g"]) {
+    await repo.upsert({ worldId: id, ownerId: "u1", manifest: { meta: { title: id } }, state: "published" });
+  }
+  const wire = [];
+  const supa = new SupabaseWorldStore({
+    url: "https://x.supabase.co", serviceRoleKey: "svc",
+    fetchImpl: async (url) => { wire.push(url); return { ok: true, status: 200, json: async () => [] }; },
+  });
+  // A negative limit is zero rows, not "all but some", on every backing.
+  for (const bad of [-5, -1, "-5", null]) {
+    const n = (await file.list({ state: "published", limit: bad })).length;
+    assert.equal(n, 0, `a limit of ${String(bad)} must not be read as "all but some": got ${n} rows`);
+    wire.length = 0;
+    await supa.list({ state: "published", limit: bad });
+    assert.doesNotMatch(wire[0], /limit=-/, `a negative limit must never reach the wire (${String(bad)})`);
+  }
+  // An UNUSABLE limit falls back to the default — the rule SupabaseWorldStore
+  // already had, and the rule the other two now share.
+  for (const bad of [NaN, "abc", "1&owner_id=eq.injected"]) {
+    assert.equal((await file.list({ state: "published", limit: bad })).length, 7,
+      `an unusable limit must fall back to the default, not to nothing (${String(bad)})`);
+    wire.length = 0;
+    await supa.list({ state: "published", limit: bad });
+    assert.match(wire[0], /limit=50/, `and to the SAME default on the wire (${String(bad)})`);
+  }
+  // A sane limit is still honoured, and the default still applies.
+  assert.equal((await file.list({ state: "published", limit: 3 })).length, 3);
+  assert.equal((await file.list({ state: "published" })).length, 7);
+  assert.equal((await file.list({ state: "published", limit: "4" })).length, 4, "a numeric string is still a number");
+});
+
+test("LANE C/W3: a world state the catalogue does not understand is refused, not stored", async () => {
+  // ATTACK: POST /worlds/:id/save {"state":"anything"} — server.mts:1738 is the
+  // one upsert caller that takes `state` from the request body
+  // (`state: b.state || "draft"`), and nothing whitelisted it. An unknown state
+  // was stored, returned on every discovery card, and compared against by the
+  // listing gate and by _versionVisible, which both ask `=== "published"`. A
+  // state nobody can name is a row no gate has an opinion about.
+  const dir = tmp();
+  const repo = new WorldRepository(new FileWorldStore(path.join(dir, "w")), new VersionHistoryStore(path.join(dir, "v")));
+  for (const bad of ["anything", "PUBLISHED", "published ", "", "live", 1, null]) {
+    await assert.rejects(
+      () => repo.upsert({ worldId: "w-" + String(bad).trim(), ownerId: "u1", manifest: { meta: { title: "t" } }, state: bad }),
+      (e) => e.code === "validation_failed",
+      `state ${JSON.stringify(bad)} must be refused`,
+    );
+  }
+  // The states the estate actually uses still work.
+  for (const good of ["draft", "published", "archived"]) {
+    const r = await repo.upsert({ worldId: "ok-" + good, ownerId: "u1", manifest: { meta: { title: "t" } }, state: good });
+    assert.equal(r.state, good);
+  }
+});
+
+test("LANE C/W4: an owner-only refusal must not confirm a world the caller could never see", async () => {
+  // ATTACK: an existence oracle on a world id supplied in a request BODY.
+  // repo.get(..., { requireOwner: true }) answered 403 for a world that exists
+  // and 404 for one that does not. worldstore.mjs justifies that for a creator
+  // acting on their own library — "they already know the id exists". That
+  // reasoning does not hold for POST /v3/marketplace/listings (server.mts:659),
+  // where the world id is a free-form body field: any internal tester could
+  // probe arbitrary ids and read existence off the status.
+  //
+  // The distinction that actually matters is whether the caller could learn the
+  // world exists ANY OTHER WAY. A published world is readable by everyone, so a
+  // 403 tells them nothing new and stays the honest answer for a real ownership
+  // conflict. A draft is invisible to them, so it must answer exactly as a world
+  // that was never created does.
+  const dir = tmp();
+  const repo = new WorldRepository(new FileWorldStore(path.join(dir, "w")), new VersionHistoryStore(path.join(dir, "v")));
+  await repo.upsert({ worldId: "secret-draft", ownerId: "victim", manifest: { meta: { title: "t" } }, state: "draft" });
+  await repo.upsert({ worldId: "public-world", ownerId: "victim", manifest: { meta: { title: "t" } }, state: "published" });
+
+  const probe = async (id) => await repo.get(id, { requesterId: "attacker", requireOwner: true }).then(() => null, (e) => e);
+
+  const draft = await probe("secret-draft");
+  const missing = await probe("never-created");
+  assert.equal(draft.httpStatus, 404, "a draft the caller cannot see must not be confirmed to exist");
+  assert.equal(draft.code, missing.code, "same code as a world that does not exist");
+  // The refusal must carry nothing beyond the id the caller themselves supplied:
+  // both details are the SAME sentence with the caller's own id in it, so the
+  // two are indistinguishable to someone who does not already know the answer.
+  // A differing message would leak existence just as well as a differing status.
+  assert.equal(draft.detail, "world secret-draft not found");
+  assert.equal(missing.detail, "world never-created not found");
+  assert.equal(
+    draft.detail.replace("secret-draft", "ID"), missing.detail.replace("never-created", "ID"),
+    "the two refusals differ only by the id the caller asked about",
+  );
+
+  // A published world is already readable, so the ownership conflict stays legible.
+  const pub = await probe("public-world");
+  assert.equal(pub.httpStatus, 403, "an ownership conflict on a world the caller can already read stays a 403");
+
+  // And the owner is unaffected on both.
+  assert.equal((await repo.get("secret-draft", { requesterId: "victim", requireOwner: true })).owner_id, "victim");
+  assert.equal((await repo.get("public-world", { requesterId: "victim", requireOwner: true })).owner_id, "victim");
+});
