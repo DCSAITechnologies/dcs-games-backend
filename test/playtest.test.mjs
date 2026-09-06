@@ -5,8 +5,9 @@
 // that each one is REJECTED.
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { createAssemblyRouter } from "../src/v3/router/assembly.mjs";
-import { simulatePlaythrough, simulateQuests, critique, repair, playtestAndRepair, npcHasSpeech } from "../src/v3/playtest/agent.mjs";
+import { simulatePlaythrough, simulateQuests, critique, repair, playtestAndRepair, npcHasSpeech, UNREPAIRABLE } from "../src/v3/playtest/agent.mjs";
 import { runAllValidators, validateStructure, validateNavigation, validateQuests, validateGameplayLoop, validateReferences } from "../src/v3/playtest/validators.mjs";
 
 const OFFLINE = { DCS_PROVIDERS_OFFLINE: "1" };
@@ -464,4 +465,188 @@ test("B4 GATE: a manifest in the real generated shape is actually wired", async 
   assert.equal(applied.left_mute, 0);
   for (const n of m.npcs) assert.ok(talkable.has(n.id), `${n.id} was left unreachable`);
   assert.equal(runAllValidators(r.manifest).some((f) => f.id === "npcs_not_interactive"), false);
+});
+
+test("B4 GATE: every fix a validator can name is one repair() actually knows", () => {
+  // The structural version of a bug that has now bitten twice on staging.
+  // `npcs_not_interactive` named `add_interactions` and nothing implemented it;
+  // `no_quests` named `add_quest` and nothing implemented that either. Each
+  // time, the gate rejected a world while advertising a repair that could not
+  // run. Nothing forced the two lists to agree, so nothing caught it until a
+  // real provider produced a world the offline planner never would.
+  //
+  // This asserts the invariant behaviourally rather than by reading source: a
+  // fix name is acceptable if repair() either performs it or declines it for a
+  // DECLARED reason. What is not acceptable is falling through to "no repair
+  // implemented", which is the shape of an unnoticed gap.
+  const emitted = fixNamesEmittedByValidators();
+  assert.ok(emitted.size > 10, `expected to find the validator fix names, got ${emitted.size}`);
+
+  const orphans = [];
+  for (const fix of emitted) {
+    const r = repair(emptyish(), [{ id: "synthetic", severity: "major", fix }]);
+    const skip = r.skipped.find((s) => s.fix === fix);
+    if (skip && /no repair implemented for/.test(skip.why)) orphans.push(fix);
+  }
+  assert.deepEqual(orphans, [],
+    `these findings name a fix that does not exist, so the world is rejected with a promise nothing can keep: ${orphans.join(", ")}`);
+});
+
+/** The fix names validators can put in front of a user, read from the source of truth. */
+function fixNamesEmittedByValidators() {
+  const src = fs.readFileSync(new URL("../src/v3/playtest/validators.mjs", import.meta.url), "utf8");
+  return new Set([...src.matchAll(/fix:\s*"([a-z_]+)"/g)].map((m) => m[1]));
+}
+
+/** A minimal manifest: enough structure to be walked, empty enough to trigger anything. */
+function emptyish() {
+  return {
+    manifest_version: "3.0.0",
+    terrain: { size: { w: 64, h: 64 }, heightmap: null },
+    zones: [{ id: "z0", name: "Hollow", bounds: [0, 0, 64, 64] }],
+    structures: [], npcs: [], items: [], quests: [], behaviors: [], interactions: [],
+    spawn: { player_spawns: [] },
+    navigation: { walkable_zones: [] },
+  };
+}
+
+test("B4: add_spawn puts a player on real ground when the world has no spawn", () => {
+  const m = emptyish();
+  m.terrain.heightmap = Array.from({ length: 32 }, () => Array(32).fill(0));
+  m.structures = [{ id: "s0", name: "Hall", zone: "z0", enterable: true, transform: { position: { x: 8, y: 0, z: 8 }, scale: { x: 4, y: 4, z: 4 } } }];
+  const r = repair(m, [{ id: "no_spawn", severity: "blocker", fix: "add_spawn" }]);
+  const sp = r.manifest.spawn.player_spawns;
+  assert.equal(sp.length, 1, "a spawn must exist");
+  assert.ok(Number.isFinite(sp[0].position.x) && Number.isFinite(sp[0].position.z));
+  assert.ok(r.applied.some((a) => a.fix === "add_spawn"));
+  assert.equal(runAllValidators(r.manifest).some((f) => f.id === "no_spawn"), false);
+});
+
+test("B4 GATE: move_spawn on a world with no spawn does not abort the whole repair pass", () => {
+  // It threw a TypeError indexing player_spawns[0], which is not one skipped
+  // repair — it takes down every remaining finding with it and fails the
+  // generation outright.
+  const m = emptyish();
+  m.terrain.heightmap = Array.from({ length: 16 }, () => Array(16).fill(0));
+  const r = repair(m, [
+    { id: "spawn_in_rock", severity: "blocker", fix: "move_spawn" },
+    { id: "no_quests", severity: "major", fix: "add_quest" },
+  ]);
+  assert.ok(r.applied.length + r.skipped.length === 2, "both findings must be considered, not abandoned at the first throw");
+});
+
+test("B4: add_doors opens structures the world already calls enterable", () => {
+  const m = emptyish();
+  m.structures = [
+    { id: "s_shrine", name: "Shrine", zone: "z0", enterable: true, transform: { position: { x: 4, y: 0, z: 4 } } },
+    { id: "s_rock", name: "Boulder", zone: "z0", enterable: false, transform: { position: { x: 9, y: 0, z: 9 } } },
+  ];
+  const r = repair(m, [{ id: "enterable_no_door", severity: "major", fix: "add_doors" }]);
+  const targets = new Set(r.manifest.interactions.map((i) => i.target_ref));
+  assert.ok(targets.has("s_shrine"), "an enterable structure must get a door");
+  assert.equal(targets.has("s_rock"), false, "a boulder must not");
+  for (const i of r.manifest.interactions) {
+    assert.ok(r.manifest.behaviors.some((b) => b.id === i.behavior_ref), "every door must point at a behaviour that exists");
+  }
+});
+
+test("B4: add_behaviors derives a game from the cast that already exists", () => {
+  const m = emptyish();
+  m.npcs = [{ id: "n1", name: "Warden", zone: "z0", dialogue: { seed: "who goes there", lines: [] } }];
+  m.items = [{ id: "i1", name: "Lantern" }];
+  m.structures = [{ id: "s1", name: "Keep", zone: "z0", enterable: true, transform: { position: { x: 5, y: 0, z: 5 } } }];
+  const r = repair(m, [{ id: "no_gameplay", severity: "blocker", fix: "add_behaviors" }]);
+  const kinds = new Set(r.manifest.behaviors.map((b) => b.kind));
+  assert.deepEqual([...kinds].sort(), ["door", "npc_ai", "pickup"]);
+  assert.equal(runAllValidators(r.manifest).some((f) => f.id === "no_gameplay"), false);
+});
+
+test("B4 GATE: add_behaviors refuses to invent a game out of an empty world", () => {
+  const r = repair(emptyish(), [{ id: "no_gameplay", severity: "blocker", fix: "add_behaviors" }]);
+  assert.equal(r.applied.some((a) => a.fix === "add_behaviors"), false);
+  const s = r.skipped.find((x) => x.fix === "add_behaviors");
+  assert.match(s.why, /cannot be invented from an empty world/);
+});
+
+test("B4: add_quest builds an objective only out of things that exist", () => {
+  const m = emptyish();
+  m.zones = [
+    { id: "z0", name: "Hollow", bounds: [0, 0, 32, 32] },
+    { id: "z1", name: "Ridge", bounds: [32, 0, 64, 32] },
+  ];
+  const r = repair(m, [{ id: "no_quests", severity: "major", fix: "add_quest" }]);
+  const q = r.manifest.quests[0];
+  assert.ok(q, "a quest must be added");
+  assert.ok(q.steps.length >= 2);
+  const ids = new Set([...m.zones.map((z) => z.id)]);
+  for (const st of q.steps) assert.ok(ids.has(st.target_ref), `step ${st.id} points at ${st.target_ref}, which does not exist`);
+  assert.equal(runAllValidators(r.manifest).some((f) => f.id === "no_quests"), false);
+});
+
+test("B4: add_quest prefers a delivery when there is an item and someone to speak to", () => {
+  const m = emptyish();
+  m.npcs = [{ id: "n1", name: "Ferrier", zone: "z0", dialogue: { seed: "the tide took it", lines: [] } }];
+  m.items = [{ id: "i1", name: "Bell Clapper" }];
+  const r = repair(m, [{ id: "no_quests", severity: "major", fix: "add_quest" }]);
+  const q = r.manifest.quests[0];
+  assert.equal(q.giver_npc, "n1");
+  assert.deepEqual(q.steps.map((s) => s.target_ref), ["i1", "n1"]);
+});
+
+test("B4 GATE: add_quest declines rather than inventing steps for an empty world", () => {
+  const m = emptyish();
+  m.zones = [{ id: "z0", name: "Hollow", bounds: [0, 0, 64, 64] }];
+  const r = repair(m, [{ id: "no_quests", severity: "major", fix: "add_quest" }]);
+  assert.equal(r.manifest.quests.length, 0, "a quest whose steps reference nothing is worse than no quest");
+  assert.match(r.skipped.find((s) => s.fix === "add_quest").why, /nothing to build an objective from/);
+});
+
+test("B4: reassign_giver prefers an NPC on the quest's own ground", () => {
+  const m = emptyish();
+  m.zones = [{ id: "z0", name: "Hollow", bounds: [0, 0, 32, 32] }, { id: "z1", name: "Ridge", bounds: [32, 0, 64, 32] }];
+  m.npcs = [
+    { id: "n_far", name: "Stranger", zone: "z1", dialogue: { seed: "hm", lines: [] } },
+    { id: "n_near", name: "Local", zone: "z0", dialogue: { seed: "aye", lines: [] } },
+  ];
+  m.quests = [{ id: "q1", name: "Look Around", giver_npc: "n_ghost", steps: [{ id: "s1", kind: "visit", target_ref: "z0" }] }];
+  const r = repair(m, [{ id: "quest_giver_missing", severity: "major", where: "q1", fix: "reassign_giver" }]);
+  assert.equal(r.manifest.quests[0].giver_npc, "n_near");
+});
+
+test("B4 GATE: reassign_giver clears the giver rather than attaching a stranger", () => {
+  const m = emptyish();
+  m.zones = [{ id: "z0", name: "Hollow", bounds: [0, 0, 32, 32] }, { id: "z1", name: "Ridge", bounds: [32, 0, 64, 32] }];
+  m.npcs = [{ id: "n_far", name: "Stranger", zone: "z1", dialogue: { seed: "hm", lines: [] } }];
+  m.quests = [{ id: "q1", name: "Look Around", giver_npc: "n_ghost", steps: [{ id: "s1", kind: "visit", target_ref: "z0" }] }];
+  const r = repair(m, [{ id: "quest_giver_missing", severity: "major", where: "q1", fix: "reassign_giver" }]);
+  assert.equal(r.manifest.quests[0].giver_npc, null, "an unrelated NPC across the map is not a fix");
+  assert.equal(runAllValidators(r.manifest).some((f) => f.id === "quest_giver_missing"), false);
+});
+
+test("B4: flatten_zone actually changes the terrain the runtime walks on", () => {
+  const m = emptyish();
+  m.terrain = { size: { w: 64, h: 64 }, heightmap: Array.from({ length: 32 }, (_, r) => Array.from({ length: 32 }, (_, c) => (c < 16 ? 0 : 40))) };
+  m.zones = [{ id: "z0", name: "Cliffside", bounds: [0, 0, 64, 64] }];
+  const before = m.terrain.heightmap.map((r) => [...r]);
+  const r = repair(m, [{ id: "zone_not_walkable", severity: "major", where: "z0", fix: "flatten_zone", data: { zone: "z0", walkable_fraction: 0.05 } }]);
+  const after = r.manifest.terrain.heightmap;
+  const spreadOf = (h) => { const f = h.flat(); return Math.max(...f) - Math.min(...f); };
+  assert.ok(spreadOf(after) < spreadOf(before), "the ground must actually become more level");
+  assert.ok(spreadOf(after) > 0, "but not a billiard table, which reads as broken terrain");
+  assert.ok(r.applied.some((a) => a.fix === "flatten_zone" && a.cells > 0));
+});
+
+test("B4 GATE: fabricating characters and buildings is a DECLARED refusal, not an oversight", () => {
+  // These two are the cases where a repair would have to author the world's
+  // actual content. Passing the gate by inventing them would make the world
+  // pass while staying empty, which is the exact failure the gate exists to
+  // prevent. The rejection is correct; what matters is that it is a decision on
+  // the record, so the structural test above can tell it apart from a hole.
+  for (const fix of ["add_npcs", "add_structures"]) {
+    const r = repair(emptyish(), [{ id: "x", severity: "major", fix }]);
+    const s = r.skipped.find((x) => x.fix === fix);
+    assert.equal(s.declined, true, `${fix} must be a declared refusal`);
+    assert.ok(s.why.length > 40, "and must say why in terms a person can act on");
+  }
+  assert.deepEqual(Object.keys(UNREPAIRABLE).sort(), ["add_npcs", "add_structures"]);
 });

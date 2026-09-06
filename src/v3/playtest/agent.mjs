@@ -226,6 +226,23 @@ export function npcHasSpeech(npc) {
   return lines.length > 0 || seed !== "";
 }
 
+/**
+ * Findings that are deliberately NOT auto-repaired, and why.
+ *
+ * These are the cases where a repair would have to invent the world's actual
+ * content — characters and buildings that a designer or a model is supposed to
+ * author. Fabricating them to clear a validator would defeat the point of the
+ * gate: the world would pass while being emptier than it claims. The right
+ * outcome is the one that already happens — the world is rejected and
+ * regenerated — and this registry exists so that outcome is a stated decision
+ * rather than an unnoticed hole. Anything NOT listed here and NOT implemented
+ * is a gap, and `test/playtest.test.mjs` fails on it.
+ */
+export const UNREPAIRABLE = {
+  add_npcs: "a world with no NPCs needs characters written, not generated wiring; inventing them would make the world pass while staying empty",
+  add_structures: "a world with no structures needs a place built, not a placeholder box dropped in to clear a validator",
+};
+
 export function repair(manifest, findings) {
   const m = structuredClone(manifest);
   const applied = [];
@@ -253,9 +270,22 @@ export function repair(manifest, findings) {
         applied.push({ fix: "clamp_into_zone", target: f.where });
         break;
       }
-      case "move_spawn": {
+      case "move_spawn":
+      case "add_spawn": {
+        // Both findings want the same thing: a player standing somewhere they
+        // can actually stand. `move_spawn` used to index player_spawns[0]
+        // unconditionally and threw a TypeError on a world that had no spawn at
+        // all — which does not skip one repair, it aborts the whole repair pass
+        // and fails the generation outright.
         const moved = findSafeSpawn(m);
         if (!moved) { skipped.push({ ...f, why: "no safe ground anywhere in the world" }); break; }
+        m.spawn = m.spawn || {};
+        m.spawn.player_spawns = m.spawn.player_spawns || [];
+        if (!m.spawn.player_spawns.length) {
+          m.spawn.player_spawns.push({ id: "spawn_default", position: moved.position, zone: moved.zone, facing: 0 });
+          applied.push({ fix: "add_spawn", at: moved.position, zone: moved.zone });
+          break;
+        }
         m.spawn.player_spawns[0].position = moved.position;
         m.spawn.player_spawns[0].zone = moved.zone;
         applied.push({ fix: "move_spawn", target: f.where, to: moved.position });
@@ -405,7 +435,176 @@ export function repair(manifest, findings) {
         applied.push({ fix: "scrub_spec_ref", target: f.where, field, dropped: f.data.ref });
         break;
       }
+      case "add_doors": {
+        // Wiring, not content: a structure already declared `enterable` is one
+        // the world says you can go into. What is missing is the door that
+        // lets you.
+        m.behaviors = m.behaviors || [];
+        m.interactions = m.interactions || [];
+        const wired = new Set(m.interactions.map((i) => i.target_ref));
+        let doors = 0;
+        for (const st of (m.structures || []).filter((x) => x.enterable)) {
+          if (wired.has(st.id)) continue;
+          const bid = `behavior_door_${st.id}`;
+          if (!byId(m.behaviors, bid)) {
+            m.behaviors.push({ id: bid, kind: "door", spec: { opens: "inward", speed: 2, auto_close_s: 30 } });
+          }
+          m.interactions.push({
+            id: `interaction_door_${st.id}`, trigger: "interact",
+            target_ref: st.id, behavior_ref: bid,
+            params: { prompt: `Enter ${st.name || st.id}`, added_by: "repair" },
+          });
+          doors++;
+        }
+        if (!doors) { skipped.push({ ...f, why: "no enterable structure is missing a door" }); break; }
+        applied.push({ fix: "add_doors", doors });
+        break;
+      }
+
+      case "add_behaviors": {
+        // Derived entirely from entities that already exist. Every NPC gets an
+        // ai routine, every enterable structure a door, every item a pickup.
+        // Nothing is invented; what was missing was the layer that makes the
+        // existing cast do anything.
+        m.behaviors = m.behaviors || [];
+        m.interactions = m.interactions || [];
+        const wired = new Set(m.interactions.map((i) => i.target_ref));
+        const have = new Set(m.behaviors.map((b) => b.kind));
+        const made = [];
+        const wire = (target, bid, kind, spec, prompt) => {
+          if (!byId(m.behaviors, bid)) { m.behaviors.push({ id: bid, kind, spec }); made.push(kind); }
+          if (!wired.has(target)) {
+            m.interactions.push({ id: `interaction_${kind}_${target}`, trigger: "interact", target_ref: target, behavior_ref: bid, params: { prompt, added_by: "repair" } });
+            wired.add(target);
+          }
+        };
+        for (const n of m.npcs || []) {
+          if (!npcHasSpeech(n)) continue;
+          wire(n.id, `behavior_talk_${n.id}`, "npc_ai", { npc: n.id, mode: "dialogue" }, `Talk to ${n.name || n.id}`);
+        }
+        for (const st of (m.structures || []).filter((x) => x.enterable)) {
+          wire(st.id, `behavior_door_${st.id}`, "door", { opens: "inward", speed: 2, auto_close_s: 30 }, `Enter ${st.name || st.id}`);
+        }
+        for (const it of m.items || []) {
+          wire(it.id, `behavior_pickup_${it.id}`, "pickup", { item: it.id }, `Take ${it.name || it.id}`);
+        }
+        if (!made.length) {
+          skipped.push({ ...f, why: `nothing to derive behaviours from (${(m.npcs || []).length} npcs, ${(m.structures || []).length} structures, ${(m.items || []).length} items); behaviour cannot be invented from an empty world` });
+          break;
+        }
+        applied.push({ fix: "add_behaviors", added: made.length, kinds: [...new Set(made)], kinds_before: [...have] });
+        break;
+      }
+
+      case "add_quest": {
+        // A quest built ONLY from what the world already contains. If there are
+        // zones to visit, the objective is to visit them; if there is an item
+        // and someone to bring it to, it is a delivery. What this must never do
+        // is invent a story goal the world has no entities for — a quest whose
+        // steps reference things that do not exist is worse than no quest, and
+        // validateQuests would rightly reject it a moment later.
+        m.quests = m.quests || [];
+        const zones = m.zones || [];
+        const items = m.items || [];
+        const talkers = (m.npcs || []).filter(npcHasSpeech);
+        let quest = null;
+
+        if (items.length && talkers.length) {
+          const item = items[0], giver = talkers[0];
+          quest = {
+            id: "quest_recovered_delivery",
+            name: `Return the ${item.name || item.id}`,
+            giver_npc: giver.id,
+            steps: [
+              { id: "step_find", kind: "collect", target_ref: item.id, count: 1, description: `Find the ${item.name || item.id}` },
+              { id: "step_return", kind: "talk", target_ref: giver.id, description: `Bring it to ${giver.name || giver.id}` },
+            ],
+            rewards: [],
+          };
+        } else if (zones.length >= 2) {
+          quest = {
+            id: "quest_recovered_survey",
+            name: "Walk the ground",
+            giver_npc: talkers[0]?.id || null,
+            steps: zones.slice(0, 4).map((z, i) => ({
+              id: `step_visit_${z.id}`, kind: "visit", target_ref: z.id, order: i,
+              description: `Reach ${z.name || z.id}`,
+            })),
+            rewards: [],
+          };
+        }
+
+        if (!quest) {
+          skipped.push({ ...f, why: `nothing to build an objective from (${zones.length} zones, ${items.length} items, ${talkers.length} speaking npcs)` });
+          break;
+        }
+        quest.added_by = "repair";
+        m.quests.push(quest);
+        applied.push({ fix: "add_quest", quest: quest.id, steps: quest.steps.length });
+        break;
+      }
+
+      case "reassign_giver": {
+        // The quest points at an NPC that does not exist. Prefer an NPC in the
+        // same zone as the quest's own steps, so the reassignment is at least
+        // geographically coherent; failing that, clear the giver rather than
+        // silently attaching the quest to an unrelated stranger across the map.
+        const q = byId(m.quests, f.where);
+        if (!q) { skipped.push({ ...f, why: "quest gone" }); break; }
+        const stepZones = new Set(
+          (q.steps || [])
+            .map((st) => byId(m.zones, st.target_ref) || byId(m.structures, st.target_ref) || byId(m.npcs, st.target_ref))
+            .map((e) => e?.zone || e?.id)
+            .filter(Boolean)
+        );
+        const local = (m.npcs || []).find((n) => stepZones.has(n.zone) && npcHasSpeech(n));
+        if (local) {
+          q.giver_npc = local.id;
+          applied.push({ fix: "reassign_giver", quest: q.id, to: local.id, why: "an NPC in the quest's own ground" });
+          break;
+        }
+        const missing = q.giver_npc;
+        q.giver_npc = null;
+        applied.push({ fix: "reassign_giver", quest: q.id, to: null, dropped: missing, why: "no NPC in the quest's zones; a quest with no giver beats one attributed to a stranger" });
+        break;
+      }
+
+      case "flatten_zone": {
+        // Geometry, not content. A zone that is only a few percent walkable is
+        // not a place you can be, so the terrain under it is eased toward its
+        // own median height. The heightmap is the same data the runtime walks
+        // on, so this is a real change, not a relabelling of the finding.
+        const z = byId(m.zones, f.where);
+        const hm = m.terrain?.heightmap;
+        if (!z || !Array.isArray(hm) || !hm.length) {
+          skipped.push({ ...f, why: !z ? "zone gone" : "this world has no heightmap to flatten" });
+          break;
+        }
+        const size = m.terrain.size || { w: hm[0].length, h: hm.length };
+        const [x0, z0, x1, z1] = z.bounds;
+        const cols = hm[0].length, rows = hm.length;
+        const cx0 = Math.max(0, Math.floor((x0 / size.w) * cols)), cx1 = Math.min(cols - 1, Math.ceil((x1 / size.w) * cols));
+        const cz0 = Math.max(0, Math.floor((z0 / size.h) * rows)), cz1 = Math.min(rows - 1, Math.ceil((z1 / size.h) * rows));
+        const vals = [];
+        for (let r = cz0; r <= cz1; r++) for (let c = cx0; c <= cx1; c++) vals.push(hm[r][c]);
+        if (!vals.length) { skipped.push({ ...f, why: "the zone covers no heightmap cells" }); break; }
+        vals.sort((a, b) => a - b);
+        const median = vals[Math.floor(vals.length / 2)];
+        // Eased, not levelled: a billiard-table zone reads as broken terrain.
+        const EASE = 0.75;
+        let touched = 0;
+        for (let r = cz0; r <= cz1; r++) {
+          for (let c = cx0; c <= cx1; c++) {
+            hm[r][c] = hm[r][c] + (median - hm[r][c]) * EASE;
+            touched++;
+          }
+        }
+        applied.push({ fix: "flatten_zone", zone: z.id, cells: touched, toward: Number(median.toFixed(3)), ease: EASE });
+        break;
+      }
+
       default:
+        if (UNREPAIRABLE[f.fix]) { skipped.push({ ...f, why: UNREPAIRABLE[f.fix], declined: true }); break; }
         skipped.push({ ...f, why: f.fix ? `no repair implemented for '${f.fix}'` : "not automatically repairable" });
     }
   }
