@@ -1169,3 +1169,56 @@ test("LANE C/W4: an owner-only refusal must not confirm a world the caller could
   assert.equal((await repo.get("secret-draft", { requesterId: "victim", requireOwner: true })).owner_id, "victim");
   assert.equal((await repo.get("public-world", { requesterId: "victim", requireOwner: true })).owner_id, "victim");
 });
+
+test("LANE C/W5: a read served from the shadow because the primary was down says so", async (t) => {
+  const w = console.warn; console.warn = () => {}; t.after(() => { console.warn = w; });
+  // A write that the primary refused returns `_mirrored:false` and server.mts
+  // surfaces it as `persistence_degraded`. A READ that the primary could not
+  // answer returned the shadow's record with nothing at all to say so — the one
+  // silent remote->file fallback left in this module.
+  //
+  // It is not cosmetic. WorldRepository._upsert calls store.get() to decide the
+  // NEXT VERSION NUMBER and to run the ownership check. If that read came from
+  // the shadow because the primary was unreachable, both were decided on
+  // possibly stale evidence — another instance may have advanced the world — and
+  // the write proceeded anyway with the caller told nothing. Degrading rather
+  // than refusing is this module's deliberate choice; doing it silently is not.
+  const dir = tmp();
+  const shadow = new FileWorldStore(path.join(dir, "w"));
+  let up = true;
+  // A primary that actually HOLDS what it accepted. One that answered null to
+  // every read would be a primary saying "no such world", which the mirror is
+  // right to believe — a different scenario from the outage under test.
+  const rows = new Map();
+  const primary = {
+    kind: "supabase",
+    async put(r) { if (!up) throw new Error("primary unreachable"); rows.set(r.world_id, r); return r; },
+    async get(id) { if (!up) throw new Error("primary unreachable"); return rows.get(id) || null; },
+    async list() { if (!up) throw new Error("primary unreachable"); return [...rows.values()]; },
+    async delete(id) { if (!up) throw new Error("primary unreachable"); rows.delete(id); },
+  };
+  const store = new MirroredWorldStore(primary, shadow);
+  const repo = new WorldRepository(store, new VersionHistoryStore(path.join(dir, "v")));
+
+  await repo.upsert({ worldId: "w", ownerId: "u", manifest: { meta: { title: "a" } } });
+  const healthy = await store.get("w");
+  assert.equal(healthy._degraded, undefined, "a healthy read carries no degradation marker");
+
+  up = false;
+  const degraded = await store.get("w");
+  assert.ok(degraded, "the outage still degrades to the shadow rather than losing the world");
+  assert.ok(degraded._degraded, "and the record says the primary did not answer it");
+  assert.match(String(degraded._degraded), /unreachable/, "carrying the reason");
+
+  // The repository passes it on, so a write decided on a degraded read is not
+  // reported as though the world's version and owner were freshly confirmed.
+  const saved = await repo.upsert({ worldId: "w", ownerId: "u", manifest: { meta: { title: "b" } } });
+  assert.ok(saved._read_degraded, "an upsert whose read was degraded says so");
+  assert.equal(saved.state, "draft", "and is otherwise a normal write");
+
+  // The marker is a report, never something that reaches the disk.
+  up = true;
+  const clean = await store.get("w");
+  assert.equal(clean._degraded, undefined, "the marker is not persisted into the record");
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "w", "w.json"), "utf8"))._degraded, undefined);
+});

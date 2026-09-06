@@ -662,7 +662,24 @@ export class MirroredWorldStore {
     if (state === "delete") return null;                       // tombstoned here; the primary is behind
     if (state === "put") return await this.shadow.get(id);     // the shadow is AHEAD of the primary
     const remote = await optional("supabase-world-read", () => this.primary.get(id));
-    if (!remote.ok) return await this.shadow.get(id);          // degraded: the last thing we know
+    if (!remote.ok) {
+      // Degraded: the last thing we know beats nothing at all — but SAY SO. A
+      // write that the primary refused returns _mirrored:false and server.mts
+      // surfaces it as persistence_degraded; a read the primary could not answer
+      // used to hand back the shadow's record with nothing to distinguish it
+      // from a confirmed one. That is the one silent remote->file fallback left
+      // in this module, and it is not cosmetic: WorldRepository._upsert reads
+      // through here to decide the NEXT VERSION and to run the OWNERSHIP check,
+      // so a degraded read means both were decided on evidence another instance
+      // may already have moved past. Degrading rather than refusing is this
+      // module's deliberate choice; doing it silently is not.
+      //
+      // A report, never a stored field: the marker is attached to the copy
+      // being returned, and _upsert builds the record it writes from named
+      // fields, so it cannot reach the disk or the primary.
+      const local = await this.shadow.get(id);
+      return local ? { ...local, _degraded: remote.error } : local;
+    }
     if (remote.value) return remote.value;
     await this._reportDivergence(id);
     return null;                                               // the primary answered, and it said no
@@ -998,6 +1015,9 @@ export class WorldRepository {
       // told `idempotent:true` and nothing else would believe it was mirrored.
       const pending = this.store.mirrorState ? await this.store.mirrorState(worldId) : null;
       return { ...existing, idempotent: true, ...(pending === "put" ? { _mirrored: false } : {}) };
+      // `existing._degraded` rides along in the spread, which is correct: an
+      // "idempotent" answer computed against a shadow the primary has not
+      // confirmed is exactly the answer a caller must not read as settled.
     }
     const now = new Date().toISOString();
     const record = {
@@ -1027,7 +1047,16 @@ export class WorldRepository {
         created_by: ownerId ?? null, created_at: record.updated_at,
       });
     }
-    return { ...record, ...(saved && saved._mirrored === false ? { _mirrored: false, _mirror_error: saved._mirror_error } : {}), idempotent: false };
+    return {
+      ...record,
+      ...(saved && saved._mirrored === false ? { _mirrored: false, _mirror_error: saved._mirror_error } : {}),
+      // The version above and the ownership check were both decided from
+      // `existing`. If that read was served by the shadow because the primary
+      // did not answer, the caller is told, rather than being handed a version
+      // number that looks freshly confirmed. See MirroredWorldStore.get.
+      ...(existing && existing._degraded ? { _read_degraded: existing._degraded } : {}),
+      idempotent: false,
+    };
   }
 
   /**
