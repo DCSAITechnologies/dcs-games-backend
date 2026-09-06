@@ -751,16 +751,61 @@ export function createSocialService(env = process.env, deps = {}) {
      * Browse published worlds. Sorting is over MEASURED activity, so an empty
      * platform ranks everything at zero rather than inventing popularity.
      */
+    /**
+     * Stats for MANY worlds in one pass.
+     *
+     * discover() used to call worldStats() per world, and each of those reads
+     * the whole plays file and the whole ratings file — so a catalogue of N
+     * worlds cost 2N full-file reads. Measured: /v3/discover p50 went 6ms at 1
+     * world, 53ms at 12, 220ms at 50, 908ms at 200, and throughput fell 47x.
+     * The cliff was catalogue size, not traffic. Both files are now read once
+     * and indexed.
+     */
+    async _statsIndex() {
+      const [allPlays, allRatings] = await Promise.all([plays.all(), ratings.all()]);
+      const idx = new Map();
+      const of = (id) => {
+        let e = idx.get(id);
+        if (!e) { e = { plays: 0, players: new Set(), total_seconds: 0, rating_sum: 0, rating_count: 0 }; idx.set(id, e); }
+        return e;
+      };
+      for (const x of allPlays) {
+        const e = of(x.world_id);
+        e.plays++;
+        e.total_seconds += x.seconds || 0;
+        if (x.principal_id) e.players.add(x.principal_id);
+      }
+      for (const x of allRatings) {
+        const e = of(x.world_id);
+        e.rating_sum += x.rating;
+        e.rating_count++;
+      }
+      return (worldId) => {
+        const e = idx.get(worldId);
+        if (!e) return { plays: 0, unique_players: 0, total_seconds: 0, rating_count: 0, rating_avg: null };
+        return {
+          plays: e.plays,
+          unique_players: e.players.size,
+          total_seconds: e.total_seconds,
+          rating_count: e.rating_count,
+          rating_avg: e.rating_count ? Number((e.rating_sum / e.rating_count).toFixed(2)) : null,
+        };
+      };
+    },
+
     async discover(worlds, { sort = "recent", genre = null, limit = 24, q = null } = {}) {
       const rows = [];
+      const statsFor = await svc._statsIndex();
       for (const w of worlds) {
-        const stats = await svc.worldStats(w.world_id);
         const meta = w.manifest?.meta || {};
+        // Filter BEFORE building the row: a world excluded by genre or search
+        // does not need its stats looked up at all.
         if (genre && String(meta.genre || "").toLowerCase() !== String(genre).toLowerCase()) continue;
         if (q) {
           const hay = `${meta.title || ""} ${meta.description || ""} ${(meta.tags || []).join(" ")}`.toLowerCase();
           if (!hay.includes(String(q).toLowerCase())) continue;
         }
+        const stats = statsFor(w.world_id);
         rows.push({
           world_id: w.world_id,
           title: w.title || meta.title || null,
