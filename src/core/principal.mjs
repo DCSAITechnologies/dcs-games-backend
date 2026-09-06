@@ -98,12 +98,27 @@ export function verifyLocalToken(secret, token) {
   if (!safeEqual(sig, expected)) throw Errors.invalidToken("signature mismatch");
   let payload;
   try { payload = b64urlJson(p); } catch { throw Errors.invalidToken("malformed payload"); }
-  if (!payload.sub) throw Errors.invalidToken("token carries no subject");
+  // A SUBJECT IS A STRING. This was `if (!payload.sub)`, so any truthy value
+  // passed and decorate() then coerced it with String(id). sub:12345 and
+  // sub:"12345" became the SAME principal id, and every non-array object
+  // collapsed onto "[object Object]". A principal id is the key for world
+  // ownership, inventories, collections and every ownership comparison in the
+  // estate, so two distinct subjects sharing one id is cross-user access by
+  // construction: each reads and writes the other's objects, and every owner
+  // check agrees they are the same person.
+  if (typeof payload.sub !== "string" || !payload.sub) throw Errors.invalidToken("token carries no subject");
   const now = Math.floor(Date.now() / 1000);
   // `exp` means "not valid ON OR AFTER", and it is second-granular — so `<`
   // kept a token alive for up to a further second past its own expiry,
   // depending only on where in the second it happened to be signed.
-  if (typeof payload.exp === "number" && payload.exp <= now) throw Errors.invalidToken("token expired");
+  // A CREDENTIAL THAT CANNOT EXPIRE IS NOT A SESSION. The check was guarded on
+  // `typeof payload.exp === "number"`, so a token carrying no exp at all skipped
+  // it and was valid forever — and expiry is, as the note above says, the only
+  // revocation local mode has. There is nothing to withdraw such a token with,
+  // and the verification cache had no bound to apply to it either. Every mint
+  // site goes through signLocalToken, which always stamps one.
+  if (typeof payload.exp !== "number" || !Number.isFinite(payload.exp)) throw Errors.invalidToken("token carries no expiry");
+  if (payload.exp <= now) throw Errors.invalidToken("token expired");
   if (typeof payload.nbf === "number" && payload.nbf > now) throw Errors.invalidToken("token not yet valid");
   // The issuer was STAMPED on every token and never checked. Harmless while one
   // secret exists, and this estate is explicitly multi-product with a
@@ -144,10 +159,22 @@ export function createPrincipalResolver(cfg = {}) {
   const secret = localSecret || ephemeralSecret;
   const mode = hasSupabase ? "supabase-jwt" : (localSecret ? "local-hs256" : "local-hs256-ephemeral");
 
-  function decorate(id, source, email, claims = {}) {
+  /**
+   * @param email            the address to REPORT. Profile data; always travels.
+   * @param allowlistEmail   the address that may be matched against
+   *   DCS_INTERNAL_TESTERS. Null when the address is a claim this service cannot
+   *   stand behind. See the call sites: a locally signed token's email is as
+   *   trustworthy as its signature because this service minted it, while an
+   *   address from an external identity provider counts only once that provider
+   *   says it confirmed it.
+   */
+  function decorate(id, source, email, claims = {}, { allowlistEmail = email } = {}) {
     const roles = Array.isArray(claims.roles) ? claims.roles.slice() : [];
-    const key = String(email || id).toLowerCase();
-    const isInternalTester = testers.has(key) || testers.has(String(id).toLowerCase()) || roles.includes("internal_tester");
+    // Only an address this service is willing to stand behind may be matched.
+    // The id-based entry and app_metadata.roles never depended on an unverified
+    // claim, so both still work when the email match is refused.
+    const key = allowlistEmail ? String(allowlistEmail).toLowerCase() : null;
+    const isInternalTester = (!!key && testers.has(key)) || testers.has(String(id).toLowerCase()) || roles.includes("internal_tester");
     if (isInternalTester && !roles.includes("internal_tester")) roles.push("internal_tester");
     return Object.freeze({
       id: String(id),
@@ -234,7 +261,31 @@ export function createPrincipalResolver(cfg = {}) {
       delete userMeta.age_tier;
       delete userMeta.ageTier;
       delete userMeta.is_internal_tester;
-      principal = decorate(u.id, "supabase", u.email, { ...userMeta, ...app });
+      // AN UNCONFIRMED ADDRESS IS NOT AN IDENTITY. DCS_INTERNAL_TESTERS was
+      // matched against u.email with no check that the provider ever confirmed
+      // it, and isInternalTester gates world generation, rollback, marketplace
+      // listings, subscription grants, the T&S console and the moderation
+      // queue. An account holding an unconfirmed allowlisted address got all of
+      // it. An ABSENT confirmation is refused too: absence of evidence is not
+      // evidence, the same rule the world store applies to an absent owner.
+      //
+      // GoTrue reports this as email_confirmed_at, with confirmed_at as the
+      // older spelling; either being a real value is enough. Operators who
+      // cannot rely on it have two mechanisms that never rested on an
+      // unverified claim: an allowlist entry naming the principal ID, and
+      // app_metadata.roles, which is service-role-only and is what this estate
+      // should prefer.
+      const emailConfirmed = !!(u.email_confirmed_at || u.confirmed_at);
+      if (u.email && !emailConfirmed && testers.has(String(u.email).toLowerCase())) {
+        console.warn(JSON.stringify({
+          level: "warn", auth: "unconfirmed-tester-email", principal: String(u.id),
+          detail: "this principal presents an allowlisted email the identity provider has not confirmed; internal-tester privileges were NOT granted. List the principal id in DCS_INTERNAL_TESTERS, or set app_metadata.roles, if this account is genuinely a tester.",
+          ts: new Date().toISOString(),
+        }));
+      }
+      principal = decorate(u.id, "supabase", u.email, { ...userMeta, ...app }, {
+        allowlistEmail: emailConfirmed ? u.email : null,
+      });
       // The same expiry bound the local branch applies. Without it a revoked
       // session still resolved for the full cache TTL, from cache, with no wire
       // traffic — while the comment on the cache claimed otherwise.

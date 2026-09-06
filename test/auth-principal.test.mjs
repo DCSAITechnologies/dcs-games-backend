@@ -430,3 +430,104 @@ test("a resolved principal is frozen, so no route can edit who the caller is", a
     assert.equal(p.id, "alice");
   } finally { clearAuthCache(); }
 });
+
+// =============================================================================
+// LANE C — auth and session integrity, adversarial closure (section 10).
+// Each test is the attack, written first and reproduced against the code as it
+// stood before this lane.
+// =============================================================================
+
+test("LANE C/P1: two different subjects must never collapse onto one principal id", async () => {
+  // ATTACK: `sub` was accepted at any type and then coerced with String(id).
+  // So sub:12345 (number) and sub:"12345" (string) resolve to the SAME principal
+  // id, and every non-array object collapses onto "[object Object]". Principal
+  // ids are the key for world ownership, inventories, collections and every
+  // ownership comparison in the estate, so two distinct subjects sharing one id
+  // is cross-user access by construction — one reads and writes the other's
+  // objects, and every owner check agrees they are the same person.
+  const r = mk();
+  for (const bad of [12345, true, { a: 1 }, ["x"], null, ""]) {
+    await assert.rejects(
+      () => r.resolve({ authorization: "Bearer " + signLocalToken(SECRET, { sub: bad }) }),
+      (e) => e.code === "invalid_token",
+      `sub ${JSON.stringify(bad)} must be refused, not coerced into an id`,
+    );
+  }
+  const ok = await r.resolve({ authorization: "Bearer " + signLocalToken(SECRET, { sub: "12345" }) });
+  assert.equal(ok.id, "12345", "a real string subject still resolves");
+});
+
+test("LANE C/P2: a local token with no expiry is refused, because expiry is the only revocation", async () => {
+  // ATTACK: verifyLocalToken guarded the expiry check with
+  // `typeof payload.exp === "number"`, so a token carrying NO exp skipped it and
+  // was valid forever. This file's own comment says expiry is "the only
+  // revocation local mode has" — so a token without one can never be withdrawn,
+  // and the verification cache had no bound to apply to it either.
+  const forever = signLocalToken(SECRET, { sub: "m", exp: undefined });
+  assert.equal(JSON.parse(Buffer.from(forever.split(".")[1], "base64url").toString()).exp, undefined,
+    "precondition: the token really carries no exp");
+  await assert.rejects(
+    () => mk().resolve({ authorization: "Bearer " + forever }),
+    (e) => e.code === "invalid_token",
+    "a credential that can never expire must not be accepted",
+  );
+  // A normally minted token is unaffected.
+  const good = await mk().resolve({ authorization: "Bearer " + signLocalToken(SECRET, { sub: "m" }, 60) });
+  assert.equal(good.id, "m");
+});
+
+test("LANE C/P3: an unconfirmed email must not satisfy the internal-tester allowlist", async () => {
+  // ATTACK: privilege escalation by claiming an allowlisted address.
+  //
+  // DCS_INTERNAL_TESTERS is matched against u.email straight off the GoTrue user
+  // object, with no check that the identity provider ever confirmed the address.
+  // isInternalTester gates world generation, rollback, marketplace listings,
+  // subscription grants, the T&S console and the moderation queue. An account
+  // holding an unconfirmed allowlisted address got all of it.
+  //
+  // An absent confirmation is not evidence of confirmation, so it is refused
+  // too — the same rule the world store applies to an absent owner. The two
+  // mechanisms that do not depend on an unverified claim still work: an
+  // allowlist entry naming the principal ID, and app_metadata.roles, which is
+  // service-role-only and is the mechanism this estate should prefer.
+  const supa = (u) => createPrincipalResolver({
+    supabaseUrl: "https://example.supabase.co", supabaseKey: "svc",
+    internalTesters: "alice@dcsai.ai,real-uuid-on-the-list",
+    fetch: async () => ({ ok: true, status: 200, json: async () => u }),
+  });
+  const who = async (u) => await supa(u).resolve({ authorization: "Bearer t" });
+
+  const unconfirmed = await who({ id: "attacker", email: "alice@dcsai.ai", email_confirmed_at: null });
+  assert.equal(unconfirmed.isInternalTester, false, "an unconfirmed allowlisted address grants nothing");
+  assert.ok(!unconfirmed.roles.includes("internal_tester"));
+  assert.equal(unconfirmed.email, "alice@dcsai.ai", "the address is still reported — it is profile data");
+
+  const silent = await who({ id: "attacker2", email: "alice@dcsai.ai" });
+  assert.equal(silent.isInternalTester, false, "absent evidence of confirmation is not evidence of confirmation");
+
+  const confirmed = await who({ id: "alice", email: "alice@dcsai.ai", email_confirmed_at: "2026-01-01T00:00:00Z" });
+  assert.equal(confirmed.isInternalTester, true, "a confirmed allowlisted address still works");
+
+  const byConfirmedAt = await who({ id: "alice", email: "alice@dcsai.ai", confirmed_at: "2026-01-01T00:00:00Z" });
+  assert.equal(byConfirmedAt.isInternalTester, true, "GoTrue's older confirmed_at spelling is honoured too");
+
+  // The two mechanisms that never depended on an unverified claim.
+  const byId = await who({ id: "real-uuid-on-the-list", email: "nobody@example.com", email_confirmed_at: null });
+  assert.equal(byId.isInternalTester, true, "an allowlist entry naming the principal id is unaffected");
+  const byAppMeta = await who({ id: "x", email: "nobody@example.com", app_metadata: { roles: ["internal_tester"] } });
+  assert.equal(byAppMeta.isInternalTester, true, "app_metadata.roles is service-role-only and still authoritative");
+
+  // And user_metadata still cannot grant anything (regression on the closed hole).
+  const spoof = await who({ id: "x", email: "nobody@example.com", user_metadata: { roles: ["internal_tester"], email: "alice@dcsai.ai", is_internal_tester: true } });
+  assert.equal(spoof.isInternalTester, false, "user_metadata is user-writable and grants nothing");
+});
+
+test("LANE C/P4: a locally signed token is trusted for its own email, because the service minted it", async () => {
+  // The confirmation rule above is about a claim made by an EXTERNAL identity
+  // provider. In local-hs256 mode the service signs the token itself, so the
+  // email in it is as trustworthy as the signature — requiring a confirmation
+  // field there would break every internal tester with no security gain.
+  const r = mk({ internalTesters: "alice@dcsai.ai" });
+  const p = await r.resolve({ authorization: "Bearer " + signLocalToken(SECRET, { sub: "u1", email: "alice@dcsai.ai" }) });
+  assert.equal(p.isInternalTester, true);
+});

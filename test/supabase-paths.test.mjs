@@ -1456,7 +1456,12 @@ test("auth: a verified token is cached, and two resolvers never share a principa
 });
 
 test("auth: the internal-tester allowlist still works against a supabase principal", async (t) => {
-  const stub = await postgrestStub({ user: { id: "u1", email: "Tester@Example.Invalid" } });
+  // A REAL GoTrue user carries email_confirmed_at; this stub did not, and the
+  // resolver used to match the allowlist on the address regardless. LANE C made
+  // an unconfirmed — or unevidenced — address grant nothing, so the stub now
+  // models the confirmed user this test is about, and the unconfirmed case is
+  // asserted alongside it rather than left unstated.
+  const stub = await postgrestStub({ user: { id: "u1", email: "Tester@Example.Invalid", email_confirmed_at: "2026-01-01T00:00:00Z" } });
   t.after(() => stub.close());
   const auth = mkAuth(stub, { internalTesters: "tester@example.invalid" });
   const p = await auth.resolve({ authorization: "Bearer t" });
@@ -1464,6 +1469,12 @@ test("auth: the internal-tester allowlist still works against a supabase princip
   assert.ok(p.roles.includes("internal_tester"));
   assert.equal(auth.isInternalTesterId("TESTER@example.invalid"), true);
   assert.equal(auth.isInternalTesterId("someone@else.invalid"), false);
+
+  const unconfirmed = await postgrestStub({ user: { id: "u2", email: "Tester@Example.Invalid", email_confirmed_at: null } });
+  t.after(() => unconfirmed.close());
+  const q = await mkAuth(unconfirmed, { internalTesters: "tester@example.invalid" }).resolve({ authorization: "Bearer t" });
+  assert.equal(q.isInternalTester, false, "an address the provider never confirmed is not an identity");
+  assert.ok(!q.roles.includes("internal_tester"));
 });
 
 // ===========================================================================

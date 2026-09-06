@@ -831,10 +831,14 @@ test("B6: a rollback to a version that does not exist is a 404, not a silent no-
 });
 
 test("B6 GATE: another creator cannot roll back your world", async () => {
+  // LANE C: still REFUSED. The status narrowed from 403 to 404 because this
+  // world is a DRAFT — mallory has no way to learn it exists, so the refusal
+  // must not confirm the id for her (worldstore.mjs get(), requireOwner). A
+  // PUBLISHED world, which she can already read, still answers 403.
   const r = await req(`/v3/worlds/${generatedId}/rollback`, {
     method: "POST", headers: json(MALLORY_TESTER), body: JSON.stringify({ to_version: 1 }),
   });
-  assert.equal(r.status, 403, await r.text());
+  assert.equal(r.status, 404, await r.text());
 });
 
 test("a world made through the v3 stack is loadable by the CW5 runtime", async () => {
@@ -881,13 +885,17 @@ test("A1 GATE: a save delta cannot grant ownership to anyone, including its send
 });
 
 test("A1 GATE: a stranger cannot shape a world's runtime objects at all", async () => {
+  // LANE C: still REFUSED, and the delta is still not applied. The status
+  // narrowed from 403 to 404 for the same reason as the rollback gate above:
+  // this world is a DRAFT, so confirming its existence to a stranger is the
+  // existence oracle the read path was fixed for.
   const r = await req(`/worlds/${rollbackWorldId}/save`, {
     method: "POST", headers: json(MALLORY_TESTER),
     body: JSON.stringify({ delta: { seq: 9003, ops: [
       { op: "remove_object", object_id: "struct_hall" },
     ] } }),
   });
-  assert.equal(r.status, 403, await r.text());
+  assert.equal(r.status, 404, await r.text());
 });
 
 test("A1: the owner can still save a delta on their own behalf", async () => {
