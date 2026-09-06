@@ -18,6 +18,8 @@ import { validateManifest } from "../src/v3/manifest/schema.mjs";
 import { playtestAndRepair } from "../src/v3/playtest/agent.mjs";
 import { manifestHash } from "../src/core/worldstore.mjs";
 import { createWorldMemory } from "../src/v3/memory/world-memory.mjs";
+import { createLiveStateService, mergeLiveState } from "../src/core/livestate.mjs";     // B2: the server reads live state for itself
+import { createCompanionService } from "../src/v3/companion/companion.mjs";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -675,4 +677,171 @@ test("B6 rollback: a rollback event with no versions is refused by the chronicle
     (e) => e.httpStatus === 422,
   );
   assert.deepEqual(await mem.chronology("w_rb"), [], "an event that cannot say what it undid is not written");
+});
+
+// ====================================================== B2: the server reads
+// ====================================================== live state for itself
+//
+// The gate above works, and until now it only worked if the CALLER chose to
+// arm it. `server.mts:1273` built the live state from `b.live_state`, so a
+// request that simply omitted the field disarmed five of the six HOLDS
+// categories — the protection was opt-in by the very caller it protects
+// against. These tests drive the same gate from `src/core/livestate.mjs`,
+// which reads the stores instead of asking.
+
+/** A live-state service over a real companion store plus a stand-in CW5 engine. */
+function liveStateOver({ dir, snapshotsByWorld = null } = {}) {
+  return createLiveStateService({
+    companions: dir ? { dir } : null,
+    persistence: snapshotsByWorld
+      ? {
+        async load(worldId) {
+          if (!(worldId in snapshotsByWorld)) throw new Error(`load: base world ${worldId} not found`);
+          return snapshotsByWorld[worldId];
+        },
+      }
+      : null,
+  });
+}
+
+test("B2 rollback: a companion memory recorded on the SERVER refuses the rollback, with no client live_state", async () => {
+  const v1 = await world("A small nordic port town", "w_b2_companion");
+  const v2 = expand(v1, "add a hospital district");
+  const held = newIds(v1, v2).npcs[0];
+  assert.ok(held, "the fixture needs an NPC that only exists at v2");
+
+  // A real player, a real companion, a real memory in the real store.
+  const companions = createCompanionService(tmpEnv());
+  await companions.adopt("u_player", v1.world_id, { persona: "guide" });
+  await companions.remember("u_player", v1.world_id, { text: "the ward doctor helped me", refs: [held] });
+
+  // The defect, demonstrated: the caller omits live_state and the rollback goes
+  // through, taking the NPC the companion remembers with it.
+  const undefended = planRollback(v2, v1, { actorId: "u1", toVersion: 1 });
+  assert.ok(!undefended.manifest.npcs.some((n) => n.id === held), "without server-side live state the held NPC is deleted");
+
+  // The fix: the server determines live state for itself and the same rollback
+  // is refused by name.
+  const determined = await liveStateOver({ dir: companions.dir }).liveStateFor(v1.world_id);
+  assert.deepEqual(determined.live_state.companion_memory_refs, [held]);
+
+  assert.throws(
+    () => planRollback(v2, v1, { actorId: "u1", toVersion: 1, liveState: determined.live_state }),
+    (e) => {
+      assert.equal(e.httpStatus, 409);
+      assert.ok(e.detail.includes(held), `the refusal must name '${held}': ${e.detail}`);
+      assert.match(e.detail, /remembered by a companion/);
+      assert.deepEqual(e.meta.blocked_by.map((b) => b.id), [held]);
+      return true;
+    },
+  );
+});
+
+test("B2 rollback: a player's inventory in the runtime store refuses the rollback", async () => {
+  const v1 = await world("A small nordic port town", "w_b2_inventory");
+  const v2 = expand(v1, "add a hospital district");
+  const held = newIds(v1, v2).items[0];
+  assert.ok(held, "the fixture needs an item that only exists at v2");
+
+  // A stored CW5 snapshot: one player, one item, actually written down.
+  const svc = liveStateOver({
+    snapshotsByWorld: {
+      [v1.world_id]: {
+        world_id: v1.world_id, base_world_id: v1.world_id, as_of_seq: 3, ts: new Date().toISOString(),
+        objects: [], inventories: { u_player: [{ item_id: held, qty: 1 }] },
+        npc_states: {}, economy: {}, vars: {},
+      },
+    },
+  });
+  const determined = await svc.liveStateFor(v1.world_id);
+  assert.deepEqual(determined.live_state.inventory_item_ids, [held]);
+
+  assert.throws(
+    () => planRollback(v2, v1, { actorId: "u1", toVersion: 1, liveState: determined.live_state }),
+    (e) => {
+      assert.equal(e.httpStatus, 409);
+      assert.ok(e.detail.includes(held));
+      assert.match(e.detail, /in a player's inventory/);
+      return true;
+    },
+  );
+});
+
+test("B2 rollback: an empty client live_state cannot disarm what the server determined", async () => {
+  const v1 = await world("A small nordic port town", "w_b2_optout");
+  const v2 = expand(v1, "add a hospital district");
+  const held = newIds(v1, v2).items[0];
+
+  const svc = liveStateOver({
+    snapshotsByWorld: {
+      [v1.world_id]: {
+        world_id: v1.world_id, base_world_id: v1.world_id, as_of_seq: 1, ts: new Date().toISOString(),
+        objects: [], inventories: { u_player: [{ item_id: held, qty: 2 }] },
+        npc_states: {}, economy: {}, vars: {},
+      },
+    },
+  });
+  const determined = await svc.liveStateFor(v1.world_id);
+
+  // Every shape of opt-out a caller could send, folded through the merge the
+  // route will use. None of them may reach a successful rollback.
+  for (const attempt of [undefined, null, {}, emptyLiveState(), { inventory_item_ids: [] }, { inventory_item_ids: null }]) {
+    const { live_state } = mergeLiveState(determined.live_state, attempt);
+    assert.throws(
+      () => planRollback(v2, v1, { actorId: "u1", toVersion: 1, liveState: live_state }),
+      (e) => e.httpStatus === 409 && e.detail.includes(held),
+      `live_state=${JSON.stringify(attempt)} disarmed the gate`,
+    );
+  }
+});
+
+test("B2 rollback: client-supplied live state is ADDITIVE — it can still block what the server cannot see", async () => {
+  const v1 = await world("A small nordic port town", "w_b2_additive");
+  const v2 = expand(v1, "add a hospital district");
+  const quest = newIds(v1, v2).quests[0];
+  assert.ok(quest, "the fixture needs a quest that only exists at v2");
+
+  // completed_quest_ids has no store on this estate, so the server determines
+  // nothing for it and says so. A client that DOES know must still be heard.
+  const determined = await liveStateOver({ snapshotsByWorld: { [v1.world_id]: {
+    world_id: v1.world_id, base_world_id: v1.world_id, as_of_seq: 0, ts: new Date().toISOString(),
+    objects: [], inventories: {}, npc_states: {}, economy: {}, vars: {},
+  } } }).liveStateFor(v1.world_id);
+  assert.ok(determined.undetermined.some((u) => u.category === "completed_quest_ids"));
+  assert.equal(determined.nothing_held, false, "an undetermined category is never reported as safe");
+
+  // Without the client's evidence the rollback is allowed.
+  planRollback(v2, v1, { actorId: "u1", toVersion: 1, liveState: determined.live_state });
+
+  const { live_state, added } = mergeLiveState(determined.live_state, { completed_quest_ids: [quest] });
+  assert.deepEqual(added.completed_quest_ids, [quest]);
+  assert.throws(
+    () => planRollback(v2, v1, { actorId: "u1", toVersion: 1, liveState: live_state }),
+    (e) => e.httpStatus === 409 && e.detail.includes(quest) && /cannot be removed|part of a completed quest/.test(e.detail),
+  );
+});
+
+test("B2 rollback: a world with no recorded activity is still rolled back, and says what it could not check", async () => {
+  const v1 = await world("A small nordic port town", "w_b2_quiet");
+  const v2 = expand(v1, "add a hospital district");
+
+  const companions = createCompanionService(tmpEnv());
+  const determined = await liveStateOver({
+    dir: companions.dir,
+    snapshotsByWorld: { [v1.world_id]: {
+      world_id: v1.world_id, base_version: 1, base_world_id: v1.world_id, as_of_seq: 0, ts: new Date().toISOString(),
+      objects: [], inventories: {}, npc_states: {}, economy: {}, vars: {},
+    } },
+  }).liveStateFor(v1.world_id);
+
+  assert.deepEqual(determined.live_state, emptyLiveState());
+  assert.equal(determined.held_total, 0);
+  // Nobody holds anything the server can see, so the rollback proceeds.
+  const { manifest: v3 } = planRollback(v2, v1, { actorId: "u1", toVersion: 1, liveState: determined.live_state });
+  assert.equal(v3.world_version, 3);
+  // And the caller is told exactly how far the check reached, rather than being
+  // left to read six empty arrays as a guarantee.
+  assert.equal(determined.complete, false);
+  assert.deepEqual(determined.undetermined.map((u) => u.category).sort(), ["completed_quest_ids", "known_npc_ids", "visited_zone_ids"]);
+  assert.match(determined.note, /not evidence that nothing is held/);
 });

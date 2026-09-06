@@ -751,9 +751,31 @@ test("B6 GATE: a rollback succeeds, is recorded, and creates a NEW version", asy
   assert.equal(Number(ev.to_version), Number(target), "the event must say which version it moved to");
   assert.ok(Number(ev.from_version) > 0, "the event must say which version it moved from");
 
-  // Honest about how far the ownership check reached.
-  assert.equal(b.live_state_checked, false, "no live state was supplied here");
-  assert.match(b.live_state_note, /not verified|only ownership recorded/i);
+  // Honest about how far the ownership check reached. The server determines
+  // live state for itself now, so this is no longer a yes/no about what the
+  // CLIENT sent — it names which categories were actually established and which
+  // could not be. "I could not check" must never render as "nothing is held".
+  assert.ok(Array.isArray(b.live_state_checked), "the response must name what it checked");
+  assert.ok(Array.isArray(b.live_state_not_checked), "and what it could not");
+  assert.equal(typeof b.live_state_complete, "boolean");
+  assert.equal(b.live_state_from_client, null, "no client live state was supplied here");
+  // completed_quest_ids and known_npc_ids have no durable source on this estate
+  // yet, so they must be reported as unchecked rather than silently empty.
+  const checked = b.live_state_checked.map((x) => x.category ?? x);
+  // Ownership and inventory DO have a real durable source, and a v3-created
+  // world must be registered with the runtime engine for them to be readable.
+  // Before that registration existed they reported UNAVAILABLE for exactly the
+  // worlds people actually make, so the protection was honest but blind.
+  assert.ok(checked.includes("owned_entity_ids"), `ownership must be checkable for a v3 world, got checked=${JSON.stringify(checked)}`);
+  assert.ok(checked.includes("inventory_item_ids"), `inventory must be checkable for a v3 world, got checked=${JSON.stringify(checked)}`);
+
+  const gaps = b.live_state_not_checked.map((x) => x.category ?? x);
+  assert.ok(gaps.includes("completed_quest_ids"), `expected an honest gap, got ${JSON.stringify(gaps)}`);
+  for (const g of b.live_state_not_checked) {
+    assert.ok(g.reason && g.reason.length > 0, `every gap must say WHY: ${JSON.stringify(g)}`);
+  }
+  assert.equal(b.live_state_complete, false, "the guarantee is not complete while two categories have no source");
+  assert.ok(b.live_state_note && b.live_state_note.length > 0);
 });
 
 test("B6 GATE: a target that no longer passes the playtest gate is refused, not shipped", async () => {

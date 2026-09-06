@@ -7,11 +7,11 @@
   "scripts": {
     "start": "tsx server.mts",
     "dev": "tsx server.mts",
-    "test": "npm run test:unit && npm run test:api && npm run test:load && npm run test:browser && npm run test:e2e",
+    "test": "npm run test:unit && npm run test:unit:tsx && npm run test:api && npm run test:load && npm run test:browser && npm run test:e2e",
     "test:unit": "node --test test/auth-principal.test.mjs test/world-persistence.test.mjs test/safety.test.mjs test/schema-migrations.test.mjs test/manifest-v3.test.mjs test/assembly-router.test.mjs test/playtest.test.mjs test/evolution.test.mjs test/social-discovery.test.mjs test/collection.test.mjs test/progression.test.mjs test/marketplace.test.mjs test/fork.test.mjs test/npc-memory.test.mjs test/vision.test.mjs test/stitch.test.mjs test/jobs.test.mjs test/verification.test.mjs test/world-rollback.test.mjs test/world-diff.test.mjs test/subscriptions.test.mjs test/atlas-provenance.test.mjs test/security-regression.test.mjs test/adversarial-evolution.test.mjs test/cw1-identity.test.mjs",
     "test:api": "node --import tsx --test test/api-integration.test.mjs",
     "test:browser": "node --test --test-concurrency=1 test/frontend-truth.test.mjs test/runtime-v3.test.mjs test/runtime-perf.test.mjs",
-    "test:ci": "npm run test:unit && npm run test:api && npm run test:load",
+    "test:ci": "npm run test:unit && npm run test:unit:tsx && npm run test:api && npm run test:load",
     "smoke": "node scripts/smoke.mjs",
     "migrate": "node scripts/migrate.mjs",
     "staging": "./scripts/staging.sh",
@@ -22,7 +22,8 @@
     "verify-release": "node scripts/verify-release.mjs",
     "monitor-dark": "node scripts/monitor-dark.mjs",
     "test:load": "node --test test/load-smoke.test.mjs",
-    "load-test": "node scripts/load-test.mjs"
+    "load-test": "node scripts/load-test.mjs",
+    "test:unit:tsx": "node --import tsx --test test/livestate.test.mjs"
   },
   "dependencies": {
     "tsx": "^4.22.4"

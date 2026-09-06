@@ -30,7 +30,8 @@ import { planStitch, recordStitch, stitchSummary, checkStitchPermission } from "
 import { applyDelta, verifyPreservation, emptyLiveState, newDelta } from "./src/v3/expansion/delta.mjs";
 import { planRollback, recordRollback } from "./src/v3/expansion/rollback.mjs";              // B6: rollback as a new version, never a rewind
 import { diffManifests } from "./src/v3/expansion/diff.mjs";                 // B6: what actually changed between two versions
-import { createSubscriptionsService } from "./src/core/subscriptions.mjs";   // B15: subscriptions, built DARK — nothing is purchasable
+import { createSubscriptionsService } from "./src/core/subscriptions.mjs";
+import { createLiveStateService, mergeLiveState } from "./src/core/livestate.mjs";  // B2: the server reads player-held state instead of asking the client for it   // B15: subscriptions, built DARK — nothing is purchasable
 import { createWorldMemory } from "./src/v3/memory/world-memory.mjs";           // B7: factual world chronology
 import { createCompanionService } from "./src/v3/companion/companion.mjs";      // B5: personal AI companion
 import { createNpcMemory } from "./src/v3/companion/npc-memory.mjs";            // 9.5: NPC memory + procedural quests from RECORDED state
@@ -75,6 +76,11 @@ const v3 = createAssemblyRouter();                                           // 
 const worldMemory = createWorldMemory();                                     // B7
 const companions = createCompanionService({ worldMemory });                  // B5
 const npcMemory = createNpcMemory({ worldMemory });                          // 9.5
+// B2: what players actually hold, read from the estate's own records.
+// Every route that can destroy content used to take this from the REQUEST BODY,
+// so the protection was opt-in by the caller it protects against: omitting
+// live_state left inventory, companion memory and quest progress unchecked.
+const liveStateSvc = createLiveStateService({ persistence, companions });
 const market = createMarketplaceService();                                   // B15: prepared, and dark at the schema level
 const verification = createVerificationService();                            // P2
 const jobsvc = createJobService();                                           // P1: async generation
@@ -161,6 +167,52 @@ async function mustBe(req: http.IncomingMessage, cid: string) {
   return await auth.require(req.headers as any, cid);
 }
 /** Builder/economy/testing surfaces: authenticated AND on the internal-tester allowlist. */
+/**
+ * Live state for a world, determined by the SERVER, with any client-supplied
+ * state folded in additively on top.
+ *
+ * Client evidence can only ever ADD a hold, never remove one, so omitting
+ * `live_state` is no longer a way to opt out of the check that stops a rollback
+ * or an expansion deleting a player's property.
+ */
+/**
+ * Register a v3 world with the CW5 persistence engine.
+ *
+ * Only the legacy POST /worlds/generate did this, so worlds made through the v3
+ * stack — which is every world made today — had no base world. persistence.load()
+ * then THROWS for them, which meant the two live-state categories that DO have a
+ * real durable source (owned entities and inventory) reported UNAVAILABLE for
+ * exactly the worlds people create. The protection was honest about being blind,
+ * but it was blind.
+ *
+ * A v3 structure id IS the CW5 object id — src/v3/manifest/migrate.mjs maps
+ * objects[].object_id to structures[].id — so the base is derived from the
+ * manifest rather than invented.
+ */
+async function registerV3BaseWorld(worldId: string, manifest: any, cid: string) {
+  const objects = (manifest?.structures || []).map((sct: any) => ({
+    object_id: sct.id,
+    kind: sct.kind || sct.archetype || "structure",
+    transform: sct.transform?.position || sct.position || { x: 0, y: 0, z: 0 },
+    owner_id: sct.owner_id ?? null,
+  }));
+  // Best effort by design: a world must still be created if the runtime engine
+  // is unavailable. It is reported rather than swallowed, and liveStateFor will
+  // then say it could not determine ownership rather than saying nothing is held.
+  return await optional("cw5-register-base-world", () => persistence.registerBaseWorld({ world_id: worldId, schema_version: "1.0", objects }), cid);
+}
+
+async function liveStateFor(worldId: string, supplied: any) {
+  const determined = await liveStateSvc.liveStateFor(worldId);
+  const merged = mergeLiveState(determined.live_state, supplied || null);
+  return {
+    live: merged.live_state,
+    determined,
+    added: merged.added,
+    supplied: !!supplied && Object.keys(supplied).length > 0,
+  };
+}
+
 async function mustBeInternalTester(req: http.IncomingMessage, cid: string) {
   const p = await auth.require(req.headers as any, cid);
   if (!p.isInternalTester) {
@@ -242,6 +294,7 @@ const server = http.createServer(async (req, res) => {
       social: { profiles: true, friends: true, parties: true, teams: true, studios: true, discovery: true, ...social.describe() },
       safety_persistence: safety.describe(),
       verification: verification.describe(),
+      live_state: liveStateSvc.describe(),
       cross_product: {
         status: crossProductStatus,
         products: crossProductStatus === "AVAILABLE" ? ["games", "sports"] : ["games"],
@@ -909,6 +962,9 @@ const server = http.createServer(async (req, res) => {
       }
 
       const saved = await repo.upsert({ worldId, ownerId: me.id, manifest: gate.manifest, state: "draft", title: gate.manifest.meta.title });
+      // The world now exists to the runtime as well as to the store, so player
+      // ownership and inventory become checkable for it.
+      await registerV3BaseWorld(worldId, gate.manifest, cid);
       await worldMemory.record(worldId, { kind: "created", summary: `"${gate.manifest.meta.title}" was generated from a prompt`, worldVersion: 1, actorId: me.id, detail: { prompt: b.prompt } });
       await social.ensureProfile(me);
       await social.recordWorldCreated(me.id);   // real counters, so /me is measured rather than decorative
@@ -963,7 +1019,7 @@ const server = http.createServer(async (req, res) => {
         const rec = await repo.get(mm[1], { requesterId: me.id, requireOwner: true });
         const { manifest: before } = ensureV3(rec.manifest, { worldVersion: rec.version, creatorId: rec.owner_id });
 
-        const live = { ...emptyLiveState(), ...(b.live_state || {}) };
+        const live = (await liveStateFor(mm[1], b.live_state)).live;
         const delta = planExpansion(before, { request: b.request, author: me.id, seed: b.seed });
         const applied = applyDelta(before, delta, live);              // throws 409 if unsafe
         const preserved = verifyPreservation(before, applied.manifest, live);
@@ -1001,7 +1057,7 @@ const server = http.createServer(async (req, res) => {
           // Honest: an unrecognised edit is a 422 that says what IS supported.
           return send(res, 422, { ok: false, error: "edit_not_understood", detail: plan.error, supported: plan.supported, hint: plan.hint, correlation_id: cid });
         }
-        const applied = applyDelta(before, plan.delta, { ...emptyLiveState(), ...(b.live_state || {}) });
+        const applied = applyDelta(before, plan.delta, (await liveStateFor(mm[1], b.live_state)).live);
         const gate = await playtestAndRepair(applied.manifest);
         if (!gate.passed) {
           return send(res, 422, { ok: false, error: "edit_failed_playtest", detail: "the edited world did not pass the playtest gate and was not saved", verdict: gate.verdict, findings: gate.rounds.at(-1).findings.slice(0, 6), correlation_id: cid });
@@ -1089,7 +1145,7 @@ const server = http.createServer(async (req, res) => {
         const guest = { world_id: guestRec.world_id, owner_id: guestRec.owner_id, state: guestRec.state, version: guestRec.version, manifest: ensureV3(guestRec.manifest, { worldVersion: guestRec.version, creatorId: guestRec.owner_id }).manifest };
 
         const { delta, stitch } = planStitch(host, guest, { stitcherId: me.id, side: b.side || "east", gap: b.gap, label: b.label });
-        const live = { ...emptyLiveState(), ...(b.live_state || {}) };
+        const live = (await liveStateFor(mm[1], b.live_state)).live;
         const applied = applyDelta(host.manifest, delta, live);        // throws 409 if unsafe
         const preserved = verifyPreservation(host.manifest, applied.manifest, live);
         if (!preserved.ok) {
@@ -1270,8 +1326,8 @@ const server = http.createServer(async (req, res) => {
         // get permission to demolish. Manifest-recorded ownership is checked
         // independently inside planRollback, and the response says plainly how
         // far the live-state check reached so nobody reads silence as safety.
-        const live = { ...emptyLiveState(), ...(b.live_state || {}) };
-        const liveStateSupplied = !!b.live_state && Object.keys(b.live_state).length > 0;
+        const ls = await liveStateFor(rec.world_id, b.live_state);
+        const live = ls.live;
         const { manifest, record } = planRollback(currentM, targetM, {
           actorId: me.id, toVersion, liveState: live, reason: b.reason ?? null,
         });
@@ -1297,10 +1353,11 @@ const server = http.createServer(async (req, res) => {
           ok: true, world_id: rec.world_id, rolled_back_to: toVersion,
           world_version: gate.manifest.world_version, record_version: saved.version,
           ownership_preserved: record.ownership_preserved || [],
-          live_state_checked: liveStateSupplied,
-          live_state_note: liveStateSupplied
-            ? "Player-held entities were checked against the live state supplied with this request, and against ownership recorded in the manifest."
-            : "No live state was supplied, so only ownership recorded in the manifest was checked. Inventory, quest progress and companion references were not verified.",
+          live_state_checked: ls.determined.determined,
+          live_state_not_checked: ls.determined.undetermined,
+          live_state_complete: ls.determined.complete,
+          live_state_from_client: ls.supplied ? ls.added : null,
+          live_state_note: ls.determined.note,
           diff: diffManifests(currentM, gate.manifest).summary,
           playtest: gate.verdict, correlation_id: cid,
         });
