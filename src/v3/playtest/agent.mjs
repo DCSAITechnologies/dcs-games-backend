@@ -304,6 +304,44 @@ export function repair(manifest, findings) {
         applied.push({ fix: "place_item", target: item, host: host.id });
         break;
       }
+      case "add_interactions": {
+        // Two validators ask for this fix — `no_interactions` and
+        // `npcs_not_interactive` — and NOTHING implemented it, so the finding
+        // was raised, skipped, and then failed the world. It never showed up
+        // locally because the offline planner always emits interactions; the
+        // first real provider run on staging hit it immediately.
+        //
+        // What is repaired here is WIRING, not content. An NPC that already has
+        // dialogue is one the world intends you to talk to; what is missing is
+        // the interaction that lets you. An NPC with nothing to say is left
+        // alone and reported — inventing speech for it would be exactly the
+        // fabrication this gate exists to catch.
+        m.behaviors = m.behaviors || [];
+        m.interactions = m.interactions || [];
+        const wired = new Set(m.interactions.map((i) => i.target_ref));
+        const mute = [];
+        let added = 0;
+        for (const npc of m.npcs || []) {
+          if (wired.has(npc.id)) continue;
+          const lines = Array.isArray(npc.dialogue) ? npc.dialogue.filter(Boolean) : [];
+          if (!lines.length) { mute.push(npc.id); continue; }
+          const bid = `behavior_talk_${npc.id}`;
+          if (!byId(m.behaviors, bid)) {
+            m.behaviors.push({ id: bid, kind: "npc_ai", spec: { npc: npc.id, mode: "dialogue" } });
+          }
+          m.interactions.push({
+            id: `interaction_talk_${npc.id}`,
+            trigger: "interact",
+            target_ref: npc.id,
+            behavior_ref: bid,
+            params: { prompt: `Talk to ${npc.name || npc.id}`, added_by: "repair" },
+          });
+          added++;
+        }
+        if (!added) { skipped.push({ ...f, why: mute.length ? `every NPC is mute (${mute.length}); dialogue cannot be invented` : "no NPC to wire" }); break; }
+        applied.push({ fix: "add_interactions", wired: added, left_mute: mute.length });
+        break;
+      }
       case "drop_quest":
       case "retarget_step": {
         // Honest repair: a quest that cannot be completed is REMOVED, not

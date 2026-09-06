@@ -387,3 +387,43 @@ test("B4: an item held in a container is obtainable, and the walk agrees with th
   assert.equal(quests.find((q) => q.quest === m.quests[0].id).completable, true);
   assert.equal(validateReferences(m).length, 0);
 });
+
+test("B4 GATE: an NPC with dialogue but no interaction is WIRED, and a mute one is not invented for", async () => {
+  // Found on the first real-provider generation against staging: the model
+  // produced NPCs with dialogue and no interactions, the validator raised
+  // `npcs_not_interactive` with fix `add_interactions`, and NOTHING implemented
+  // that fix — so the finding was skipped and the world was rejected. The
+  // offline planner always emits interactions, which is why every local run
+  // passed.
+  const m = await goodWorld("Saltmarsh Reach", "w_wire");
+  m.interactions = (m.interactions || []).filter((i) => !m.npcs.some((n) => n.id === i.target_ref));
+  m.npcs[0].dialogue = ["The tide is wrong today."];
+  const mute = { id: "npc_mute", name: "Silent Watcher", zone: m.zones[0].id, dialogue: [] };
+  m.npcs.push(mute);
+
+  const r = repair(m, [{ id: "npcs_not_interactive", severity: "major", fix: "add_interactions" }]);
+
+  const talkable = new Set((r.manifest.interactions || []).map((i) => i.target_ref));
+  assert.ok(talkable.has(m.npcs[0].id), "an NPC that has something to say must become reachable");
+  assert.equal(talkable.has("npc_mute"), false, "an NPC with no dialogue must NOT be given invented speech");
+
+  const wired = r.applied.find((a) => a.fix === "add_interactions");
+  assert.ok(wired, "the repair must report itself");
+  assert.ok(wired.left_mute >= 1, "and must say it left the mute ones alone rather than silently dropping them");
+
+  // The property, not a count: every NPC that HAS something to say became
+  // reachable, and every NPC that has nothing to say was left exactly as it was.
+  for (const n of r.manifest.npcs) {
+    const hasLines = Array.isArray(n.dialogue) && n.dialogue.filter(Boolean).length > 0;
+    assert.equal(talkable.has(n.id), hasLines,
+      `${n.id} has dialogue=${hasLines} but interactive=${talkable.has(n.id)}`);
+  }
+
+  // The wiring must be real: the behaviour it points at has to exist.
+  for (const i of r.manifest.interactions.filter((x) => x.id.startsWith("interaction_talk_"))) {
+    assert.ok((r.manifest.behaviors || []).some((b) => b.id === i.behavior_ref),
+      `interaction ${i.id} points at a behaviour that does not exist`);
+  }
+  assert.equal(runAllValidators(r.manifest).some((f) => f.id === "npcs_not_interactive"), false,
+    "and the finding that prompted the repair is gone");
+});
