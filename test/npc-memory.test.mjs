@@ -12,6 +12,7 @@ import path from "node:path";
 import { createAssemblyRouter } from "../src/v3/router/assembly.mjs";
 import { createWorldMemory } from "../src/v3/memory/world-memory.mjs";
 import { createNpcMemory } from "../src/v3/companion/npc-memory.mjs";
+import { createCompanionService } from "../src/v3/companion/companion.mjs";
 import { playtestAndRepair } from "../src/v3/playtest/agent.mjs";
 import { applyDelta, newDelta, emptyLiveState } from "../src/v3/expansion/delta.mjs";
 import { validateManifest } from "../src/v3/manifest/schema.mjs";
@@ -153,4 +154,40 @@ test("9.5: a world with no NPCs cannot produce a quest, and says so", async () =
 test("9.5: asking about an NPC that does not exist is a 404", async () => {
   const { npcMemory, manifest } = await setup();
   await assert.rejects(() => npcMemory.linesFor("w_npc", "npc_ghost", manifest), (e) => e.httpStatus === 404);
+});
+
+// ------------------------------------ the companion store honours its directory
+
+test("B5 GATE: a companion service writes where it is told, however it is asked", async () => {
+  // The failure this closes was silent by construction. `createCompanionService`
+  // takes an options object with an `env` inside it, but its sibling
+  // `createWorldMemory(env)` takes an environment directly, so several callers
+  // passed a bare `{ DCS_DATA_DIR }` in. Destructuring `env` off that gives
+  // undefined, the default `process.env` has no DCS_DATA_DIR, and the store
+  // landed in `process.cwd()/.dcs-data` — one directory shared by every test
+  // that thought it had a private temp one, and by every previous run of the
+  // suite. Nothing failed until an unrelated id change made a rollback test read
+  // back a companion memory written days earlier.
+  const dirs = [];
+  for (const build of [
+    (root) => createCompanionService({ env: { DCS_DATA_DIR: root } }),   // the documented shape
+    (root) => createCompanionService({ DCS_DATA_DIR: root }),            // a bare environment
+  ]) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "dcs-cmp-iso-"));
+    const svc = build(root);
+    assert.ok(svc.dir.startsWith(root), `the store must live under ${root}, not ${svc.dir}`);
+
+    await svc.adopt("u_iso", "w_iso", { persona: "guide" });
+    await svc.remember("u_iso", "w_iso", { text: "we met by the docks", refs: ["npc_iso"] });
+    assert.ok(fs.readdirSync(svc.dir).length > 0, "the memory must be on disk in that directory");
+    dirs.push(svc.dir);
+  }
+  assert.notEqual(dirs[0], dirs[1], "two services given two directories must not share one");
+
+  // The point of the isolation: neither can see the other's memories.
+  for (const [i, dir] of dirs.entries()) {
+    const files = fs.readdirSync(dir);
+    assert.equal(files.length, 1, `${dir} holds another test's state: ${files.join(", ")}`);
+    void i;
+  }
 });

@@ -712,7 +712,7 @@ test("B2 rollback: a companion memory recorded on the SERVER refuses the rollbac
   assert.ok(held, "the fixture needs an NPC that only exists at v2");
 
   // A real player, a real companion, a real memory in the real store.
-  const companions = createCompanionService(tmpEnv());
+  const companions = createCompanionService({ env: tmpEnv() });
   await companions.adopt("u_player", v1.world_id, { persona: "guide" });
   await companions.remember("u_player", v1.world_id, { text: "the ward doctor helped me", refs: [held] });
 
@@ -826,7 +826,7 @@ test("B2 rollback: a world with no recorded activity is still rolled back, and s
   const v1 = await world("A small nordic port town", "w_b2_quiet");
   const v2 = expand(v1, "add a hospital district");
 
-  const companions = createCompanionService(tmpEnv());
+  const companions = createCompanionService({ env: tmpEnv() });
   const determined = await liveStateOver({
     dir: companions.dir,
     snapshotsByWorld: { [v1.world_id]: {

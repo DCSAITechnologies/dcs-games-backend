@@ -25,7 +25,33 @@ export const PERSONAS = {
 
 export const STATES = ["dismissed", "adopted", "following"];
 
-export function createCompanionService({ worldMemory, env = process.env } = {}) {
+/**
+ * @param {{worldMemory?:object, env?:object}|object} [opts]
+ *   Options, or a bare environment — see below for why both are accepted.
+ */
+export function createCompanionService(opts = {}) {
+  // A bare environment is accepted as well as an options object.
+  //
+  // Its sibling takes one directly — `createWorldMemory(env)` — and callers
+  // reasonably assumed this did too, so several passed `{ DCS_DATA_DIR: ... }`
+  // straight in. Destructuring `env` off that yields undefined, `env` falls back
+  // to process.env, DCS_DATA_DIR is unset there, and the store quietly lands in
+  // `process.cwd()/.dcs-data` instead of the caller's directory.
+  //
+  // Quietly is the whole problem. Nothing failed: a test that believed it had an
+  // isolated temp directory shared ONE directory in the working tree with every
+  // other such test and every previous run of the suite, accumulating companion
+  // memories run after run. It surfaced only when an unrelated change altered an
+  // entity id and a rollback test read back a ref written by a run days earlier
+  // — a test that had been passing on stale state rather than on its own.
+  //
+  // Guessing is safe here because the two shapes cannot be confused: an
+  // environment has SCREAMING_CASE keys and neither of the two option names.
+  const looksLikeEnv = opts && typeof opts === "object"
+    && !("env" in opts) && !("worldMemory" in opts)
+    && Object.keys(opts).some((k) => /^[A-Z][A-Z0-9_]*$/.test(k));
+  const { worldMemory, env = process.env } = looksLikeEnv ? { env: opts } : opts;
+
   const dir = path.join(env.DCS_DATA_DIR || path.join(process.cwd(), ".dcs-data"), "companions");
   fs.mkdirSync(dir, { recursive: true });
 
