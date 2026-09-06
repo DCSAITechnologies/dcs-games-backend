@@ -40,7 +40,7 @@ const idb = createIdentityStore();
 const atlas = makeAtlasRoutes({ worlds: Array.from(worlds.values()), events: [], receipts: [], verifiedWorldIds: [] });
 const crossProduct = makeCrossProductRouter({ resolveProductIdentities: (_id: string) => [] }); // CW7 v4.0: Sports identity wired later; honest empty until then
 const econRouter: any = createEconomyRouter({}); // CW6 v3.0: DARK; supabase + signReceipt injected later → honest empty + unsigned receipts, no fabricated sales
-const atlasKey = makeKeyEndpoint({ publicKey: () => process.env.ATLAS_PUBLIC_KEY || atlasPublicKeyBase64() }); // serves the key that matches the local signer
+const atlasKey = makeKeyEndpoint({ publicKey: () => atlasPublicKeyBase64() || process.env.ATLAS_PUBLIC_KEY || "" }); // prefer the raw key derived from the signer (matches sig + browser-embed verifiable)
 
 function send(res: http.ServerResponse, code: number, body: any) {
   res.writeHead(code, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "*", "Access-Control-Allow-Methods": "*" });
