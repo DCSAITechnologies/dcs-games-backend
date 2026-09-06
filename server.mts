@@ -1081,6 +1081,25 @@ const server = http.createServer(async (req, res) => {
           detail: "the generated world did not pass the playtest gate and was not saved",
           verdict: gate.verdict,
           findings: gate.rounds.at(-1).findings.slice(0, 10),
+          // A rejected world is discarded, so without this there is no way to
+          // find out WHY the repair pass could not save it — which is how two
+          // unimplemented repairs survived to be found one at a time on
+          // staging. Say what was attempted, what was declined and on what.
+          repair_log: gate.rounds.map((r) => ({
+            round: r.round,
+            verdict: r.verdict,
+            findings: (r.findings || []).map((f) => f.id),
+            repaired: r.repairs || [],
+            not_repaired: (r.skipped_repairs || []).map((sk) => ({ fix: sk.fix, id: sk.id, why: sk.why })),
+          })),
+          counts: {
+            zones: (gate.manifest.zones || []).length,
+            structures: (gate.manifest.structures || []).length,
+            npcs: (gate.manifest.npcs || []).length,
+            items: (gate.manifest.items || []).length,
+            quests: (gate.manifest.quests || []).length,
+            interactions: (gate.manifest.interactions || []).length,
+          },
           provenance: built.provenance,
           correlation_id: cid,
         });
