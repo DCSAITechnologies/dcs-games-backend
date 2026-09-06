@@ -74,7 +74,16 @@ const SPORTS_URL = (process.env.DCS_SPORTS_IDENTITY_URL || "").replace(/\/$/, ""
 const SPORTS_KEY = process.env.DCS_SPORTS_IDENTITY_KEY || "";
 const crossProductStatus = SPORTS_URL && SPORTS_KEY ? "AVAILABLE" : "UNAVAILABLE";
 const crossProduct = makeCrossProductRouter({ resolveProductIdentities: (_id: string) => [] });
-const econRouter: any = createEconomyRouter({}); // CW6 v3.0: DARK; supabase + signReceipt injected later → honest empty + unsigned receipts, no fabricated sales
+// CW6 v3.0: DARK; constructed with no database client, so its live branch is
+// unreachable by construction.
+//
+// DO NOT DELETE THIS AS DEAD CODE. It looks unused — nothing dispatches it —
+// but the retirement block below reads `econRouter._routes` to decide which
+// paths answer 410. That is what stops the retired-route list drifting from the
+// routes that actually used to exist. Removing this construction makes every
+// CW6 path fall through to the catch-all 404 instead of the 410 that names its
+// replacement, and the server stops booting. (Tried it; 92 API tests failed.)
+const econRouter: any = createEconomyRouter({});
 const v3 = createAssemblyRouter();                                           // B1
 const worldMemory = createWorldMemory();                                     // B7
 const companions = createCompanionService({ worldMemory });                  // B5
