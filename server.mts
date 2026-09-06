@@ -1087,6 +1087,17 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, { ok: true, applied: false, ...gen, correlation_id: cid });
       }
 
+      // ---- retained world versions (what rollback and diff target) --------
+      mm = url.match(/^\/v3\/worlds\/([^/]+)\/versions$/);
+      if (mm && method === "GET") {
+        return send(res, 200, { ok: true, world_id: mm[1], versions: await repo.listVersions(mm[1], { requesterId: principal?.id ?? null }) });
+      }
+      mm = url.match(/^\/v3\/worlds\/([^/]+)\/versions\/(\d+)$/);
+      if (mm && method === "GET") {
+        const v = await repo.getVersion(mm[1], Number(mm[2]), { requesterId: principal?.id ?? null });
+        return send(res, 200, { ok: true, world_id: mm[1], version: v.version, manifest_hash: v.manifest_hash, label: v.label, created_at: v.created_at, manifest: v.manifest });
+      }
+
       mm = url.match(/^\/v3\/worlds\/([^/]+)\/memory$/);
       if (mm && method === "GET") {
         await repo.get(mm[1], { requesterId: principal?.id ?? null });   // read permission

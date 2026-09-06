@@ -134,9 +134,58 @@ export class MirroredWorldStore {
   async delete(id) { await this.shadow.delete(id); await optional("supabase-world-delete", () => this.primary.delete(id)); }
 }
 
+/**
+ * Every accepted world version, retained.
+ *
+ * Migration 0003 declared dcsgames_world_versions for the B6 rollback
+ * requirement, and nothing ever wrote to it: the table existed, the feature it
+ * was for could not work, and the gap was invisible because no code referenced
+ * the table at all. A world could be expanded five times with no way back to
+ * version three.
+ */
+export class VersionHistoryStore {
+  constructor(dir) {
+    this.dir = dir || path.join(process.cwd(), ".dcs-data", "world-versions");
+    fs.mkdirSync(this.dir, { recursive: true });
+  }
+  _p(worldId, version) {
+    if (!/^[A-Za-z0-9._:-]{1,200}$/.test(String(worldId))) throw Errors.validation(`unsafe world id: ${worldId}`);
+    if (!Number.isInteger(version) || version < 1) throw Errors.validation(`unsafe version: ${version}`);
+    return path.join(this.dir, `${encodeURIComponent(String(worldId))}@${version}.json`);
+  }
+  async put(worldId, version, record) {
+    const p = this._p(worldId, version);
+    // A version already written is IMMUTABLE. Overwriting it would silently
+    // rewrite history, which is the one thing rollback must be able to trust.
+    try { await fsp.access(p); return { ...record, already_recorded: true }; }
+    catch { /* not written yet */ }
+    const tmp = p + ".tmp-" + crypto.randomBytes(4).toString("hex");
+    await fsp.writeFile(tmp, JSON.stringify(record));
+    await fsp.rename(tmp, p);
+    return record;
+  }
+  async get(worldId, version) {
+    try { return JSON.parse(await fsp.readFile(this._p(worldId, version), "utf8")); }
+    catch (e) { if (e.code === "ENOENT") return null; throw e; }
+  }
+  async list(worldId) {
+    const prefix = encodeURIComponent(String(worldId)) + "@";
+    const names = (await fsp.readdir(this.dir).catch(() => [])).filter((n) => n.startsWith(prefix) && n.endsWith(".json"));
+    const out = [];
+    for (const n of names) {
+      try {
+        const r = JSON.parse(await fsp.readFile(path.join(this.dir, n), "utf8"));
+        out.push({ version: r.version, manifest_hash: r.manifest_hash, label: r.label ?? null, created_by: r.created_by ?? null, created_at: r.created_at });
+      } catch { /* a half-written temp file is not a version */ }
+    }
+    out.sort((a, b) => a.version - b.version);
+    return out;
+  }
+}
+
 /** The repository the router talks to. Owns ownership rules and the record shape. */
 export class WorldRepository {
-  constructor(store) { this.store = store; }
+  constructor(store, versions = null) { this.store = store; this.versions = versions; }
   get kind() { return this.store.kind; }
 
   /**
@@ -171,6 +220,15 @@ export class WorldRepository {
       updated_at: now,
     };
     const saved = await this.store.put(record);
+    // Retain the version BEFORE returning, so a rollback target always exists for
+    // anything a caller has been told was saved.
+    if (this.versions) {
+      await this.versions.put(worldId, record.version, {
+        world_id: worldId, version: record.version, manifest, manifest_hash: hash,
+        label: manifest?.expansion?.history?.at(-1)?.label ?? null,
+        created_by: ownerId ?? null, created_at: record.updated_at,
+      });
+    }
     return { ...record, ...(saved && saved._mirrored === false ? { _mirrored: false, _mirror_error: saved._mirror_error } : {}), idempotent: false };
   }
 
@@ -184,6 +242,20 @@ export class WorldRepository {
     }
     return r;
   }
+  /** Every retained version of a world, oldest first. */
+  async listVersions(worldId, { requesterId = null } = {}) {
+    await this.get(worldId, { requesterId });          // permission check first
+    return this.versions ? await this.versions.list(worldId) : [];
+  }
+
+  /** One retained version, for a rollback or a diff. */
+  async getVersion(worldId, version, { requesterId = null } = {}) {
+    await this.get(worldId, { requesterId });
+    const v = this.versions ? await this.versions.get(worldId, Number(version)) : null;
+    if (!v) throw Errors.notFound(`version ${version} of world ${worldId}`);
+    return v;
+  }
+
   async listOwned(ownerId, limit = 50) {
     if (!ownerId) throw Errors.validation("owner is required");
     return await this.store.list({ ownerId, limit });
@@ -194,7 +266,9 @@ export class WorldRepository {
 export function createWorldRepository(env = process.env) {
   const url = (env.SUPABASE_URL || "").replace(/\/$/, "");
   const key = env.SUPABASE_SERVICE_ROLE_KEY || "";
-  const file = new FileWorldStore(env.DCS_DATA_DIR ? path.join(env.DCS_DATA_DIR, "worlds") : undefined);
-  if (url && key) return new WorldRepository(new MirroredWorldStore(new SupabaseWorldStore({ url, serviceRoleKey: key }), file));
-  return new WorldRepository(file);
+  const base = env.DCS_DATA_DIR || path.join(process.cwd(), ".dcs-data");
+  const file = new FileWorldStore(path.join(base, "worlds"));
+  const versions = new VersionHistoryStore(path.join(base, "world-versions"));
+  if (url && key) return new WorldRepository(new MirroredWorldStore(new SupabaseWorldStore({ url, serviceRoleKey: key }), file), versions);
+  return new WorldRepository(file, versions);
 }

@@ -462,3 +462,13 @@ test("the legacy CW6 economy surface is retired and names its replacement", asyn
     assert.equal(b.payments_live, false);
   }
 });
+
+test("retained world versions are queryable, and are what a rollback would target", async () => {
+  const v = await (await req(`/v3/worlds/${generatedId}/versions`, { headers: auth(ALICE) })).json();
+  assert.ok(v.versions.length >= 2, `expected several retained versions, got ${v.versions.length}`);
+  assert.ok(v.versions.every((x) => Number.isInteger(x.version) && x.manifest_hash));
+  const first = await (await req(`/v3/worlds/${generatedId}/versions/1`, { headers: auth(ALICE) })).json();
+  assert.equal(first.version, 1);
+  assert.ok(first.manifest, "the retained manifest itself is available");
+  assert.equal((await req(`/v3/worlds/${generatedId}/versions/999`, { headers: auth(ALICE) })).status, 404);
+});

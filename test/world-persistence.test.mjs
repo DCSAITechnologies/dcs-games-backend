@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { FileWorldStore, WorldRepository, MirroredWorldStore, manifestHash, canonicalize } from "../src/core/worldstore.mjs";
+import { FileWorldStore, WorldRepository, MirroredWorldStore, VersionHistoryStore, manifestHash, canonicalize } from "../src/core/worldstore.mjs";
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "dcs-worlds-"));
 
@@ -125,4 +125,56 @@ test("a failing primary store does NOT report a clean success (no false ok:true)
 
 test("canonical hashing is key-order independent", () => {
   assert.equal(manifestHash({ a: 1, b: { c: 2, d: 3 } }), manifestHash({ b: { d: 3, c: 2 }, a: 1 }));
+});
+
+// ---------------------------------------------------- retained version history
+//
+// Migration 0003 declared dcsgames_world_versions for the B6 rollback
+// requirement and nothing ever wrote to it. The table existed, the feature it
+// was for could not work, and the gap was invisible because no code referenced
+// the table at all.
+
+const versioned = () => {
+  const d = tmp();
+  return new WorldRepository(new FileWorldStore(path.join(d, "w")), new VersionHistoryStore(path.join(d, "v")));
+};
+
+test("A3 GATE: every accepted version is retained, so a rollback has a target", async () => {
+  const repo = versioned();
+  for (const n of [1, 2, 3]) await repo.upsert({ worldId: "w1", ownerId: "u1", manifest: { meta: { title: "V" + n }, n } });
+  const versions = await repo.listVersions("w1", { requesterId: "u1" });
+  assert.deepEqual(versions.map((v) => v.version), [1, 2, 3]);
+  assert.equal((await repo.getVersion("w1", 2, { requesterId: "u1" })).manifest.meta.title, "V2");
+});
+
+test("A3 GATE: a retained version is IMMUTABLE — history cannot be rewritten", async () => {
+  const repo = versioned();
+  await repo.upsert({ worldId: "w1", ownerId: "u1", manifest: { meta: { title: "V1" } } });
+  const original = await repo.getVersion("w1", 1, { requesterId: "u1" });
+  // Force a write at the same version, as a buggy caller or a replay might.
+  await repo.versions.put("w1", 1, { world_id: "w1", version: 1, manifest: { meta: { title: "TAMPERED" } }, manifest_hash: "x", created_at: new Date().toISOString() });
+  const after = await repo.getVersion("w1", 1, { requesterId: "u1" });
+  assert.deepEqual(after.manifest, original.manifest, "an already-recorded version must never be overwritten");
+});
+
+test("A3: an idempotent re-save does not create a duplicate version", async () => {
+  const repo = versioned();
+  const m = { meta: { title: "V1" }, a: 1 };
+  await repo.upsert({ worldId: "w1", ownerId: "u1", manifest: m });
+  await repo.upsert({ worldId: "w1", ownerId: "u1", manifest: m });
+  assert.deepEqual((await repo.listVersions("w1", { requesterId: "u1" })).map((v) => v.version), [1]);
+});
+
+test("A3: version history respects the same permissions as the world", async () => {
+  const repo = versioned();
+  await repo.upsert({ worldId: "w1", ownerId: "u1", manifest: { meta: { title: "V1" } }, state: "draft" });
+  await assert.rejects(() => repo.listVersions("w1", { requesterId: "stranger" }), (e) => e.httpStatus === 403);
+  await assert.rejects(() => repo.getVersion("w1", 1, { requesterId: "stranger" }), (e) => e.httpStatus === 403);
+  await assert.rejects(() => repo.getVersion("w1", 99, { requesterId: "u1" }), (e) => e.httpStatus === 404);
+});
+
+test("A3: an unsafe world id or version cannot escape the version directory", async () => {
+  const repo = versioned();
+  await assert.rejects(() => repo.versions.put("../../etc/passwd", 1, {}), (e) => e.httpStatus === 422);
+  await assert.rejects(() => repo.versions.put("w1", -1, {}), (e) => e.httpStatus === 422);
 });
