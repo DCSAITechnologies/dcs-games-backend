@@ -4,14 +4,28 @@
 // This is the identity slice that "wins" per the ruling — richer than the Day0 stub.
 //
 // Zero deps. Reuses CW1's frozen logic. The shared mock keeps its world/netcode/save routes;
-// this owns: /me, /profile/:id, /friends, /parties, /teams, /orgs(+seats), /studios(+split),
-// /subscriptions (DARK), /publish/check, /invite, /verify/*, /identity/portable, /auth/*.
+// this owns: /me, /profile/:id, /subscriptions (DARK), /publish/check, /invite,
+// /identity/portable, /auth/*.
+//
+// It no longer owns friends, parties, teams, studios or orgs. Those were served
+// here from process-local Maps while /social/* served the same four objects
+// durably, so the estate had two stores for one concept — see RETIRED_SOCIAL
+// below for what that actually cost and what replaced it.
 
 import { computeLevel, buildMe, canPublish, publishCredits } from "./identity-core.mjs";
-import { can, validateSplit, seatCheck, portableIdentity } from "./identity-studio.mjs";
-import { createVerificationStore } from "./verification.mjs";
+import { portableIdentity } from "./identity-studio.mjs";
+// createVerificationStore is deliberately NOT imported any more: the only routes
+// that used it (/verify/:channel/{start,confirm}) are retired below, so the
+// module-level store it built was a third in-memory challenge store that nothing
+// could read. An unused store is one a future route can start writing to by
+// accident, which is exactly how the duplication above happened.
 
 // ---- identity store (merge into the shared mock's db, or keep namespaced) ----
+// NOTE: friends/parties/teams/studios/orgs are no longer read or written by any
+// route in this file — the routes below are retired. They remain on the shape
+// only because src/cw1/db.mjs seeds its in-memory fallback repo from this
+// factory. Deleting them would break that fallback silently; db.mjs is where
+// that store is now described and announced.
 export function createIdentityStore() {
   return {
     users: new Map([
@@ -31,7 +45,59 @@ export function createIdentityStore() {
   };
 }
 
-const verifier = createVerificationStore();
+// ---- RETIRED: the process-local social half of this slice ----------------------
+//
+// friends, parties, teams, studios and orgs were served from here out of the
+// Maps on createIdentityStore(), while src/core/social.mjs served the SAME four
+// objects durably at /social/*. Two stores for one concept, and they disagreed
+// on every single write. Reproduced 6 Sep 2026 against the real server:
+//
+//   POST /friends {id:bob}   -> 200, then GET /social/friends -> []
+//   POST /social/friends     -> 201, then GET /friends        -> only bob
+//   POST /studios            -> 200 std_X, GET /social/studios/std_X -> 404
+//   POST /social/studios     -> 201 std_Y, GET /studios/std_Y        -> 404
+//   restart -> /social/* returns everything; /friends, /parties/:id,
+//              /teams/:id and /studios/:id return empty or 404.
+//
+// So a tester who used the wrong path lost their data at the next restart and
+// had no way to tell which surface was the real one. That is the same failure
+// Round-2 found and the reason /social/* was built.
+//
+// Two of these were also authorisation holes, which is why they are retired
+// rather than merely deprecated:
+//   * GET /studios/:id and GET /parties/:id never called who(req) at all, so
+//     they answered an UNAUTHENTICATED caller with a studio (revenue split
+//     included) or a party roster. Verified: `curl` with no Authorization
+//     header returns 200 with the std_dk fixture. /social/studios/:id returns
+//     401 for the same request.
+//   * POST /teams could create a team that no route in the estate could ever
+//     read back — the slice has no GET /teams/:id and server.mts has none
+//     either, so /teams was a write-only store.
+//
+// Retired the way the CW6 economy routes and the legacy /verify/:channel/*
+// routes were: 410 Gone naming the replacement, so a caller still on the old
+// path is told where to go instead of being handed a silent 404 or, worse,
+// a second set of books.
+// Exported so server.mts's /health `routes.retired` list can be generated from the
+// same table the guard uses. A hand-copied list drifts; this one cannot.
+export const RETIRED_SOCIAL = {
+  friends: { superseded_by: "/social/friends",
+    detail: "this endpoint kept friendships in a process-local map that /social/friends could not see and a restart erased; use /social/friends" },
+  parties: { superseded_by: "/social/parties",
+    detail: "this endpoint kept parties in a process-local map that /social/parties could not see, a restart erased, and GET /parties/:id served to an unauthenticated caller; use /social/parties" },
+  teams:   { superseded_by: "/social/teams",
+    detail: "this endpoint kept teams in a process-local map that /social/teams could not see, a restart erased, and that no route could read back; use /social/teams" },
+  studios: { superseded_by: "/social/studios",
+    detail: "this endpoint kept studios in a process-local map that /social/studios could not see, a restart erased, and GET /studios/:id served the studio and its split to an unauthenticated caller; use /social/studios" },
+  // SECURITY (6 Sep 2026): POST /orgs/:id/members checked SEATS but not
+  // PERMISSION, so anyone could add themselves to any org and then read it, and
+  // GET /orgs/:id served the whole org unauthenticated. The store was also
+  // in-memory with no tables behind it. Replaced by /social/orgs, which is
+  // durable and checks the caller's role. Wording preserved from the original
+  // retirement so anything pinned to it keeps passing.
+  orgs:    { superseded_by: "/social/orgs",
+    detail: "this endpoint did not check who was calling; use /social/orgs" },
+};
 
 /**
  * handleIdentity(req, res, ctx) -> boolean
@@ -54,39 +120,14 @@ export async function handleIdentity(req, res, ctx) {
   if (path === "/me" && m === "GET") { send(res, 200, buildMe(db.users.get(who(req)))); return true; }
   if (seg[0]==="profile" && m==="GET") { const p=db.profiles.get(seg[1]); send(res, p?200:404, p||{error:"not_found"}); return true; }
 
-  // friends
-  if (path === "/friends" && m === "GET") {
-    const me=who(req); send(res,200,{ friends: db.friends.filter(f=>f.a_id===me||f.b_id===me).map(f=>({id:f.a_id===me?f.b_id:f.a_id,status:f.status})) }); return true; }
-  if (path === "/friends" && m === "POST") { const me=who(req); const b=await body(req); if(!b.id){send(res,400,{error:"id_required"});return true;} db.friends.push({a_id:me,b_id:b.id,status:"requested"}); send(res,200,{id:b.id,status:"requested"}); return true; }
-  if (seg[0]==="friends" && seg[1] && m==="DELETE") { const me=who(req); db.friends=db.friends.filter(f=>!((f.a_id===me&&f.b_id===seg[1])||(f.b_id===me&&f.a_id===seg[1]))); send(res,200,{id:seg[1],status:"removed"}); return true; }
-  if (seg[0]==="friends" && seg[1] && m==="POST") { const me=who(req); const f=db.friends.find(x=>x.a_id===seg[1]&&x.b_id===me); if(f)f.status="accepted"; send(res,200,{id:seg[1],status:"accepted"}); return true; }
-
-  // parties
-  if (path==="/parties" && m==="POST") { const me=who(req); const id=uid("pty"); db.parties.set(id,{id,host:me,members:[me],world_id:null}); send(res,200,db.parties.get(id)); return true; }
-  if (seg[0]==="parties"&&seg[1]&&seg[2]==="join"&&m==="POST") { const me=who(req); const p=db.parties.get(seg[1]); if(!p){send(res,404,{error:"no_party"});return true;} if(!p.members.includes(me))p.members.push(me); send(res,200,p); return true; }
-  if (seg[0]==="parties"&&seg[1]&&seg[2]==="leave"&&m==="POST") { const me=who(req); const p=db.parties.get(seg[1]); if(p)p.members=p.members.filter(x=>x!==me); send(res,200,p||{}); return true; }
-  if (seg[0]==="parties"&&seg[1]&&m==="GET") { const p=db.parties.get(seg[1]); send(res,p?200:404,p||{error:"no_party"}); return true; }
-
-  // teams
-  if (path==="/teams"&&m==="POST") { const me=who(req); const id=uid("team"); const b=await body(req); db.teams.set(id,{id,name:b.name||"Team",owner:me,members:[{id:me,role:"owner"}]}); send(res,200,db.teams.get(id)); return true; }
-  if (seg[0]==="teams"&&seg[1]&&seg[2]==="members"&&m==="POST") { const b=await body(req); const tm=db.teams.get(seg[1]); if(!tm){send(res,404,{error:"no_team"});return true;} tm.members.push({id:b.id,role:["owner","editor","viewer"].includes(b.role)?b.role:"viewer"}); send(res,200,tm); return true; }
-
-  // orgs (+ seats)
-  // SECURITY (6 Sep 2026): POST /orgs/:id/members checked SEATS but not
-  // PERMISSION, so anyone could add themselves to any org and then read it, and
-  // GET /orgs/:id served the whole org unauthenticated. The store was also
-  // in-memory with no tables behind it. Replaced by /social/orgs, which is
-  // durable and checks the caller's role.
-  if (seg[0]==="orgs"&&m!=="OPTIONS") {
-    send(res,410,{ok:false,error:"gone",detail:"this endpoint did not check who was calling; use /social/orgs",superseded_by:"/social/orgs"});
+  // friends / parties / teams / studios / orgs — RETIRED (see RETIRED_SOCIAL above).
+  // One guard, so a new sub-path under any of these concepts cannot quietly
+  // resurrect the second store by being added below.
+  if (RETIRED_SOCIAL[seg[0]] && m !== "OPTIONS") {
+    const r = RETIRED_SOCIAL[seg[0]];
+    send(res, 410, { ok:false, error:"gone", detail:r.detail, superseded_by:r.superseded_by });
     return true;
   }
-
-  // studios (+ split, role-gated)
-  if (path==="/studios"&&m==="POST") { const me=who(req); const id=uid("std"); const b=await body(req); db.studios.set(id,{id,name:b.name||"Studio",owner:me,members:[{id:me,role:"owner"}],worlds:[],split:null}); send(res,200,db.studios.get(id)); return true; }
-  if (seg[0]==="studios"&&seg[1]&&m==="GET") { const s=db.studios.get(seg[1]); send(res,s?200:404,s||{error:"no_studio"}); return true; }
-  if (seg[0]==="studios"&&seg[1]&&seg[2]==="members"&&m==="POST") { const me=who(req); const st=db.studios.get(seg[1]); const b=await body(req); if(!st){send(res,404,{error:"no_studio"});return true;} const myRole=(st.members.find(x=>x.id===me)||{}).role; if(!can(myRole,"manage_members")){send(res,403,{error:"forbidden",need:"manage_members"});return true;} if(!st.members.some(x=>x.id===b.id))st.members.push({id:b.id,role:["owner","admin","editor","viewer"].includes(b.role)?b.role:"viewer"}); send(res,200,st); return true; }
-  if (seg[0]==="studios"&&seg[1]&&seg[2]==="split"&&m==="POST") { const me=who(req); const st=db.studios.get(seg[1]); const b=await body(req); if(!st){send(res,404,{error:"no_studio"});return true;} const myRole=(st.members.find(x=>x.id===me)||{}).role; if(!can(myRole,"configure_split")){send(res,403,{error:"forbidden",need:"configure_split (owner only)"});return true;} const v=validateSplit(b.splits,st.owner); if(!v.valid){send(res,400,{error:"invalid_split",reason:v.reason,total:v.total});return true;} st.split=v.normalized; send(res,200,{ok:true,studio:st.id,split:st.split}); return true; }
 
   // subscriptions (DARK)
   if (path==="/subscriptions"&&m==="GET") { const me=who(req); send(res,200,db.subscriptions.get(me)||{plan:"free",status:"none",_shadow:true}); return true; }
@@ -111,4 +152,15 @@ export async function handleIdentity(req, res, ctx) {
   if (path==="/invite"&&m==="POST") { const me=who(req); const tok=uid("inv"); db.invites.set(tok,{by:me,created:Date.now()}); send(res,200,{invite_token:tok,url:"https://games.dcsai.ai/join/"+tok}); return true; }
 
   return false; // not an identity route — let the shared mock handle it
+}
+
+/**
+ * The retired social routes, in the shape server.mts's /health `routes.retired`
+ * array already uses. Derived from RETIRED_SOCIAL so the advertisement and the
+ * behaviour cannot drift apart.
+ */
+export function retiredSocialRoutes() {
+  return Object.keys(RETIRED_SOCIAL).map(
+    (k) => `ALL /${k}/* on the legacy identity slice (410 -> ${RETIRED_SOCIAL[k].superseded_by})`,
+  );
 }

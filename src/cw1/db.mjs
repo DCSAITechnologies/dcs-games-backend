@@ -2,11 +2,79 @@
 // falls back to in-memory (the mock store) otherwise so tests run without live creds.
 // DK deploys with env creds → same code hits the live DB. Honest: no live verification claimed here.
 //
+// The fallback is DECLARED, not silent — see describeDb() and announceMemoryFallback()
+// below. It used to engage with no announcement at all, which meant a process with
+// no database looked exactly like a process with one.
+//
+// SCOPE NOTE: the friends/parties/teams/studios/orgs methods on this repo are the
+// data layer for src/cw1/service.mjs, the standalone CW1 entrypoint. They are NOT
+// what the gateway serves — server.mts serves those five objects from
+// src/core/social.mjs at /social/*, which is durable. The legacy routes that used
+// to serve them from the gateway are retired (410) in identity-slice.mjs.
+//
 // env: SUPABASE_URL, SUPABASE_SERVICE_KEY (server-side, RLS-bypassing service role for the API),
 //      PAYMENTS_LIVE=0 (money DARK).
 
 let _supabase = null;
 let _mode = "memory";
+let _memoryReason = null;   // WHY there is no durable store, in machine-readable form
+let _announced = false;     // the construction-time warning is emitted exactly once
+
+// A store that loses everything on restart must never be indistinguishable from
+// a durable one. Round-2 found this fallback engaging silently: /health said
+// db:"memory" and nothing said what "memory" costs, so an internal tester could
+// spend a session building state that no restart would keep and never be told.
+// Absence of a database is NOT a hard crash — internal testing runs without
+// Supabase on purpose — but it is now impossible to miss:
+//   * describeDb() reports durable:false with the reason and the consequence;
+//   * a warning is logged once, at the moment the mode is decided;
+//   * makeRepo() carries the same description onto every repo it builds, so a
+//     caller that never reads /health still has it in hand.
+const MEMORY_WARNING =
+  "CW1 identity is running with NO DURABLE STORE. Every user, profile, friendship, party, team, " +
+  "studio, org, report, audit entry and KYC row lives in this process only and is LOST on restart. " +
+  "This is expected for local/CI runs and is NOT safe for anything a tester is asked to trust.";
+
+const MEMORY_REASONS = {
+  no_credentials: "SUPABASE_URL and/or SUPABASE_SERVICE_KEY are not set",
+  client_unavailable: "@supabase/supabase-js could not be loaded",
+  // makeRepo({mode:"memory"}) called directly, bypassing getDb() — server.mts
+  // does exactly this when it mounts the T&S/KYC slice.
+  repo_constructed_without_client: "makeRepo() was handed a db with no Supabase client",
+};
+
+/** Announce the degradation once per process, at the point it is decided. */
+function announceMemoryFallback() {
+  if (_announced) return;
+  _announced = true;
+  console.warn(
+    `[cw1][db] IN-MEMORY FALLBACK ENGAGED (reason=${_memoryReason}: ${MEMORY_REASONS[_memoryReason] || "unknown"}). ` +
+    MEMORY_WARNING,
+  );
+}
+
+/**
+ * What this module is actually persisting to, said plainly.
+ * Safe to call before getDb(): it reports the mode as resolved so far.
+ */
+export function describeDb() {
+  const durable = _mode === "supabase";
+  if (durable) {
+    return { mode: "supabase", durable: true, volatile: false, scope: "shared", data_loss_on_restart: false, reason: null, warning: null };
+  }
+  return {
+    mode: "memory",
+    durable: false,
+    volatile: true,
+    scope: "process-local",
+    data_loss_on_restart: true,
+    resolved: _mode === "memory_locked",   // false = getDb() has not run yet
+    reason: _memoryReason,
+    reason_detail: _memoryReason ? MEMORY_REASONS[_memoryReason] : null,
+    warning: MEMORY_WARNING,
+    durable_alternative: "/social/* (src/core/social.mjs) is the durable store for friends, parties, teams, studios and orgs",
+  };
+}
 
 export async function getDb() {
   if (_supabase || _mode === "memory_locked") return { client: _supabase, mode: _mode };
@@ -19,11 +87,20 @@ export async function getDb() {
     } catch (e) {
       console.warn("[cw1] @supabase/supabase-js not installed or failed; using memory:", e.message);
       _mode = "memory_locked";
+      _memoryReason = "client_unavailable";
+      announceMemoryFallback();
     }
   } else {
     _mode = "memory_locked"; // no creds → memory (tests / local)
+    _memoryReason = "no_credentials";
+    announceMemoryFallback();
   }
-  return { client: _supabase, mode: _mode };
+  return { client: _supabase, mode: _mode, ...(_mode === "supabase" ? {} : { durable: false, describe: describeDb }) };
+}
+
+/** Test seam: forget the resolved mode so a test can exercise both branches. */
+export function __resetDbForTests() {
+  _supabase = null; _mode = "memory"; _memoryReason = null; _announced = false;
 }
 
 // ---------- in-memory fallback store (same seed as the mock) ----------
@@ -35,6 +112,14 @@ const mem = createIdentityStore();
 export function makeRepo(db) {
   const live = db.mode === "supabase";
   const sb = db.client;
+
+  // Announce at construction, not at first write. A repo built over the memory
+  // store without going through getDb() (server.mts mounts the T&S/KYC slice
+  // with a literal { mode: "memory" }) would otherwise degrade in total silence.
+  if (!live) {
+    if (!_memoryReason) _memoryReason = "repo_constructed_without_client";
+    announceMemoryFallback();
+  }
 
   async function getUser(id) {
     if (!live) return mem.users.get(id) || null;
@@ -257,7 +342,8 @@ export function makeRepo(db) {
     await sb.from("dcsgames_payout_kyc").upsert(row); return row;
   }
 
-  return { live, getUser, upsertUser, getProfile, updateProfile, listFriends, addFriend, removeFriend, acceptFriend, blockFriend,
+  return { live, durable: live, describe: describeDb,
+           getUser, upsertUser, getProfile, updateProfile, listFriends, addFriend, removeFriend, acceptFriend, blockFriend,
            createParty, joinParty, leaveParty, getSubscription, createStudio, getStudio, setStudioSplit, addStudioMember,
            createTeam, addTeamMember, createOrg, getOrg, addOrgMember, scheduleDeletion, cancelDeletion, exportData,
            listUsers, setAdmin, createReport, getReport, listReports, saveReport, writeAudit, getKyc, setKycStatus, _mem: mem };

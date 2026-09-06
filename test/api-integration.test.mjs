@@ -98,7 +98,7 @@ test("A1: x-user-id alone is 401 and names the removed header", async () => {
 });
 
 test("A1: unauthenticated private routes are 401, not empty 200s", async () => {
-  for (const p of ["/api/worlds/mine", "/api/me/revenue"]) {
+  for (const p of ["/api/worlds/mine", "/me/profile", "/v3/marketplace/owned"]) {
     const r = await req(p);
     assert.equal(r.status, 401, `${p} must refuse anonymous callers`);
   }
@@ -229,12 +229,19 @@ test("A4/B10: publish refuses to claim success when no Atlas signing key exists"
 });
 
 // ---------------------------------------------------------------- money dark
-test("payments stay dark: revenue is zero and flagged, never fabricated", async () => {
-  const b = await (await req("/api/me/revenue", { headers: auth(ALICE) })).json();
+test("payments stay dark: the revenue stub is retired rather than reporting a figure", async () => {
+  // It used to answer 200 with total_minor:0 and a 70/30 split. A 200 with a
+  // number in it is indistinguishable from a real measurement of zero — it
+  // invites a UI to render "your revenue" and a developer to build on a shape
+  // no service produces. There is no revenue while payments are dark.
+  const r = await req("/api/me/revenue", { headers: auth(ALICE) });
+  assert.equal(r.status, 410);
+  const b = await r.json();
+  assert.equal(b.ok, false);
   assert.equal(b.payments_live, false);
-  assert.equal(b.total_minor, 0);
-  assert.deepEqual(b.payouts, []);
-  assert.equal(b.dark, true);
+  assert.ok(b.replacement, "a retired route must name what replaced it");
+  assert.equal("total_minor" in b, false, "a retired route must not still report a figure");
+  assert.equal("payouts" in b, false);
 });
 
 // ---------------------------------------------------------------- A5 surface

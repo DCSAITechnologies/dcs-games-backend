@@ -2,9 +2,21 @@
 // Uses the Supabase repo when creds are present (DK deploy), in-memory otherwise (local/CI).
 // Reuses ALL pure logic: computeLevel, canPublish, studio rules, verification, attestation.
 // /health reports db mode so the integrator can confirm `supabase` on the live deploy.
+//
+// WHAT THIS IS NOT (6 Sep 2026): this is a STANDALONE entrypoint. It only runs when
+// invoked directly (`node src/cw1/service.mjs`); the gateway in server.mts does not
+// mount it. So its /friends, /parties and /studios routes are not the estate's
+// social surface — server.mts serves those durably from src/core/social.mjs at
+// /social/*, and the legacy in-memory copies on the gateway are retired (410).
+// Anything running this process without Supabase creds gets a process-local store,
+// and /health now says exactly that rather than printing a bare db:"memory".
+//
+// Its `who()` below reads the bearer token as a raw user id and does not verify a
+// signature — that is a mock, not authentication, and it is why this entrypoint is
+// not mounted. Do not deploy this process without replacing who().
 
 import { createServer } from "node:http";
-import { getDb, makeRepo } from "./db.mjs";
+import { getDb, makeRepo, describeDb } from "./db.mjs";
 import { buildMe, computeLevel, canPublish, publishCredits } from "./identity-core.mjs";
 import { can, validateSplit, seatCheck } from "./identity-studio.mjs";
 import { createVerificationStore } from "./verification.mjs";
@@ -27,8 +39,24 @@ async function handler(req, res) {
   const db = await getDb(); const repo = makeRepo(db);
 
   try {
-    if (path === "/health")
-      return send(res, 200, { ok:true, service:"cw1-identity", db: db.mode === "supabase" ? "supabase" : "memory", payments_live: PAYMENTS_LIVE });
+    if (path === "/health") {
+      const persistence = describeDb();
+      return send(res, 200, {
+        ok:true, service:"cw1-identity",
+        db: persistence.mode,          // unchanged field, for anything already reading it
+        // `db:"memory"` on its own does not tell a reader that this process keeps
+        // nothing across a restart. This does, in the same words the log uses.
+        persistence,
+        durable: persistence.durable,
+        // The verification challenge store (src/cw1/verification.mjs) is a plain
+        // Map with no backing at all, in EVERY mode — including supabase. A code
+        // issued before a restart cannot be confirmed after one. Said here rather
+        // than left for a tester to discover.
+        verification_store: { kind:"memory", durable:false, scope:"process-local",
+          note:"challenges are held in-process in every mode; a restart invalidates every outstanding code" },
+        payments_live: PAYMENTS_LIVE,
+      });
+    }
 
     if (path === "/me" && m === "GET") {
       const u = await repo.getUser(who(req));
@@ -94,6 +122,14 @@ async function handler(req, res) {
 const server = createServer(handler);
 const PORT = process.env.PORT || 8788;
 if (process.argv[1] && process.argv[1].endsWith("service.mjs")) {
-  getDb().then(db => server.listen(PORT, () => console.log(`CW1 identity service on :${PORT} · db=${db.mode==="supabase"?"supabase":"memory"} · payments_live=${PAYMENTS_LIVE}`)));
+  // getDb() is awaited before listen so the in-memory warning (db.mjs) is on the
+  // log BEFORE the "ready" line, rather than appearing later next to a request.
+  getDb().then((db) => {
+    const p = describeDb();
+    server.listen(PORT, () => console.log(
+      `CW1 identity service on :${PORT} · db=${p.mode} · durable=${p.durable} · payments_live=${PAYMENTS_LIVE}` +
+      (p.durable ? "" : " · WARNING: all identity data is process-local and is lost on restart"),
+    ));
+  });
 }
 export { server, handler };

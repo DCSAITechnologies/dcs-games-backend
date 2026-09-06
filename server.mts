@@ -11,7 +11,7 @@ import { makeCerebrasClient } from "./src/cw2/cerebras-client.mjs";          // 
 import { toRuntimeWorld, toBaseWorldRow } from "./src/cw2/runtime-schema.mjs"; // CW2 fix: full C1 runtime schema -> renders with ZERO runtime patches
 import { PersistenceEngine, InMemoryPersistenceStore } from "./src/cw5/cw5_persistence.ts";
 import { SupabasePersistenceStore } from "./src/cw5/cw5_supabase_store.ts";
-import { createIdentityStore, handleIdentity } from "./src/cw1/identity-slice.mjs";
+import { createIdentityStore, handleIdentity, retiredSocialRoutes } from "./src/cw1/identity-slice.mjs";
 import { handleTrustSafetySSO } from "./src/cw1/ts-sso-kyc-slice.mjs"; // CW1 v3.0: T&S console + payout-KYC, reconciled to gateway auth
 import { makeAtlasRoutes } from "./src/cw7/atlas-routes.mjs";
 import { verifyPageHTML } from "./src/cw7/atlas-verify-page.mjs"; // CW7: renderable public verify view
@@ -110,6 +110,29 @@ if (process.env.DATABASE_URL) {
 }
 
 const auth = createPrincipalResolver();                                      // A1: supabase-jwt when configured, real HS256 otherwise. Never a header.
+
+// A1: refuse to SERVE with a per-boot random secret.
+//
+// createPrincipalResolver falls back to "local-hs256-ephemeral" — a secret
+// generated fresh on every start — when neither Supabase nor DCS_AUTH_SECRET is
+// configured. That is a reasonable default for a library used in a test, and a
+// silent disaster for a deployment: every token becomes invalid on restart, so
+// every user is signed out by a deploy and nobody is told why. Worse, it looks
+// exactly like a working configuration until the first restart.
+//
+// The library keeps the fallback; the SERVER refuses it, because the server is
+// the thing that gets deployed. Opting in has to be deliberate and has to be
+// written down somewhere a reviewer can see it.
+if (auth.mode === "local-hs256-ephemeral" && process.env.DCS_ALLOW_EPHEMERAL_AUTH !== "1") {
+  console.error(JSON.stringify({
+    level: "fatal",
+    auth: auth.mode,
+    detail: "Refusing to start: no SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY and no DCS_AUTH_SECRET, so the auth secret would be random per boot and every token would stop working at the next restart.",
+    fix: "Set DCS_AUTH_SECRET (or configure Supabase). For a throwaway local run only, set DCS_ALLOW_EPHEMERAL_AUTH=1 to accept tokens that die with the process.",
+    ts: new Date().toISOString(),
+  }));
+  process.exit(78);   // EX_CONFIG, as the schema assertion uses
+}
 console.log("A1 auth mode:", auth.mode);
 
 const atlasKey = makeKeyEndpoint({ publicKey: () => atlasPublicKeyBase64() || process.env.ATLAS_PUBLIC_KEY || "" }); // prefer the raw key derived from the signer (matches sig + browser-embed verifiable)
@@ -213,7 +236,7 @@ const server = http.createServer(async (req, res) => {
         safety: ["GET /safety/age", "POST /safety/report", "GET /safety/reports", "POST /safety/block", "GET /safety/consent/media", "GET /safety/moderation-history"],
         jobs: ["GET /v3/jobs", "GET /v3/jobs/:id"],
         trust: ["GET /atlas/key", "GET /verify", "GET /v3/providers"],
-        retired: ["GET /api/marketplace (410)", "GET /api/me/payouts (410)", "GET /orgs (410)", "POST /verify/:channel/{start,confirm} on the legacy identity slice (410)"],
+        retired: ["GET /api/marketplace (410)", "GET /api/me/payouts (410)", "GET /me/revenue (410)", ...retiredSocialRoutes(), "POST /verify/:channel/{start,confirm} on the legacy identity slice (410)"],
       },
       manifest_version: MANIFEST_VERSION,
       social: { profiles: true, friends: true, parties: true, teams: true, studios: true, discovery: true, ...social.describe() },
@@ -252,8 +275,18 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, count: rows.length, worlds: rows, owner: me.id });
     }
     if (url === "/me/revenue" && method === "GET") {
-      await mustBe(req, cid);                                  // A1: 401 when unauthenticated
-      return send(res, 200, { ok: true, currency: "INR", payments_live: PAYMENTS_LIVE, total_minor: 0, payouts: [], split: { seller: 70, platform: 30 }, dark: true, note: "revenue DARK until DK flips" });
+      // RETIRED. This answered 200 with hard-coded zeros and a 70/30 split that
+      // settles nothing. A 200 invites a client to render "your revenue: 0" as
+      // though it were a measurement, and invites a developer to build on a
+      // shape no service produces. There is no revenue while payments are dark,
+      // and saying so with a 410 is the honest answer — the same treatment the
+      // CW6 economy routes got.
+      return send(res, 410, {
+        ok: false, error: "gone",
+        detail: "Revenue reporting does not exist. Payments are dark: no sale can occur, so there is nothing to report. This route previously returned hard-coded zeros, which was indistinguishable from a real measurement of zero.",
+        replacement: "/v3/marketplace/ledger for test-mode acquisitions, /v3/marketplace/assert-dark to confirm nothing has been sold",
+        payments_live: PAYMENTS_LIVE, correlation_id: cid,
+      });
     }
 
     // ---- REAL AUTH: proxy signup/login to Supabase Auth (returns a real JWT) ----

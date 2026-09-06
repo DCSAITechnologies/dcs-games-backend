@@ -367,11 +367,28 @@ test("E2E 20 — the entire journey produced ZERO real payment side effects", as
   const h = (await call("/health", { token: null })).body;
   assert.equal(h.payments_live, false);
 
+  // The revenue stub is retired: a 200 carrying total_minor:0 could not be told
+  // apart from a real measurement of zero. The absence of revenue is now proven
+  // from the ledger and the dark monitors instead, which are derived from actual
+  // stored rows rather than from a constant.
   const rev = await call("/api/me/revenue");
+  assert.equal(rev.status, 410);
   assert.equal(rev.body.payments_live, false);
-  assert.equal(rev.body.total_minor, 0);
-  assert.deepEqual(rev.body.payouts, []);
-  assert.equal(rev.body.dark, true);
+
+  const dark = await call("/v3/marketplace/assert-dark", { token: null });
+  assert.equal(dark.status, 200, "a non-200 here means money is NOT dark");
+  assert.equal(dark.body.dark, true);
+  assert.deepEqual(dark.body.problems, []);
+
+  const subsDark = await call("/v3/subscriptions/assert-dark", { token: null });
+  assert.equal(subsDark.status, 200);
+  assert.equal(subsDark.body.dark, true);
+
+  const ledger = await call("/v3/marketplace/ledger");
+  assert.equal(ledger.status, 200);
+  for (const e of ledger.body.entries || []) {
+    assert.equal(Number(e.amount_minor ?? 0), 0, `a ledger entry moved money: ${JSON.stringify(e)}`);
+  }
 
   // Nothing anywhere in the world claims a sale, a payout or a price.
   const m = (await call(`/v3/worlds/${W.id}/manifest`)).body.manifest;
@@ -379,7 +396,7 @@ test("E2E 20 — the entire journey produced ZERO real payment side effects", as
   for (const word of ["price_cents", "payout", "purchase", "revenue_cents"]) {
     assert.ok(!json.includes(word), `the manifest mentions '${word}'`);
   }
-  record(20, "payments dark throughout", { payments_live: false, revenue: 0 });
+  record(20, "payments dark throughout", { payments_live: false, revenue_route: "retired (410)", marketplace_dark: true, subscriptions_dark: true });
 });
 
 // ------------------------------------------------------------- world memory
