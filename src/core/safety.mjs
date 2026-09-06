@@ -84,13 +84,69 @@ export function createSafetyService(env = process.env) {
     /**
      * Record an age assurance. Only the derived tier is readable by other code;
      * the DOB is stored once, here, and never returned by the API.
+     *
+     * A DECLARATION THAT LOOSENS THE GATE IS REFUSED. Reproduced 7 Sep 2026
+     * against the running server:
+     *
+     *   POST /safety/age {"date_of_birth":"2020-01-01"} -> 403, tier under13,
+     *                                                      every capability false
+     *   POST /safety/age {"date_of_birth":"1990-01-01"} -> 200, tier adult,
+     *                                                      create/publish/chat/
+     *                                                      voice/marketplace true
+     *   GET  /safety/age                                -> adult, and it persists
+     *
+     * So the control that exists to keep an under-13 off this platform was
+     * defeated by sending the request again with a different birthday. That is
+     * the same shape of hole grantMediaConsent had — a gate opt-out available to
+     * exactly the person it exists to stop — and it is closed the same way.
+     *
+     * The rule, in one line: age assurance may only ever become MORE
+     * restrictive by self-declaration.
+     *   * a first declaration is accepted, whatever it says;
+     *   * a re-declaration landing on the same tier is accepted (idempotent);
+     *   * a re-declaration that TIGHTENS the tier is accepted — someone telling
+     *     us they are younger than we thought must always be believed, because
+     *     refusing that is the dangerous direction;
+     *   * a re-declaration that LOOSENS the tier is refused, in every method.
+     *     `method` reaches this function from the request body (server.mts:581),
+     *     so trusting a stronger-sounding method here would leave the hole open
+     *     to any caller who names one; and there is no age-verification provider
+     *     integrated, so no method reaching this module is evidence of anything.
+     *
+     * A birthday is NOT a loosening: ageStatus derives the tier from the stored
+     * DOB, so a 15-year-old becomes 16_17 on the day without asking anyone. That
+     * removes the only legitimate reason a user had to re-declare upward.
      */
     async recordAge(principalId, { dateOfBirth, method = "self_declared" }) {
       if (!principalId) throw Errors.validation("principal is required");
       const tier = ageTierFor(dateOfBirth);
+      // Only a RE-declaration can loosen anything. A principal with no row yet
+      // is declaring for the first time and is taken at their word, whatever
+      // they say — "unknown" sorts below every real tier, so comparing against
+      // it would refuse every first declaration ever made.
+      const existing = await ages.one((r) => r.principal_id === principalId);
+      const current = existing ? await this.ageStatus(principalId) : null;
+      if (current && AGE_TIERS.indexOf(tier) > AGE_TIERS.indexOf(current.age_tier)) {
+        throw Errors.forbidden(
+          `an age assurance cannot be relaxed by re-declaring: this principal is recorded as '${current.age_tier}' and a self-declared '${tier}' would grant capabilities the recorded tier withholds`,
+          {
+            meta: {
+              recorded_age_tier: current.age_tier,
+              declared_age_tier: tier,
+              method,
+              // Said plainly, because a caller that is not told this will simply
+              // keep retrying: there is no self-serve path, and there is no
+              // age-verification provider to appeal to either.
+              correction_path: "none is implemented; no age-verification provider is integrated, so a recorded tier can only be corrected out of band",
+            },
+          },
+        );
+      }
       const row = {
         principal_id: principalId,
         date_of_birth: new Date(dateOfBirth).toISOString().slice(0, 10),
+        // Kept for readers of the row, but ageStatus derives the tier from the
+        // DOB rather than trusting this: a stored tier goes stale on a birthday.
         age_tier: tier,
         method,
         updated_at: new Date().toISOString(),
@@ -99,9 +155,29 @@ export function createSafetyService(env = process.env) {
       return this.ageStatus(principalId);
     },
 
-    async ageStatus(principalId) {
+    /**
+     * The effective tier, DERIVED FROM THE STORED DOB rather than read from the
+     * stored `age_tier`. That column is written once and then goes stale: a
+     * principal who declared at 15 was still reported as 13_15 at 30, and was
+     * therefore refused publish and chat forever. Deriving it means a birthday
+     * moves the tier on the day, with no re-declaration — which is what makes
+     * refusing a loosening re-declaration fair rather than merely strict.
+     *
+     * `now` is injectable so the derivation itself can be tested; nothing in the
+     * service passes it.
+     */
+    async ageStatus(principalId, { now = new Date() } = {}) {
       const row = await ages.one((r) => r.principal_id === principalId);
-      const tier = row?.age_tier || "unknown";
+      let tier = "unknown";
+      if (row?.date_of_birth) {
+        // A stored DOB that will not parse must not silently become 'unknown'
+        // and hand the principal a clean slate to re-declare against; fall back
+        // to the recorded tier, which is the more restrictive reading.
+        try { tier = ageTierFor(row.date_of_birth, now); }
+        catch { tier = row.age_tier || "unknown"; }
+      } else if (row?.age_tier) {
+        tier = row.age_tier;
+      }
       const caps = capabilitiesFor(tier);
       return {
         principal_id: principalId,
@@ -129,14 +205,56 @@ export function createSafetyService(env = process.env) {
     },
 
     // -------------------------------------------------------- parental consent
-    async requestParentalConsent(minorId, { guardianEmail, scope = [], isSynthetic = true }) {
+    /**
+     * Request a guardian's consent for a minor.
+     *
+     * @param requestedBy  who is making this record. REQUIRED, and required to
+     *                     be the minor: this took the minor's id straight from
+     *                     the caller's request body with no check at all
+     *                     (server.mts:634 passes `b.minor_id || me.id`), so any
+     *                     authenticated account could file a guardian-consent
+     *                     record naming ANY other principal as a minor and any
+     *                     address as their guardian. Reproduced 7 Sep 2026:
+     *                     POST /safety/consent/parental
+     *                     {"minor_id":"user-b","guardian_email":"g@x.com"}
+     *                     from user-a answered 201 with a pending row.
+     *
+     *                     That writes a real person's email address into a child
+     *                     -safety table against someone else's identity, and it
+     *                     is the same hole grantMediaConsent already closed:
+     *                     a consent recorded on someone's behalf, by somebody
+     *                     they did not authorise, is not consent.
+     *
+     * The requester is recorded on the row either way, because a consent nobody
+     * is accountable for cannot be audited after the fact.
+     */
+    async requestParentalConsent(minorId, { guardianEmail, scope = [], isSynthetic = true, requestedBy = null }) {
       if (!guardianEmail) throw Errors.validation("guardian_email is required");
+      if (!requestedBy) {
+        // NOT 401: the HTTP layer knows perfectly well who is calling. The call
+        // INTO this module dropped it, and a consent record that cannot be
+        // attributed is refused rather than written anonymously. server.mts:634
+        // does not thread the authenticated principal through yet, so this
+        // refuses the whole route until it does — which is the safe direction,
+        // because no route reads a consent back and none decides one, so the
+        // only thing the route can currently do is write forgeable rows.
+        throw Errors.forbidden(
+          "this parental consent request did not say who made it, so it cannot be attributed to the minor it concerns and is refused rather than recorded anonymously",
+          { meta: { minor_id: minorId, missing: "requested_by" } },
+        );
+      }
+      if (String(requestedBy) !== String(minorId)) {
+        throw Errors.forbidden(
+          "a parental consent can only be requested by the minor it concerns; there is no verified guardian relationship to authorise anyone else",
+          { meta: { minor_id: minorId, requested_by: requestedBy } },
+        );
+      }
       const s = await this.ageStatus(minorId);
       if (!s.minor) throw Errors.validation("parental consent only applies to a minor principal");
       const row = {
         id: id(), minor_id: minorId, guardian_email: String(guardianEmail).toLowerCase(),
         scope, status: "pending", requested_at: new Date().toISOString(),
-        decided_at: null, is_synthetic: !!isSynthetic,
+        decided_at: null, is_synthetic: !!isSynthetic, requested_by: String(requestedBy),
       };
       const existing = await consents.one((r) => r.minor_id === minorId && r.guardian_email === row.guardian_email && ["pending", "granted"].includes(r.status));
       if (existing) return { ...existing, idempotent: true };

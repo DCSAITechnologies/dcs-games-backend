@@ -148,11 +148,11 @@ test("a principal cannot block themselves", async () => {
 test("parental consent applies only to a minor, and is idempotent", async () => {
   const s = svc();
   await s.recordAge("adult1", { dateOfBirth: "1990-01-01" });
-  await assert.rejects(() => s.requestParentalConsent("adult1", { guardianEmail: "g@x.com" }), (e) => e.httpStatus === 422);
+  await assert.rejects(() => s.requestParentalConsent("adult1", { guardianEmail: "g@x.com", requestedBy: "adult1" }), (e) => e.httpStatus === 422);
 
   await s.recordAge("teen", { dateOfBirth: "2011-01-01", method: "synthetic_test" });
-  const a = await s.requestParentalConsent("teen", { guardianEmail: "G@X.com" });
-  const b = await s.requestParentalConsent("teen", { guardianEmail: "g@x.com" });
+  const a = await s.requestParentalConsent("teen", { guardianEmail: "G@X.com", requestedBy: "teen" });
+  const b = await s.requestParentalConsent("teen", { guardianEmail: "g@x.com", requestedBy: "teen" });
   assert.equal(b.idempotent, true, "a duplicate request must not create a second pending consent");
   assert.equal(a.status, "pending");
   assert.equal(a.is_synthetic, true, "internal-testing consents are marked synthetic");
@@ -229,4 +229,174 @@ test("A5 GATE: nobody can record a voice or likeness consent on someone else's b
 
   // And a stranger cannot revoke it either — nor learn that it exists.
   await assert.rejects(() => s.revokeMediaConsent(ok.id, "attacker"), (e) => e.httpStatus === 404);
+});
+
+// =====================================================================
+// A5 GATE: the age assurance is an assurance, not a retry loop.
+//
+// Reproduced 7 Sep 2026 against the running server, same principal, two
+// requests, seconds apart:
+//   POST /safety/age {"date_of_birth":"2020-01-01"} -> 403 under13,
+//        capabilities {play:false, create:false, publish:false, chat:false,
+//                      voice:false, marketplace:false}
+//   POST /safety/age {"date_of_birth":"1990-01-01"} -> 200 adult,
+//        capabilities all true
+//   GET  /safety/age                                -> adult, persisted
+// The control that exists to keep an under-13 off this platform was defeated
+// by sending the request again with a different birthday.
+// =====================================================================
+
+test("A5 GATE: a recorded tier cannot be relaxed by re-declaring a different birthday", async () => {
+  const s = svc();
+  const kid = await s.recordAge("kid2", { dateOfBirth: "2020-01-01" });
+  assert.equal(kid.age_tier, "under13");
+  assert.equal(kid.capabilities.create, false);
+
+  await assert.rejects(
+    () => s.recordAge("kid2", { dateOfBirth: "1990-01-01" }),
+    (e) => e.httpStatus === 403 && /cannot be relaxed by re-declaring/.test(e.detail),
+    "an under-13 must not be able to become an adult by asking again",
+  );
+
+  // And nothing moved: the refusal must not have written the row first.
+  const after = await s.ageStatus("kid2");
+  assert.equal(after.age_tier, "under13", "the recorded tier must survive the attempt");
+  assert.equal(after.capabilities.create, false);
+  await assert.rejects(() => s.requireCapability("kid2", "create"), (e) => e.httpStatus === 403);
+});
+
+test("naming a stronger-sounding method does not buy a relaxation", async () => {
+  // `method` reaches recordAge from the request body (server.mts:581), so a
+  // method the caller chose can never be evidence. There is no age-verification
+  // provider integrated either, so no method reaching this module is evidence
+  // of anything at all.
+  const s = svc();
+  await s.recordAge("kid3", { dateOfBirth: "2020-01-01" });
+  for (const method of ["verified", "government_id", "kyc", "staff_override", "self_declared"]) {
+    await assert.rejects(
+      () => s.recordAge("kid3", { dateOfBirth: "1990-01-01", method }),
+      (e) => e.httpStatus === 403,
+      `method '${method}' must not unlock a relaxation`,
+    );
+  }
+  assert.equal((await s.ageStatus("kid3")).age_tier, "under13");
+});
+
+/** A date of birth for somebody exactly `age` years and one day old today, so
+ *  these cases do not rot as the calendar moves. */
+function dobForAge(age) {
+  const d = new Date();
+  d.setUTCFullYear(d.getUTCFullYear() - age);
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
+
+test("a declaration that TIGHTENS the tier is always accepted", async () => {
+  // The dangerous direction is refusing this one. Someone telling us they are
+  // younger than we thought must be believed immediately.
+  const s = svc();
+  assert.equal((await s.recordAge("u_t", { dateOfBirth: dobForAge(30) })).age_tier, "adult");
+  const tighter = await s.recordAge("u_t", { dateOfBirth: dobForAge(14) });
+  assert.equal(tighter.age_tier, "13_15");
+  assert.equal(tighter.capabilities.publish, false);
+  // ...and having tightened, they cannot loosen back.
+  await assert.rejects(() => s.recordAge("u_t", { dateOfBirth: dobForAge(30) }), (e) => e.httpStatus === 403);
+});
+
+test("re-declaring the SAME tier is idempotent, not a refusal", async () => {
+  const s = svc();
+  await s.recordAge("u_i", { dateOfBirth: "1990-01-01" });
+  const again = await s.recordAge("u_i", { dateOfBirth: "1991-06-06" });   // still adult
+  assert.equal(again.age_tier, "adult", "a correction within the same tier is not a relaxation");
+});
+
+test("a birthday moves the tier on its own, which is why refusing a relaxation is fair", async () => {
+  // ageStatus used to return the tier STORED at declaration time. It went stale
+  // the moment the principal had a birthday: someone who declared at 15 was
+  // still reported 13_15 at 30, and refused publish and chat forever. That
+  // staleness was the only legitimate reason to re-declare upward, so it is
+  // fixed rather than used to justify the loophole.
+  const s = svc();
+  const dob = dobForAge(15);
+  const birthday = (age) => {          // the moment they turn `age`, from that DOB
+    const d = new Date(dob + "T00:00:00Z");
+    d.setUTCFullYear(d.getUTCFullYear() + age);
+    return d;
+  };
+  const at15 = await s.recordAge("u_b", { dateOfBirth: dob });
+  assert.equal(at15.age_tier, "13_15");
+  assert.equal(at15.capabilities.publish, false);
+
+  const at16 = await s.ageStatus("u_b", { now: birthday(16) });
+  assert.equal(at16.age_tier, "16_17", "a 16th birthday must move the tier with no re-declaration");
+  assert.equal(at16.capabilities.publish, true);
+
+  const at18 = await s.ageStatus("u_b", { now: birthday(18) });
+  assert.equal(at18.age_tier, "adult");
+  assert.equal(at18.minor, false);
+
+  // The day BEFORE the birthday is still the old tier — an off-by-one here
+  // would hand a 15-year-old publish rights a year early.
+  const dayBefore = new Date(birthday(16).getTime() - 24 * 3600 * 1000);
+  assert.equal((await s.ageStatus("u_b", { now: dayBefore })).age_tier, "13_15");
+});
+
+test("the derived tier survives a restart, and is derived from the stored DOB", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dcs-safety-age-"));
+  const a = createSafetyService({ DCS_DATA_DIR: dir });
+  const dob = dobForAge(15);
+  await a.recordAge("u_p", { dateOfBirth: dob });
+  const b = createSafetyService({ DCS_DATA_DIR: dir });
+  assert.equal((await b.ageStatus("u_p")).age_tier, "13_15");
+  const at18 = new Date(dob + "T00:00:00Z");
+  at18.setUTCFullYear(at18.getUTCFullYear() + 18);
+  assert.equal((await b.ageStatus("u_p", { now: at18 })).age_tier, "adult",
+    "a fresh service object over the same disk must derive from the DOB, not a stale column");
+  // And the relaxation guard holds across the restart too.
+  await assert.rejects(() => b.recordAge("u_p", { dateOfBirth: dobForAge(30) }), (e) => e.httpStatus === 403);
+});
+
+// =====================================================================
+// A5 GATE: a parental consent nobody can be held to is not a consent.
+//
+// Reproduced 7 Sep 2026: user-a, an ordinary authenticated tester, filed a
+// guardian-consent record naming user-b as a minor and an arbitrary address
+// as their guardian —
+//   POST /safety/consent/parental {"minor_id":"user-b","guardian_email":"g@x.com"}
+//   -> 201 {"consent":{"minor_id":"user-b","guardian_email":"g@x.com",
+//                      "status":"pending","is_synthetic":true}}
+// That writes a real person's email into a child-safety table against someone
+// else's identity. It is the same hole grantMediaConsent closed on 6 Sep.
+// =====================================================================
+
+test("A5 GATE: nobody can file a parental consent on another principal's behalf", async () => {
+  const s = svc();
+  await s.recordAge("minor-x", { dateOfBirth: "2012-01-01" });
+
+  await assert.rejects(
+    () => s.requestParentalConsent("minor-x", { guardianEmail: "attacker@x.com", requestedBy: "user-a" }),
+    (e) => e.httpStatus === 403 && /only be requested by the minor it concerns/.test(e.detail),
+    "an unrelated principal must not be able to name someone else's guardian",
+  );
+  assert.deepEqual(await s.consentsFor("minor-x"), [], "and the refused request must not have written a row");
+
+  // The minor's own request is accepted, and is attributed.
+  const own = await s.requestParentalConsent("minor-x", { guardianEmail: "Guardian@X.com", requestedBy: "minor-x" });
+  assert.equal(own.status, "pending");
+  assert.equal(own.requested_by, "minor-x", "every consent row must name who filed it");
+  assert.equal(own.guardian_email, "guardian@x.com");
+});
+
+test("a parental consent that cannot be attributed is refused, not written anonymously", async () => {
+  // server.mts:634 does not pass the authenticated principal into this call, so
+  // this is the state the HTTP route is in. Refusing is the safe direction: no
+  // route reads a consent back and none decides one, so an unattributable write
+  // could only ever add a forgeable row to a child-safety table.
+  const s = svc();
+  await s.recordAge("minor-y", { dateOfBirth: "2012-01-01" });
+  await assert.rejects(
+    () => s.requestParentalConsent("minor-y", { guardianEmail: "g@x.com" }),
+    (e) => e.httpStatus === 403 && e.meta.missing === "requested_by",
+  );
+  assert.deepEqual(await s.consentsFor("minor-y"), []);
 });
