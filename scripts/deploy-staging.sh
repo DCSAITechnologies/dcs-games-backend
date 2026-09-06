@@ -23,26 +23,44 @@ SERVICE="${SERVICE:-dcs-games-staging}"
 URL="${STAGE_URL:-https://dcs-games-backend-staging.up.railway.app}"
 LEDGER="reports/DEPLOYMENTS.md"
 
-# The ledger is written by this script AFTER a verified deploy, so its own row
-# is uncommitted by the time the next deploy runs. Everything else must be clean.
-DIRTY="$(git status --porcelain -- . ":(exclude)$LEDGER")"
-if [ -n "$DIRTY" ]; then
-  echo "REFUSING: worktree is dirty. Commit first, so the deployed code is a commit that exists." >&2
-  echo "$DIRTY" >&2
-  exit 2
-fi
 COMMIT="$(git rev-parse HEAD)"
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+
+# Deploy an EXPORT of the commit, never the working tree.
+#
+# Several agents share this checkout during a sprint, so at any moment there are
+# other lanes' half-finished edits sitting next to the committed state. Refusing
+# to deploy while any of them exist would block every deploy for the whole
+# session; deploying the working tree would ship someone else's work in progress
+# under this commit's name. `git archive HEAD` sidesteps both: what is uploaded
+# is exactly the tree of the commit recorded in the ledger, and nothing else.
+#
+# It has a second benefit. `railway up` enumerates files through git, so an
+# untracked build stamp never reached the image. The export has no .git, so
+# build-info.json travels with it and the running service can name its own
+# commit as well as its deployment.
+STAGE_DIR="$(mktemp -d)"
+trap 'rm -rf "$STAGE_DIR"' EXIT
+git archive "$COMMIT" | tar -x -C "$STAGE_DIR"
 
 if [ "$(git rev-parse HEAD)" != "$(git ls-remote origin "refs/heads/$BRANCH" | cut -f1)" ]; then
   echo "REFUSING: HEAD is not pushed. Bank it before deploying, or the deployed code exists on one laptop." >&2
   exit 2
 fi
 
-node scripts/stamp-build.mjs
+# Stamp INTO the export, so the stamp describes the commit being deployed and
+# is never marked dirty by another lane's unrelated edits.
+cat > "$STAGE_DIR/build-info.json" <<JSON
+{
+  "commit": "$COMMIT",
+  "branch": "$BRANCH",
+  "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "dirty": false
+}
+JSON
 
 echo "==> deploying $COMMIT ($BRANCH) to $SERVICE"
-OUT="$(railway up --detach --service "$SERVICE" 2>&1)" || { echo "$OUT" >&2; exit 1; }
+OUT="$(cd "$STAGE_DIR" && railway up --detach --service "$SERVICE" 2>&1)" || { echo "$OUT" >&2; exit 1; }
 echo "$OUT" | tail -2
 DEPLOY_ID="$(printf '%s' "$OUT" | sed -n 's/.*[?&]id=\([0-9a-f-]\{36\}\).*/\1/p' | head -1)"
 if [ -z "$DEPLOY_ID" ]; then
