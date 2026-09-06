@@ -25,6 +25,7 @@ import { validateManifest, MANIFEST_VERSION } from "./src/v3/manifest/schema.mjs
 import { ensureV3 } from "./src/v3/manifest/migrate.mjs";                       // B0: v1 -> v3 upgrade
 import { playtestAndRepair } from "./src/v3/playtest/agent.mjs";                // B4: playtest -> critic -> repair
 import { planExpansion, planEdit } from "./src/v3/expansion/planner.mjs";       // B6/B8: expansion + chat editing
+import { forkWorld, attributionChain, forkPolicyOf, FORK_POLICIES } from "./src/v3/expansion/fork.mjs"; // remix/fork with provenance
 import { applyDelta, verifyPreservation, emptyLiveState } from "./src/v3/expansion/delta.mjs";
 import { createWorldMemory } from "./src/v3/memory/world-memory.mjs";           // B7: factual world chronology
 import { createCompanionService } from "./src/v3/companion/companion.mjs";      // B5: personal AI companion
@@ -743,6 +744,42 @@ const server = http.createServer(async (req, res) => {
           provider: r.provenance.provider, status: r.provenance.status,
           world_version: saved.version, correlation_id: cid,
         });
+      }
+
+      // ---- remix / fork, with permanent attribution and money dark ---------
+      mm = url.match(/^\/v3\/worlds\/([^/]+)\/fork$/);
+      if (mm && method === "POST") {
+        const me = await mustBeInternalTester(req, cid);
+        await safety.requireCapability(me.id, "create");
+        const b = await readBody(req);
+        // Read as a stranger would: a draft is not forkable, and this proves it.
+        const source = await repo.get(mm[1], { requesterId: me.id });
+        const { manifest: forked, attribution } = forkWorld(
+          { world_id: source.world_id, owner_id: source.owner_id, state: source.state, version: source.version, manifest: ensureV3(source.manifest, { worldVersion: source.version, creatorId: source.owner_id }).manifest },
+          { forkerId: me.id, newWorldId: "w3_" + crypto.randomUUID().replace(/-/g, "").slice(0, 16), title: b.title }
+        );
+        const gate = await playtestAndRepair(forked);
+        if (!gate.passed) {
+          return send(res, 422, { ok: false, error: "fork_failed_playtest", detail: "the forked world did not pass the playtest gate and was not saved", verdict: gate.verdict, correlation_id: cid });
+        }
+        const saved = await repo.upsert({ worldId: forked.world_id, ownerId: me.id, manifest: gate.manifest, state: "draft", title: gate.manifest.meta.title });
+        await worldMemory.record(forked.world_id, { kind: "created", summary: `remixed from "${attribution.forked_from_title || attribution.forked_from_world_id}"`, worldVersion: 1, actorId: me.id, detail: attribution });
+        await social.ensureProfile(me);
+        await social.recordWorldCreated(me.id);
+        return send(res, 200, {
+          ok: true, world_id: forked.world_id, world_version: saved.version,
+          title: gate.manifest.meta.title, attribution,
+          payments_live: PAYMENTS_LIVE,
+          revenue_policy: gate.manifest.meta.revenue_policy,
+          playtest: gate.verdict, correlation_id: cid,
+        });
+      }
+
+      mm = url.match(/^\/v3\/worlds\/([^/]+)\/attribution$/);
+      if (mm && method === "GET") {
+        const rec = await repo.get(mm[1], { requesterId: principal?.id ?? null });
+        const { manifest } = ensureV3(rec.manifest, { worldVersion: rec.version, creatorId: rec.owner_id });
+        return send(res, 200, { ok: true, world_id: rec.world_id, fork_policy: forkPolicyOf(manifest), policies: FORK_POLICIES, ...attributionChain(manifest) });
       }
 
       mm = url.match(/^\/v3\/worlds\/([^/]+)\/memory$/);
