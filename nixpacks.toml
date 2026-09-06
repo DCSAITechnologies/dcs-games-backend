@@ -1,0 +1,11 @@
+# The runtime image needs a postgresql CLIENT, not a server.
+#
+# src/core/schema.mjs shells out to `psql` for the boot-time schema assertion
+# and for migrations. With DATABASE_URL set — which is every deployed
+# environment — a missing psql makes assertSchema throw and the process exit 78
+# before it ever listens. The healthcheck then fails with no obvious cause,
+# because the log talks about schemas.
+#
+# This is why the estate has no database driver dependency: psql IS the driver.
+[phases.setup]
+nixPkgs = ["nodejs_22", "postgresql"]

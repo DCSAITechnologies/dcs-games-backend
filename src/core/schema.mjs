@@ -89,6 +89,15 @@ function psqlArgs(dsn) {
   return ["-v", "ON_ERROR_STOP=1", "-X", "-q", "-d", dsn];
 }
 function psqlBin() {
+  // An explicitly set PSQL_BIN that does not exist is an operator error, and
+  // silently falling through to the system psql hides it — they would be told
+  // about schemas, or served by a different binary than the one they named.
+  if (process.env.PSQL_BIN && !fs.existsSync(process.env.PSQL_BIN)) {
+    throw Object.assign(
+      new Error(`PSQL_BIN is set to '${process.env.PSQL_BIN}', which does not exist. Point it at a psql binary or unset it.`),
+      { code: "PSQL_NOT_FOUND" }
+    );
+  }
   for (const p of [process.env.PSQL_BIN, "/opt/homebrew/opt/postgresql@16/bin/psql", "/opt/homebrew/opt/libpq/bin/psql", "psql"]) {
     if (!p) continue;
     if (p === "psql" || fs.existsSync(p)) return p;
@@ -104,7 +113,19 @@ export function psqlExec(dsn, sql) {
     let out = "", err = "";
     p.stdout.on("data", (d) => (out += d));
     p.stderr.on("data", (d) => (err += d));
-    p.on("error", reject);
+    // ENOENT here means psql is not in the image, which is a DEPLOYMENT
+    // problem, not a schema problem. Reported as itself: the boot log used to
+    // print "A2 SCHEMA ASSERTION FAILED: spawn psql ENOENT" and send whoever
+    // read it looking at migrations.
+    p.on("error", (e) => reject(
+      e && e.code === "ENOENT"
+        ? Object.assign(new Error(
+            `psql was not found (tried '${psqlBin()}'). This is a MISSING BINARY, not a schema failure: ` +
+            `the schema could not be checked at all. Install a postgresql client in the runtime image ` +
+            `(Nixpacks: add 'postgresql' to nixPkgs), or set PSQL_BIN to its path.`
+          ), { code: "PSQL_NOT_FOUND" })
+        : e
+    ));
     p.on("close", (code) => (code === 0 ? resolve({ stdout: out, stderr: err }) : reject(new Error(`psql exited ${code}: ${err.trim() || out.trim()}`))));
     p.stdin.end(sql);
   });
