@@ -32,6 +32,9 @@ function baseEnv(extra = {}) {
     DCS_DATA_DIR: DATA,
     PAYMENTS_LIVE: "0",
     NODE_ENV: "test",
+    // Alice is on the tester ALLOWLIST, not merely carrying the role in her own
+    // token, so grant-to-a-subject can be exercised for real. Mallory is not.
+    DCS_INTERNAL_TESTERS: "alice@dcsai.ai",
     // force the local/offline profile: no Supabase, no live LLM calls in CI
     SUPABASE_URL: "",
     SUPABASE_SERVICE_ROLE_KEY: "",
@@ -521,4 +524,79 @@ test("INTEGRATION: health never leaks a secret or a credential", async () => {
   const h = JSON.parse(raw);
   assert.equal(h.payments_live, false);
   assert.equal(h.auth_header_fallback_removed, true);
+});
+
+// ------------------------------------------------- money is dark over HTTP
+//
+// The service refuses, the flag is off and the database has a CHECK constraint,
+// but the only surface an outsider can actually touch is this one. If money is
+// dark everywhere except here, it is not dark.
+
+test("B15 GATE: nothing on the subscription surface can be bought", async () => {
+  const plans = await (await req("/v3/subscriptions/plans")).json();
+  assert.equal(plans.purchasable, false);
+  assert.equal(plans.payments_live, false);
+  for (const p of plans.plans) {
+    assert.equal(p.price_minor, 0, `${p.id} carries a price`);
+    assert.equal(p.purchasable, false, `${p.id} is offered as purchasable`);
+  }
+
+  // The refusal is on "no PSP", not on the flag, so it holds in both states.
+  const r = await req("/v3/subscriptions/subscribe", { method: "POST", headers: json(ALICE), body: JSON.stringify({ plan: "dcs_plus" }) });
+  assert.equal(r.status, 503);
+  const b = await r.json();
+  assert.equal(b.error, "not_configured");
+  assert.equal(b.ok, false);
+  assert.match(JSON.stringify(b), /psp|provider|configured/i);
+});
+
+test("B15 GATE: the subscription surface reports itself dark, and a monitor can watch it", async () => {
+  const r = await req("/v3/subscriptions/assert-dark");
+  assert.equal(r.status, 200, "a non-200 here is the alarm");
+  const b = await r.json();
+  assert.equal(b.dark, true);
+  assert.deepEqual(b.problems, []);
+});
+
+test("B15 GATE: a comped test grant never reads as revenue", async () => {
+  const g = await req("/v3/subscriptions/grant", {
+    method: "POST", headers: json(ALICE),
+    body: JSON.stringify({ principal_id: "alice@dcsai.ai", plan: "dcs_plus", reason: "internal testing" }),
+  });
+  const gb = await g.json();
+  assert.equal(g.status, 200, JSON.stringify(gb));
+  const grant = gb.grant;
+  assert.equal(grant.price_minor, 0);
+  assert.equal(grant.comped, true);
+  assert.equal(grant.test_mode, true);
+  assert.equal(grant.status, "comped");
+  assert.notEqual(grant.status, "active", "there must be no status meaning 'this person is paying'");
+  assert.ok(grant.granted_by, "who comped this must be recorded");
+  assert.ok(new Date(grant.expires_at) <= new Date("2026-10-01T00:00:00Z"), "a test grant must not outlive the internal window");
+
+  const list = await (await req("/v3/subscriptions/grants", { headers: auth(ALICE) })).json();
+  assert.equal(list.total_price_minor, 0);
+  assert.equal(list.paid_count, 0);
+
+  // And it is still dark afterwards — a grant must not be able to un-dark it.
+  assert.equal((await (await req("/v3/subscriptions/assert-dark")).json()).dark, true);
+});
+
+test("B15: a plan cannot be comped for someone whose tester status cannot be verified", async () => {
+  const r = await req("/v3/subscriptions/grant", {
+    method: "POST", headers: json(ALICE),
+    body: JSON.stringify({ principal_id: "mallory@example.com", plan: "dcs_plus" }),
+  });
+  assert.equal(r.status, 403);
+  assert.match((await r.json()).detail, /internal tester|cannot be billed/i);
+});
+
+test("B15: a non-tester cannot comp anybody, including themselves", async () => {
+  const r = await req("/v3/subscriptions/grant", {
+    method: "POST", headers: json(MALLORY),
+    body: JSON.stringify({ principal_id: "mallory@example.com", plan: "dcs_plus" }),
+  });
+  assert.equal(r.status, 403);
+  const g = await req("/v3/subscriptions/grants", { headers: auth(MALLORY) });
+  assert.equal(g.status, 403);
 });

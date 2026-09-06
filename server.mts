@@ -28,6 +28,9 @@ import { planExpansion, planEdit } from "./src/v3/expansion/planner.mjs";       
 import { forkWorld, attributionChain, forkPolicyOf, FORK_POLICIES } from "./src/v3/expansion/fork.mjs"; // remix/fork with provenance
 import { planStitch, recordStitch, stitchSummary, checkStitchPermission } from "./src/v3/expansion/stitch.mjs"; // 9.2: world stitching
 import { applyDelta, verifyPreservation, emptyLiveState, newDelta } from "./src/v3/expansion/delta.mjs";
+import { planRollback } from "./src/v3/expansion/rollback.mjs";              // B6: rollback as a new version, never a rewind
+import { diffManifests } from "./src/v3/expansion/diff.mjs";                 // B6: what actually changed between two versions
+import { createSubscriptionsService } from "./src/core/subscriptions.mjs";   // B15: subscriptions, built DARK — nothing is purchasable
 import { createWorldMemory } from "./src/v3/memory/world-memory.mjs";           // B7: factual world chronology
 import { createCompanionService } from "./src/v3/companion/companion.mjs";      // B5: personal AI companion
 import { createNpcMemory } from "./src/v3/companion/npc-memory.mjs";            // 9.5: NPC memory + procedural quests from RECORDED state
@@ -83,6 +86,7 @@ const jobsvc = createJobService();                                           // 
 const BOOT_ID = crypto.randomUUID();
 const bootReconcile = await jobsvc.reconcileOnBoot(BOOT_ID);
 if (bootReconcile.interrupted) console.warn("P1 jobs marked interrupted on boot:", bootReconcile.interrupted);
+const subs = createSubscriptionsService();                                    // B15: no PSP, so nothing can be bought; internal testers can be comped
 const safety = createSafetyService();                                        // A5: real persistence, so moderation output can never be faked
 const repo = createWorldRepository();                                        // A3: replaces the process-local Map + swallowed best-effort insert
 console.log("A3 world store:", repo.kind);
@@ -196,11 +200,12 @@ const server = http.createServer(async (req, res) => {
       // these paths only answer POST, and a GET against them is a plain 404.
       // Each entry carries its method so a drift check can actually probe it.
       routes: {
-        world: ["POST /v3/worlds/generate", "POST /v3/worlds/generate/async", "GET /v3/worlds/:id/manifest", "POST /v3/worlds/:id/playtest", "POST /v3/worlds/:id/expand", "POST /v3/worlds/:id/edit", "POST /v3/worlds/:id/stitch", "POST /v3/worlds/:id/fork", "GET /v3/worlds/:id/versions", "GET /v3/worlds/:id/memory", "POST /v3/worlds/:id/companion", "POST /v3/worlds/:id/media"],
+        world: ["POST /v3/worlds/generate", "POST /v3/worlds/generate/async", "GET /v3/worlds/:id/manifest", "POST /v3/worlds/:id/playtest", "POST /v3/worlds/:id/expand", "POST /v3/worlds/:id/edit", "POST /v3/worlds/:id/stitch", "POST /v3/worlds/:id/fork", "GET /v3/worlds/:id/versions", "POST /v3/worlds/:id/rollback", "GET /v3/worlds/:id/diff", "GET /v3/worlds/:id/memory", "POST /v3/worlds/:id/companion", "POST /v3/worlds/:id/media"],
         discovery: ["GET /v3/discover", "POST /v3/worlds/:id/play", "POST /v3/worlds/:id/rate", "GET /v3/worlds/:id/stats"],
         identity: ["GET /me/profile", "GET /me/achievements", "GET /me/streak", "GET /me/dashboard", "GET /profiles/:username", "GET /verify/status", "POST /verify/:channel/start", "POST /verify/:channel/confirm"],
         social: ["GET /social/friends", "GET /social/parties", "GET /social/teams", "POST /social/studios", "GET /social/orgs"],
         marketplace: ["GET /v3/marketplace", "POST /v3/marketplace/listings", "GET /v3/marketplace/owned", "GET /v3/marketplace/ledger", "GET /v3/marketplace/assert-dark"],
+        subscriptions: ["GET /v3/subscriptions/plans", "POST /v3/subscriptions/subscribe", "POST /v3/subscriptions/grant", "POST /v3/subscriptions/revoke", "GET /v3/subscriptions/grants", "GET /v3/subscriptions/assert-dark", "GET /me/subscription", "GET /me/entitlements"],
         safety: ["GET /safety/age", "POST /safety/report", "GET /safety/reports", "POST /safety/block", "GET /safety/consent/media", "GET /safety/moderation-history"],
         jobs: ["GET /v3/jobs", "GET /v3/jobs/:id"],
         trust: ["GET /atlas/key", "GET /verify", "GET /v3/providers"],
@@ -416,6 +421,67 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, { ok: true, ...(await market.acquire(me.id, mm[1])) });
       }
     }
+    // ---- B15 subscriptions, built DARK ------------------------------------
+    // Nothing here can be bought. subscribe() refuses in BOTH PAYMENTS_LIVE
+    // states because the refusal is on "no PSP is integrated", not on the flag —
+    // flipping an environment variable must not be able to start taking money.
+    // An internal tester can be COMPED, and the row says so forever, so no later
+    // read or export can mistake a test grant for revenue.
+    if (url === "/v3/subscriptions/plans" && method === "GET") {
+      return send(res, 200, { ok: true, ...subs.plans(), correlation_id: cid });
+    }
+    if (url === "/v3/subscriptions/subscribe" && method === "POST") {
+      const me = await mustBe(req, cid);
+      const b = await readBody(req);
+      // Always throws. The attempt is recorded first: a refused subscribe is
+      // evidence of demand and must not vanish because it was correctly refused.
+      return send(res, 200, { ok: true, ...(await subs.subscribe(me.id, b.plan || "dcs_plus")) });
+    }
+    if (url === "/v3/subscriptions/grant" && method === "POST") {
+      const me = await mustBeInternalTester(req, cid);
+      const b = await readBody(req);
+      const subjectId = String(b.principal_id || "").trim();
+      if (!subjectId) throw Errors.validation("principal_id is required: who is being comped", { correlationId: cid });
+      const subject = { id: subjectId, isInternalTester: auth.isInternalTesterId(subjectId) };
+      const row = await subs.grantTestPlan(me, subject, b.plan || "dcs_plus", {
+        reason: b.reason ?? null,
+        // Absent means the service default (the window end). An explicit null
+        // would mean "never expires", which the window does not permit.
+        ...(b.expires_at === undefined ? {} : { expiresAt: b.expires_at }),
+      });
+      return send(res, 200, { ok: true, grant: row, payments_live: PAYMENTS_LIVE, correlation_id: cid });
+    }
+    if (url === "/v3/subscriptions/revoke" && method === "POST") {
+      const me = await mustBeInternalTester(req, cid);
+      const b = await readBody(req);
+      const pid = String(b.principal_id || "").trim();
+      if (!pid) throw Errors.validation("principal_id is required: whose grant is being revoked", { correlationId: cid });
+      return send(res, 200, { ok: true, grant: await subs.revokeTestPlan(me, pid), correlation_id: cid });
+    }
+    if (url === "/v3/subscriptions/grants" && method === "GET") {
+      await mustBeInternalTester(req, cid);
+      return send(res, 200, { ok: true, ...(await subs.listGrants()), correlation_id: cid });
+    }
+    if (url === "/v3/subscriptions/assert-dark" && method === "GET") {
+      // Same shape as /v3/marketplace/assert-dark: a 500 if money is NOT dark,
+      // so a monitor can watch this rather than trusting a claim in a document.
+      const r = await subs.assertDark();
+      return send(res, r.dark ? 200 : 500, { ok: r.dark, ...r, payments_live: PAYMENTS_LIVE, correlation_id: cid });
+    }
+    if (url === "/me/subscription" && method === "GET") {
+      const me = await mustBe(req, cid);
+      return send(res, 200, { ok: true, ...(await subs.statusFor(me.id)), correlation_id: cid });
+    }
+    if (url === "/me/entitlements" && method === "GET") {
+      const me = await mustBe(req, cid);
+      const profile = await social.me(me);
+      return send(res, 200, {
+        ok: true,
+        ...(await subs.entitlementsFor(me.id, { level: profile.level, publishedCount: profile.worlds_published ?? 0 })),
+        correlation_id: cid,
+      });
+    }
+
     if (url === "/v3/marketplace/owned" && method === "GET") {
       const me = await mustBe(req, cid);
       return send(res, 200, { ok: true, owned: await market.ownedBy(me.id), payments_live: PAYMENTS_LIVE });
@@ -1112,6 +1178,63 @@ const server = http.createServer(async (req, res) => {
       if (mm && method === "GET") {
         const v = await repo.getVersion(mm[1], Number(mm[2]), { requesterId: principal?.id ?? null });
         return send(res, 200, { ok: true, world_id: mm[1], version: v.version, manifest_hash: v.manifest_hash, label: v.label, created_at: v.created_at, manifest: v.manifest });
+      }
+
+      // ---- B6 rollback -----------------------------------------------------
+      // A rollback is a NEW version, never a rewind: the chronicle only ever
+      // grows, so "we went back to v3" stays visible instead of looking like v3
+      // was never left. It refuses rather than repairs when a player owns
+      // something the target does not contain — a world is not the creator's
+      // alone once people have built in it.
+      mm = url.match(/^\/v3\/worlds\/([^/]+)\/rollback$/);
+      if (mm && method === "POST") {
+        const me = await mustBeInternalTester(req, cid);
+        const b = await readBody(req);
+        const toVersion = Number(b.to_version);
+        if (!Number.isInteger(toVersion) || toVersion < 1) throw Errors.validation("to_version must be a version number to roll back to", { correlationId: cid });
+
+        const rec = await repo.get(mm[1], { requesterId: me.id, requireOwner: true });
+        const target = await repo.getVersion(mm[1], toVersion, { requesterId: me.id });
+        const { manifest: current } = ensureV3(rec.manifest, { worldVersion: rec.version, creatorId: rec.owner_id });
+
+        const live = { ...emptyLiveState(), ...(b.live_state || {}) };
+        const { manifest, record } = planRollback(current, target.manifest, {
+          actorId: me.id, toVersion, liveState: live, reason: b.reason ?? null,
+        });
+
+        const gate = await playtestAndRepair(manifest);
+        if (!gate.passed) {
+          // An old version that no longer passes today's gate is not silently
+          // shipped: the world stays where it is and the caller is told why.
+          return send(res, 422, { ok: false, error: "rollback_failed_playtest", detail: `v${toVersion} does not pass the current playtest gate, so the world was not changed`, verdict: gate.verdict, findings: gate.rounds.at(-1).findings.slice(0, 10), correlation_id: cid });
+        }
+
+        const saved = await repo.upsert({ worldId: rec.world_id, ownerId: me.id, manifest: gate.manifest, state: rec.state, title: gate.manifest.meta.title });
+        await worldMemory.record(rec.world_id, {
+          kind: "rolled_back", summary: `rolled back to v${toVersion}`,
+          worldVersion: gate.manifest.world_version, actorId: me.id,
+          detail: { from_version: record.from_version, to_version: record.to_version, reason: record.reason || null },
+        });
+
+        return send(res, 200, {
+          ok: true, world_id: rec.world_id, rolled_back_to: toVersion,
+          world_version: gate.manifest.world_version, record_version: saved.version,
+          ownership_preserved: record.ownership_preserved || [],
+          diff: diffManifests(current, gate.manifest).summary,
+          playtest: gate.verdict, correlation_id: cid,
+        });
+      }
+
+      // ---- what actually changed between two retained versions -------------
+      mm = url.match(/^\/v3\/worlds\/([^/]+)\/diff$/);
+      if (mm && method === "GET") {
+        const q = new URLSearchParams((req.url || "").split("?")[1] || "");
+        const from = Number(q.get("from")), to = Number(q.get("to"));
+        if (!Number.isInteger(from) || !Number.isInteger(to)) throw Errors.validation("from and to must both be version numbers, e.g. ?from=1&to=3", { correlationId: cid });
+        const requesterId = principal?.id ?? null;
+        const a = await repo.getVersion(mm[1], from, { requesterId });
+        const bV = await repo.getVersion(mm[1], to, { requesterId });
+        return send(res, 200, { ok: true, world_id: mm[1], from, to, ...diffManifests(a.manifest, bV.manifest) });
       }
 
       mm = url.match(/^\/v3\/worlds\/([^/]+)\/memory$/);

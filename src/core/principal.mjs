@@ -173,6 +173,21 @@ export function createPrincipalResolver(cfg = {}) {
     hasSupabase,
     resolve,
     require: require_,
+    /**
+     * Is this id or email on the internal-tester ALLOWLIST?
+     *
+     * Deliberately narrower than a resolved principal's isInternalTester, which
+     * also honours an `internal_tester` role carried in that principal's own
+     * token. We are being asked about somebody else, and we do not hold their
+     * token — so the only evidence available is the allowlist this operator
+     * controls. Comping a plan for a subject whose tester status we cannot
+     * verify is exactly the ambiguous grant the dark-subscription rules exist
+     * to prevent, so an unverifiable claim reads as "no".
+     */
+    isInternalTesterId(idOrEmail) {
+      const k = String(idOrEmail || "").toLowerCase();
+      return !!k && testers.has(k);
+    },
     /** Test/internal helper — only meaningful in local-hs256 mode. */
     issueLocalToken: (claims, ttl) => signLocalToken(secret, claims, ttl),
     _clearCache: () => _cache.clear(),
