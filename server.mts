@@ -18,6 +18,7 @@ import { makeKeyEndpoint } from "./src/cw7/atlas-key.mjs";       // CW7: GET /at
 import { atlasReady, verifyReceipt, atlasPublicKeyBase64, issueWorldReceipt } from "./src/cw7/atlas-local-sign.mjs"; // CW7: local ed25519 sign+verify (off-chain, no gas)
 import { makeCrossProductRouter } from "./src/cw7/atlas-cross-product.mjs"; // CW7 v4.0: cross-product reputation (node-http routeTable)
 import { createEconomyRouter } from "./src/cw6/economy-router.mjs";          // CW6 v3.0: economy routes (DARK), non-express fallback router
+import { assertSchema, currentVersion } from "./src/core/schema.mjs";           // A2: boot-time schema assertion — refuse to serve an unsupported schema
 import { createWorldRepository } from "./src/core/worldstore.mjs";          // A3: durable, lossless, idempotent, ownership-aware world persistence
 import { createPrincipalResolver } from "./src/core/principal.mjs";         // A1: PARENT-OWNED canonical principal. No x-user-id fallback, ever.
 import { AppError, Errors, newCorrelationId, logError, optional } from "./src/core/errors.mjs"; // A4: structured errors, correlation ids, no silent swallow
@@ -44,6 +45,20 @@ const crossProduct = makeCrossProductRouter({ resolveProductIdentities: (_id: st
 const econRouter: any = createEconomyRouter({}); // CW6 v3.0: DARK; supabase + signReceipt injected later → honest empty + unsigned receipts, no fabricated sales
 const repo = createWorldRepository();                                        // A3: replaces the process-local Map + swallowed best-effort insert
 console.log("A3 world store:", repo.kind);
+
+// A2: when a direct Postgres DSN is configured, assert the schema BEFORE serving.
+// An unsupported schema must stop the process, not surface later as empty data.
+let SCHEMA_STATE: any = { checked: false, reason: "no DATABASE_URL configured" };
+if (process.env.DATABASE_URL) {
+  try {
+    SCHEMA_STATE = { checked: true, ...(await assertSchema(process.env.DATABASE_URL)) };
+    console.log("A2 schema assertion: ok at v" + SCHEMA_STATE.version);
+  } catch (e: any) {
+    console.error("A2 SCHEMA ASSERTION FAILED:", e?.detail || e?.message || e);
+    if (process.env.DCS_ALLOW_SCHEMA_DRIFT !== "1") process.exit(78); // EX_CONFIG
+    SCHEMA_STATE = { checked: true, ok: false, version: await currentVersion(process.env.DATABASE_URL).catch(() => 0), override: true };
+  }
+}
 
 const auth = createPrincipalResolver();                                      // A1: supabase-jwt when configured, real HS256 otherwise. Never a header.
 console.log("A1 auth mode:", auth.mode);
@@ -108,6 +123,7 @@ const server = http.createServer(async (req, res) => {
       auth_header_fallback_removed: true,      // A1: x-user-id impersonation path deleted 6 Sep 2026
       internal_testing_window_ends: "2026-09-30",
       persistence: repo.kind,
+      schema_assertion: SCHEMA_STATE,
       generation: GEN_MODE,
       lanes: ["cw1-identity", "cw2-generation", "cw5-persistence", "cw7-atlas"],
       schema: "runtime-ready (cw2 toRuntimeWorld; zero runtime patches)",
