@@ -4,9 +4,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import fsp from "node:fs/promises";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { FileWorldStore, WorldRepository, MirroredWorldStore, VersionHistoryStore, manifestHash, canonicalize } from "../src/core/worldstore.mjs";
+import {
+  FileWorldStore, WorldRepository, MirroredWorldStore, VersionHistoryStore,
+  SupabaseWorldStore, SupabaseVersionHistoryStore, MirroredVersionHistoryStore,
+  createWorldRepository, manifestHash, canonicalize,
+} from "../src/core/worldstore.mjs";
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "dcs-worlds-"));
 
@@ -499,4 +505,509 @@ test("an owner acting on their own world is still told when a world is somebody 
   // A world that is not there is still a 404 on that path, for a caller who is
   // being told about ids they already hold.
   await assert.rejects(() => repo.get("nope", { requesterId: "user-mallory", requireOwner: true }), (e) => e.httpStatus === 404);
+});
+
+// =============================================================================
+// Lane U2 — the mirrored and Supabase-backed paths.
+//
+// Everything above this line runs with SUPABASE_URL unset, so it exercises
+// FileWorldStore and nothing else. The deployed configuration is a different
+// set of objects — SupabaseWorldStore, MirroredWorldStore, and now the version
+// history's own pair — and every defect below survived precisely because no
+// test in this estate ever constructed them.
+//
+// These drive them over REAL HTTP against a local node:http server that speaks
+// the part of PostgREST this store uses. NOTHING here contacts a real Supabase
+// instance and no real credential is used: every URL is 127.0.0.1 on an
+// ephemeral port. The stub is deliberately small — it is not a Postgres, and it
+// says nothing about RLS, types or the updated_at trigger.
+// =============================================================================
+
+const J = (o) => JSON.stringify(o);
+
+/** Silence the deliberate degradation logging so the test output stays readable. */
+function quiet() {
+  const w = console.warn, e = console.error;
+  console.warn = () => {}; console.error = () => {};
+  return () => { console.warn = w; console.error = e; };
+}
+
+/** Columns migration 0003 declares, so a write it would reject is rejected here. */
+const WORLD_COLS = ["world_id", "owner_id", "title", "state", "version", "manifest", "manifest_hash", "manifest_version", "created_at", "updated_at"];
+const VERSION_COLS = ["world_id", "version", "manifest", "manifest_hash", "label", "created_by", "created_at"];
+
+/**
+ * A local PostgREST stand-in: filters, ordering, limit, `select=` projection
+ * INCLUDING the `col->key` json arrow (which is the whole point of the wire-cost
+ * fix), upsert via on_conflict + merge-duplicates, plain-insert duplicate 409,
+ * DELETE, and injectable faults.
+ */
+async function pgStub({ tables = {}, key = "stub-key", rejectArrows = false } = {}) {
+  const state = { key, rejectArrows, tables: {}, wire: [], faults: [] };
+  for (const [n, t] of Object.entries(tables)) state.tables[n] = { columns: t.columns || null, pk: t.pk || ["id"], rows: (t.rows || []).map((r) => ({ ...r })) };
+
+  const pick = (row, sel) => {
+    if (sel === "*") return row;
+    const out = {};
+    for (const raw of sel.split(",")) {
+      const c = raw.trim();
+      const i = c.indexOf("->");
+      if (i < 0) { out[c] = row[c] === undefined ? null : row[c]; continue; }
+      const base = c.slice(0, i), leaf = c.slice(i + 2).replace(/^>/, "");
+      out[leaf] = (row[base] || {})[leaf] ?? null;
+    }
+    return out;
+  };
+  const badCols = (T, sel) => {
+    if (sel === "*" || !T.columns) return null;
+    for (const raw of sel.split(",")) {
+      const c = raw.trim();
+      const arrow = c.includes("->");
+      if (arrow && state.rejectArrows) return c;
+      const base = arrow ? c.slice(0, c.indexOf("->")) : c;
+      if (!T.columns.includes(base)) return c;
+    }
+    return null;
+  };
+
+  const server = http.createServer((req, res) => {
+    let raw = "";
+    req.on("data", (c) => { raw += c; });
+    req.on("end", () => {
+      const [pathname, qs] = String(req.url).split("?");
+      const q = new URLSearchParams(qs || "");
+      const send = (status, body = "") => {
+        state.wire.push({ method: req.method, url: req.url, table: (/^\/rest\/v1\/([^?]+)/.exec(req.url) || [])[1] || null, status, resBytes: Buffer.byteLength(body) });
+        if (status === 204) { res.writeHead(204); return res.end(); }
+        res.writeHead(status, { "Content-Type": "application/json" });
+        res.end(body);
+      };
+      const m = /^\/rest\/v1\/([^/]+)$/.exec(pathname);
+      if (!m) return send(404, J({ code: "PGRST002", message: "no route" }));
+      for (const f of state.faults) {
+        if (f.times <= 0) continue;
+        if (f.method && f.method !== req.method) continue;
+        if (f.table && f.table !== m[1]) continue;
+        f.times -= 1;
+        return send(f.status, J({ code: "XX000", message: "stub-injected upstream failure" }));
+      }
+      if (req.headers.apikey !== state.key) return send(401, J({ message: "Invalid API key" }));
+      const T = state.tables[m[1]];
+      if (!T) return send(404, J({ code: "PGRST205", message: `Could not find the table 'public.${m[1]}'` }));
+
+      const filters = [];
+      for (const [k, v] of q.entries()) {
+        if (["select", "order", "limit", "offset", "on_conflict"].includes(k)) continue;
+        filters.push([k, v.slice(v.indexOf(".") + 1)]);
+      }
+      const match = (r) => filters.every(([c, v]) => String(r[c]) === v);
+
+      if (req.method === "GET") {
+        const sel = q.get("select") || "*";
+        const bad = badCols(T, sel);
+        if (bad) return send(400, J({ code: "42703", message: `column ${m[1]}.${bad} does not exist` }));
+        let rows = T.rows.filter(match);
+        const order = q.get("order");
+        if (order) {
+          const [c, dir = "asc"] = order.split(".");
+          rows = rows.slice().sort((a, b) => String(a[c] ?? "").localeCompare(String(b[c] ?? "")) * (dir.startsWith("desc") ? -1 : 1));
+        }
+        if (q.has("limit")) rows = rows.slice(0, Number(q.get("limit")));
+        return send(200, J(rows.map((r) => pick(r, sel))));
+      }
+      if (req.method === "POST") {
+        const body = JSON.parse(raw || "null");
+        const rows = Array.isArray(body) ? body : [body];
+        const merge = /resolution=merge-duplicates/.test(String(req.headers.prefer || ""));
+        const pk = q.get("on_conflict") ? decodeURIComponent(q.get("on_conflict")).split(",") : T.pk;
+        const written = [];
+        for (const r of rows) {
+          if (T.columns) for (const c of Object.keys(r)) if (!T.columns.includes(c)) return send(400, J({ code: "PGRST204", message: `Could not find the '${c}' column of '${m[1]}' in the schema cache` }));
+          const k = pk.map((c) => String(r[c])).join(" ");
+          const i = T.rows.findIndex((x) => pk.map((c) => String(x[c])).join(" ") === k);
+          if (i >= 0) {
+            if (!merge) return send(409, J({ code: "23505", message: `duplicate key value violates unique constraint "${m[1]}_pkey"` }));
+            T.rows[i] = { ...T.rows[i], ...r };
+            written.push(T.rows[i]);
+          } else { T.rows.push({ ...r }); written.push(r); }
+        }
+        return send(201, /return=minimal/.test(String(req.headers.prefer || "")) ? "" : J(written));
+      }
+      if (req.method === "DELETE") { T.rows = T.rows.filter((r) => !match(r)); return send(204); }
+      return send(405, J({ code: "PGRST105", message: "method not allowed" }));
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  return {
+    url: `http://127.0.0.1:${server.address().port}`, key,
+    get wire() { return state.wire; },
+    rows: (t) => state.tables[t].rows,
+    seed: (t, rows) => { state.tables[t].rows = rows.map((r) => ({ ...r })); },
+    fail: (m) => state.faults.push({ times: Infinity, status: 503, ...m }),
+    clearFaults: () => { state.faults.length = 0; },
+    resetWire: () => { state.wire.length = 0; },
+    bytes: (pred = () => true) => state.wire.filter(pred).reduce((n, w) => n + w.resBytes, 0),
+    close: () => new Promise((r) => server.close(r)),
+  };
+}
+
+const bothTables = () => ({
+  dcsgames_base_worlds: { columns: WORLD_COLS, pk: ["world_id"], rows: [] },
+  dcsgames_world_versions: { columns: VERSION_COLS, pk: ["world_id", "version"], rows: [] },
+});
+
+/** A stub + temp dir + the repository createWorldRepository builds for them. */
+async function withRepo(t, opts = {}) {
+  const stub = await pgStub({ tables: bothTables(), ...opts });
+  const dir = tmp();
+  t.after(async () => { await stub.close(); await fsp.rm(dir, { recursive: true, force: true }); });
+  const mk = () => createWorldRepository({ SUPABASE_URL: stub.url, SUPABASE_SERVICE_ROLE_KEY: stub.key, DCS_DATA_DIR: dir });
+  return { stub, dir, mk, repo: mk() };
+}
+
+/** A manifest big enough that the wire cost of shipping it is measurable. */
+const bigManifest = (n = 60) => ({
+  manifest_version: "3.0.0",
+  meta: { title: "Pirate Island", genre: "adventure" },
+  media: { cover: "https://example.invalid/cover.png" },
+  zones: Array.from({ length: n }, (_, i) => ({ id: "z" + i, description: "long-form generated description ".repeat(6) })),
+});
+
+// ------------------------------------------- 1. re-sync after a refused write
+
+test("a world the primary refused is pushed back the moment the primary recovers", async (t) => {
+  const restore = quiet();
+  const { stub, repo } = await withRepo(t);
+  t.after(restore);
+  stub.fail({ method: "POST", table: "dcsgames_base_worlds" });
+  const first = await repo.upsert({ worldId: "w1", ownerId: "alice", manifest: bigManifest(2), state: "published", title: "W" });
+  assert.equal(first._mirrored, false, "the caller is told the write was degraded");
+  assert.equal(stub.rows("dcsgames_base_worlds").length, 0);
+
+  stub.clearFaults();
+  // A plain READ is enough: the row the primary was never told about is replayed.
+  await repo.get("w1", { requesterId: "alice" });
+  assert.equal(stub.rows("dcsgames_base_worlds").length, 1, "a read pushes the missing row back");
+  assert.equal(stub.rows("dcsgames_base_worlds")[0].version, 1);
+  assert.deepEqual(stub.rows("dcsgames_base_worlds")[0].manifest, bigManifest(2), "and pushes the WHOLE manifest, not a projection");
+});
+
+test("re-issuing the identical save repairs the mirror instead of short-circuiting on the shadow", async (t) => {
+  const restore = quiet();
+  const { stub, repo } = await withRepo(t);
+  t.after(restore);
+  const manifest = bigManifest(2);
+  stub.fail({ method: "POST", table: "dcsgames_base_worlds" });
+  const first = await repo.upsert({ worldId: "w1", ownerId: "alice", manifest, state: "published", title: "W" });
+  assert.equal(first._mirrored, false);
+
+  // Still degraded: the idempotent answer must not claim the world is mirrored.
+  const whileDown = await repo.upsert({ worldId: "w1", ownerId: "alice", manifest, state: "published", title: "W" });
+  assert.equal(whileDown.idempotent, true);
+  assert.equal(whileDown._mirrored, false, "an idempotent answer must still admit the mirror is behind");
+
+  stub.clearFaults();
+  const retry = await repo.upsert({ worldId: "w1", ownerId: "alice", manifest, state: "published", title: "W" });
+  assert.equal(retry.idempotent, true, "the content really is unchanged, so no version churn");
+  assert.equal(retry._mirrored, undefined, "and it no longer claims to be degraded");
+  assert.equal(stub.rows("dcsgames_base_worlds").length, 1, "the retry is a real remedy: the primary now has the world");
+  assert.equal(stub.rows("dcsgames_base_worlds")[0].manifest_hash, manifestHash(manifest));
+});
+
+test("the pending-mirror marker is durable, so a restart does not forget what the primary is owed", async (t) => {
+  const restore = quiet();
+  const { stub, mk } = await withRepo(t);
+  t.after(restore);
+  stub.fail({ method: "POST", table: "dcsgames_base_worlds" });
+  await mk().upsert({ worldId: "w1", ownerId: "alice", manifest: bigManifest(1), state: "published", title: "W" });
+  assert.equal(stub.rows("dcsgames_base_worlds").length, 0);
+
+  stub.clearFaults();
+  // A brand new process over the same disk — which is what a redeploy is.
+  const repo2 = mk();
+  assert.equal((await repo2.listPublished(10)).length, 1);
+  assert.equal(stub.rows("dcsgames_base_worlds").length, 1,
+    "the marker was on disk, not in a process-local flag, so the new process still owed the write");
+});
+
+test("a shadow row the primary does not have, and no marker explains, is reported rather than served", async (t) => {
+  // The alternative — serving any shadow row the primary lacks — is what makes
+  // a deleted world immortal, because the store would push it back too. So the
+  // divergence is refused by BOTH get() and list(), identically, and logged
+  // instead of passed over. Nothing is destroyed: the record is still on disk.
+  const { stub, dir } = await withRepo(t);
+  const warned = [];
+  const w = console.warn;
+  console.warn = (line) => warned.push(String(line));
+  t.after(() => { console.warn = w; });
+
+  const shadow = new FileWorldStore(path.join(dir, "worlds"));
+  const record = { world_id: "orphaned", owner_id: "alice", title: "Only Local", state: "published", version: 4, manifest: { meta: { title: "Only Local" } }, manifest_hash: "h", manifest_version: null, created_at: "t", updated_at: "t" };
+  await shadow.put(record);
+  const store = new MirroredWorldStore(new SupabaseWorldStore({ url: stub.url, serviceRoleKey: stub.key }), shadow);
+
+  assert.equal(await store.get("orphaned"), null, "the primary answered, and it said no");
+  assert.deepEqual(await store.list({ state: "published" }), [], "and the listing says exactly the same thing");
+  assert.equal(stub.rows("dcsgames_base_worlds").length, 0, "a world the primary deleted is not pushed back to it");
+  assert.equal(warned.filter((l) => l.includes("supabase-world-divergence")).length, 1, "but the divergence is visible");
+  assert.deepEqual(await shadow.get("orphaned"), record, "and the record itself is untouched on disk");
+
+  // Logged once per world per process, not once per read.
+  await store.get("orphaned");
+  assert.equal(warned.filter((l) => l.includes("supabase-world-divergence")).length, 1);
+});
+
+// ------------------------------------------------------- 2. an honest delete
+
+test("a delete the primary refused does not resurrect the world, and says so", async (t) => {
+  const restore = quiet();
+  const { stub, repo } = await withRepo(t);
+  t.after(restore);
+  await repo.upsert({ worldId: "w1", ownerId: "alice", manifest: bigManifest(1), state: "published", title: "W" });
+  assert.equal(stub.rows("dcsgames_base_worlds").length, 1);
+
+  stub.fail({ method: "DELETE" });
+  const res = await repo.store.delete("w1");
+  assert.equal(res.deleted, true);
+  assert.equal(res._mirrored, false, "a delete that only half happened must not resolve silently");
+  assert.match(String(res._mirror_error), /world delete failed \(503\)/);
+
+  // The row does survive remotely — but it is NOT served, and it is NOT in the
+  // public catalogue, because the tombstone outranks the primary's copy.
+  assert.equal(stub.rows("dcsgames_base_worlds").length, 1);
+  await assert.rejects(() => repo.get("w1", { requesterId: null }), (e) => e.httpStatus === 404);
+  assert.deepEqual(await repo.listPublished(10), []);
+  assert.deepEqual(await repo.listOwned("alice", 10), []);
+});
+
+test("a refused delete is retried until the primary converges", async (t) => {
+  const restore = quiet();
+  const { stub, repo } = await withRepo(t);
+  t.after(restore);
+  await repo.upsert({ worldId: "w1", ownerId: "alice", manifest: bigManifest(1), state: "published", title: "W" });
+  stub.fail({ method: "DELETE" });
+  await repo.store.delete("w1");
+  assert.equal(stub.rows("dcsgames_base_worlds").length, 1);
+
+  stub.clearFaults();
+  assert.deepEqual(await repo.listPublished(10), [], "still gone from the catalogue");
+  assert.equal(stub.rows("dcsgames_base_worlds").length, 0, "and now genuinely gone from the primary");
+  // A world can be recreated at the same id afterwards: the tombstone is spent.
+  const again = await repo.upsert({ worldId: "w1", ownerId: "alice", manifest: bigManifest(1), state: "published", title: "W" });
+  assert.equal(again.version, 1);
+  assert.equal((await repo.get("w1", { requesterId: null })).version, 1);
+  assert.equal(stub.rows("dcsgames_base_worlds").length, 1);
+});
+
+test("a fully mirrored delete reports a clean success", async (t) => {
+  const { stub, repo } = await withRepo(t);
+  await repo.upsert({ worldId: "w1", ownerId: "alice", manifest: bigManifest(1), state: "published", title: "W" });
+  const res = await repo.store.delete("w1");
+  assert.equal(res._mirrored, true);
+  assert.equal(res._mirror_error, undefined);
+  assert.equal(stub.rows("dcsgames_base_worlds").length, 0);
+});
+
+// --------------------------------------------- 3. version history in the DB
+
+test("retained version history reaches dcsgames_world_versions, not just the disk", async (t) => {
+  const { stub, dir, repo } = await withRepo(t);
+  await repo.upsert({ worldId: "w1", ownerId: "alice", manifest: bigManifest(1), state: "published", title: "v1" });
+  await repo.upsert({ worldId: "w1", ownerId: "alice", manifest: bigManifest(2), state: "published", title: "v2" });
+
+  const stored = stub.rows("dcsgames_world_versions");
+  assert.deepEqual(stored.map((v) => v.version).sort(), [1, 2], "both versions are in the table migration 0003 declared");
+  assert.deepEqual(stored.find((v) => v.version === 2).manifest, bigManifest(2), "with the whole manifest, so a rollback has something to roll back TO");
+  assert.ok(fs.existsSync(path.join(dir, "world-versions", "w1@1.json")), "and the disk copy is still written first");
+
+  // The operational point: a redeploy on an ephemeral disk keeps the database.
+  await fsp.rm(path.join(dir, "world-versions"), { recursive: true, force: true });
+  const repo2 = createWorldRepository({ SUPABASE_URL: stub.url, SUPABASE_SERVICE_ROLE_KEY: stub.key, DCS_DATA_DIR: dir });
+  assert.deepEqual((await repo2.listVersions("w1", { requesterId: "alice" })).map((v) => v.version), [1, 2],
+    "the rollback targets survive the disk that used to be the only copy");
+  const v1 = await repo2.getVersion("w1", 1, { requesterId: "alice" });
+  assert.deepEqual(v1.manifest, bigManifest(1));
+  assert.equal(v1.manifest_hash, manifestHash(bigManifest(1)));
+});
+
+test("a version recovered from the database alone is private, because the table cannot record its state", async (t) => {
+  // migrations/0003 declares dcsgames_world_versions without a `state` column,
+  // and inventing one would make every write a PGRST204. So a version known
+  // only to the database has no provable state and stays owner-only — the
+  // fail-closed direction. Deciding from the world's CURRENT state instead is
+  // exactly the bug that retroactively published every draft it passed through.
+  const { stub, dir, repo } = await withRepo(t);
+  await repo.upsert({ worldId: "w1", ownerId: "alice", manifest: bigManifest(1), state: "published", title: "v1" });
+  assert.deepEqual(Object.keys(stub.rows("dcsgames_world_versions")[0]).sort(), VERSION_COLS.slice().sort(),
+    "only the columns the migration declares are ever sent");
+
+  const stranger = await repo.listVersions("w1", { requesterId: "mallory" });
+  assert.deepEqual(stranger.map((v) => v.version), [1], "with the disk copy present, its state is known and a stranger sees it");
+
+  await fsp.rm(path.join(dir, "world-versions"), { recursive: true, force: true });
+  const repo2 = createWorldRepository({ SUPABASE_URL: stub.url, SUPABASE_SERVICE_ROLE_KEY: stub.key, DCS_DATA_DIR: dir });
+  assert.deepEqual(await repo2.listVersions("w1", { requesterId: "mallory" }), [], "without it, an unprovable state is treated as private");
+  assert.deepEqual((await repo2.listVersions("w1", { requesterId: "alice" })).map((v) => v.version), [1], "the owner still has the target");
+});
+
+test("a version the primary refused is replayed the next time history is read", async (t) => {
+  const restore = quiet();
+  const { stub, repo } = await withRepo(t);
+  t.after(restore);
+  stub.fail({ method: "POST", table: "dcsgames_world_versions" });
+  await repo.upsert({ worldId: "w1", ownerId: "alice", manifest: bigManifest(1), state: "published", title: "v1" });
+  assert.equal(stub.rows("dcsgames_world_versions").length, 0);
+
+  stub.clearFaults();
+  assert.deepEqual((await repo.listVersions("w1", { requesterId: "alice" })).map((v) => v.version), [1]);
+  assert.equal(stub.rows("dcsgames_world_versions").length, 1, "the missing version was replayed");
+});
+
+test("retained history is append-only across BOTH backings: a duplicate is a success, never a rewrite", async (t) => {
+  const stub = await pgStub({ tables: bothTables() });
+  const dir = tmp();
+  t.after(async () => { await stub.close(); await fsp.rm(dir, { recursive: true, force: true }); });
+  const s = new SupabaseVersionHistoryStore({ url: stub.url, serviceRoleKey: stub.key });
+  const rec = { world_id: "w1", version: 1, manifest: { a: 1 }, manifest_hash: "h1", label: null, created_by: "alice", created_at: "t" };
+  await s.put("w1", 1, rec);
+  const again = await s.put("w1", 1, { ...rec, manifest: { TAMPERED: true }, manifest_hash: "h2" });
+  assert.equal(again.already_recorded, true, "a 23505 on an append-only table means the row is already there");
+  assert.deepEqual(stub.rows("dcsgames_world_versions")[0].manifest, { a: 1 }, "history was not rewritten");
+});
+
+// ------------------------------- 4. get() and list() answer the same question
+
+test("get() and list() agree about a world the primary has not caught up with", async (t) => {
+  const restore = quiet();
+  const { stub, repo } = await withRepo(t);
+  t.after(restore);
+  await repo.upsert({ worldId: "w1", ownerId: "alice", manifest: bigManifest(1), state: "published", title: "V1" });
+  stub.fail({ method: "POST", table: "dcsgames_base_worlds" });
+  const v2 = bigManifest(2);
+  const saved = await repo.upsert({ worldId: "w1", ownerId: "alice", manifest: v2, state: "published", title: "V2" });
+  assert.equal(saved._mirrored, false);
+  assert.equal(stub.rows("dcsgames_base_worlds")[0].version, 1, "the primary is genuinely stale");
+
+  const one = await repo.get("w1", { requesterId: "alice" });
+  const [listed] = await repo.listOwned("alice");
+  const [card] = await repo.listPublished(10);
+  assert.equal(one.version, 2);
+  assert.equal(listed.version, 2, "one repository must not answer the same question two ways");
+  assert.equal(card.version, 2);
+  assert.equal(listed.title, "V2");
+  assert.equal(card.manifest_hash, manifestHash(v2));
+  assert.equal(one.manifest_hash, card.manifest_hash);
+});
+
+test("an EMPTY answer from the primary is an answer, not a failure", async (t) => {
+  const { stub, repo } = await withRepo(t);
+  await repo.upsert({ worldId: "w1", ownerId: "alice", manifest: bigManifest(1), state: "published", title: "W" });
+  stub.seed("dcsgames_base_worlds", []);                  // removed out of band
+  assert.deepEqual(await repo.listPublished(10), [], "a world the primary no longer has does not reappear from the shadow");
+  await assert.rejects(() => repo.get("w1", { requesterId: "alice" }), (e) => e.httpStatus === 404,
+    "and get() says the same thing list() says");
+});
+
+test("a primary OUTAGE still degrades to the shadow rather than emptying the catalogue", async (t) => {
+  // The correction above must not become "the primary's silence is an empty
+  // catalogue". A failed read and an empty read are different events.
+  const restore = quiet();
+  const { stub, repo } = await withRepo(t);
+  t.after(restore);
+  await repo.upsert({ worldId: "w1", ownerId: "alice", manifest: bigManifest(1), state: "published", title: "W" });
+  stub.fail({ method: "GET" });
+  const cards = await repo.listPublished(10);
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0]._summary, true);
+  assert.equal((await repo.get("w1", { requesterId: "alice" })).version, 1);
+});
+
+// ------------------------------------------- 5. the listing gate is re-applied
+
+test("the listing gate is re-applied to whatever the primary returns", async (t) => {
+  // Not a thing PostgREST does on its own — it is what a dropped filter, a
+  // mis-set RLS policy or a view with a different definition looks like from
+  // this side. This file's own gate is what keeps drafts out of the public
+  // catalogue, so it has to be applied on this side of the wire too.
+  const dir = tmp();
+  t.after(async () => { await fsp.rm(dir, { recursive: true, force: true }); });
+  const disobedient = {
+    kind: "supabase",
+    list: async () => ([
+      { world_id: "bob-private", owner_id: "bob", title: "Bob's draft", state: "draft", version: 1, updated_at: "t", manifest: { secret: "unpublished" } },
+      { world_id: "alice-pub", owner_id: "alice", title: "A", state: "published", version: 1, updated_at: "t", manifest: { meta: { title: "A" } } },
+    ]),
+    get: async () => null, put: async () => null, delete: async () => {},
+  };
+  const store = new MirroredWorldStore(disobedient, new FileWorldStore(path.join(dir, "worlds")));
+
+  assert.deepEqual((await store.list({ ownerId: "alice" })).map((r) => r.world_id), ["alice-pub"], "the owner filter is re-applied");
+  assert.deepEqual((await store.list({ state: "published" })).map((r) => r.world_id), ["alice-pub"], "and so is the state filter");
+  const cards = await store.list({ state: "published", summary: true });
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0]._summary, true);
+  assert.deepEqual((await store.list({})).map((r) => r.world_id).sort(), ["alice-pub", "bob-private"], "an unfiltered listing still returns everything");
+  assert.equal((await store.list({ limit: 1 })).length, 1, "and limit is applied after the merge, not before it");
+});
+
+// ---------------------------------------------------- 6. the wire projection
+
+test("a discovery listing projects on the wire: the manifest body never leaves the database", async (t) => {
+  const { stub, repo } = await withRepo(t);
+  const N = 24;
+  for (let i = 0; i < N; i++) await repo.upsert({ worldId: "w" + i, ownerId: "alice", manifest: bigManifest(60), state: "published", title: "World " + i });
+
+  stub.resetWire();
+  const cards = await repo.listPublished(N);
+  const gets = stub.wire.filter((w) => w.method === "GET" && w.table === "dcsgames_base_worlds");
+  assert.equal(gets.length, 1, "one query, not a query plus a repair");
+  assert.doesNotMatch(gets[0].url, /select=\*/, "select=* pulled 24 whole manifests to build 24 cards");
+  // `>` is percent-encoded by the URL parser on the way out; PostgREST decodes it.
+  assert.match(decodeURIComponent(gets[0].url), /select=world_id,owner_id,title,state,version,manifest_hash,manifest_version,created_at,updated_at,manifest->meta,manifest->media/);
+
+  // The cards are unchanged in shape and content...
+  assert.equal(cards.length, N);
+  assert.ok(cards.every((c) => c._summary === true));
+  assert.ok(cards.every((c) => !("zones" in (c.manifest || {}))));
+  assert.deepEqual(cards[0].manifest.meta, bigManifest(60).meta);
+  assert.deepEqual(cards[0].manifest.media, bigManifest(60).media);
+  assert.equal(cards[0].owner_id, "alice");
+  assert.ok(cards.every((c) => typeof c.manifest_hash === "string" && c.manifest_hash.length === 64));
+
+  // ...and the transfer is now the size of the answer rather than 90x it.
+  const projected = gets[0].resBytes;
+  stub.resetWire();
+  await new SupabaseWorldStore({ url: stub.url, serviceRoleKey: stub.key }).list({ state: "published", limit: N });
+  const wholeRows = stub.wire.at(-1).resBytes;
+  assert.ok(projected * 20 < wholeRows, `the projection must be an order of magnitude smaller (projected ${projected} vs select=* ${wholeRows})`);
+  assert.ok(projected < Buffer.byteLength(JSON.stringify(cards)) * 2, "and roughly the size of the cards it serves");
+});
+
+test("an endpoint that cannot project into the manifest still gets correct cards", async (t) => {
+  // A view, an older PostgREST, or a `manifest` column that is text rather than
+  // jsonb. The saving is lost; the shape the caller asked for is not.
+  const { stub, repo } = await withRepo(t, { rejectArrows: true });
+  await repo.upsert({ worldId: "w1", ownerId: "alice", manifest: bigManifest(3), state: "published", title: "W" });
+  const cards = await repo.listPublished(10);
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0]._summary, true);
+  assert.deepEqual(Object.keys(cards[0].manifest).sort(), ["media", "meta"]);
+  assert.deepEqual(cards[0].manifest.meta, bigManifest(3).meta);
+  // ...and it is remembered, so the rejected projection is asked for once, not per listing.
+  stub.resetWire();
+  await repo.listPublished(10);
+  assert.equal(stub.wire.filter((w) => w.method === "GET" && w.status === 400).length, 0);
+});
+
+// ----------------------------------------------------- 7. the limit parameter
+
+test("`limit` cannot smuggle query parameters into a listing", async (t) => {
+  const stub = await pgStub({ tables: bothTables() });
+  t.after(() => stub.close());
+  const s = new SupabaseWorldStore({ url: stub.url, serviceRoleKey: stub.key });
+  await s.list({ limit: "1&owner_id=eq.injected" });
+  assert.doesNotMatch(stub.wire.at(-1).url, /owner_id/, "caller-supplied text must not reach the query string");
+  assert.match(stub.wire.at(-1).url, /limit=50/, "an unusable limit falls back to the default");
+  await s.list({ limit: "12" });
+  assert.match(stub.wire.at(-1).url, /limit=12/, "a numeric string is still honoured");
 });

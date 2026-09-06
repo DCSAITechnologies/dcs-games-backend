@@ -323,6 +323,23 @@ export class FileWorldStore {
   }
 }
 
+
+/**
+ * The nine scalar columns a discovery card is made of, plus the two manifest
+ * sub-objects it projects. `select=*` pulled the WHOLE manifest to build a card
+ * that keeps `manifest.meta` and `manifest.media`: measured at 24 published
+ * worlds with 60-zone manifests, 941KB arrived to serve 10KB of cards — 98.9%
+ * of the transfer was decoded, allocated and thrown away on this side.
+ */
+const CARD_SCALARS = ["world_id", "owner_id", "title", "state", "version", "manifest_hash", "manifest_version", "created_at", "updated_at"];
+/**
+ * PostgREST's json arrow selector projects into a jsonb column server-side, so
+ * the manifest body never leaves the database. The response names an arrow
+ * column after its last segment (`manifest->meta` arrives as `meta`), which is
+ * why _cardFromRow accepts both spellings.
+ */
+const CARD_PROJECTION = CARD_SCALARS.join(",") + ",manifest->meta,manifest->media";
+
 /** Supabase-backed store. Every failure surfaces — nothing is best-effort here. */
 export class SupabaseWorldStore {
   constructor({ url, serviceRoleKey, table = "dcsgames_base_worlds", fetchImpl } = {}) {
@@ -331,9 +348,24 @@ export class SupabaseWorldStore {
     this.table = table;
     this.fetch = fetchImpl || globalThis.fetch;
     this.kind = "supabase";
+    // Set once if this endpoint rejects the json-arrow projection (an older
+    // PostgREST, a view, or a `manifest` column that is text rather than jsonb).
+    // Then we stop asking for it rather than degrading every listing.
+    this._noJsonProjection = false;
   }
   get _h() {
     return { apikey: this.key, Authorization: "Bearer " + this.key, "Content-Type": "application/json" };
+  }
+  /** A projected row, in exactly the shape FileWorldStore.summarise produces. */
+  static _cardFromRow(row) {
+    const r = row || {};
+    const meta = r.meta !== undefined ? r.meta : (r.manifest?.meta ?? null);
+    const media = r.media !== undefined ? r.media : (r.manifest?.media ?? null);
+    const card = {};
+    for (const k of CARD_SCALARS) card[k] = r[k] === undefined ? null : r[k];
+    card.manifest = { meta: meta ?? null, media: media ?? null };
+    card._summary = true;
+    return card;
   }
   async put(record) {
     const r = await this.fetch(`${this.url}/rest/v1/${this.table}?on_conflict=world_id`, {
@@ -350,13 +382,38 @@ export class SupabaseWorldStore {
     const rows = await r.json();
     return rows[0] || null;
   }
-  async list({ ownerId = null, state = null, limit = 50 } = {}) {
-    let q = `${this.url}/rest/v1/${this.table}?select=*&limit=${limit}&order=updated_at.desc`;
+  /**
+   * @param summary  ask the DATABASE for a card instead of a whole record.
+   *                 MirroredWorldStore re-summarises whatever it gets, so the
+   *                 manifest body it discarded had already been paid for on the
+   *                 wire; the option has to reach the query or the projection is
+   *                 not a projection, it is a filter applied after the transfer.
+   */
+  async list({ ownerId = null, state = null, limit = 50, summary = false } = {}) {
+    const wantCards = !!summary && !this._noJsonProjection;
+    // `limit` is interpolated into a query string, so it is coerced to a number
+    // here. Every call site passes an integer today; one route that forwards a
+    // query parameter would otherwise append filters of the caller's choosing.
+    const n = Number.isFinite(Number(limit)) ? Math.max(0, Math.trunc(Number(limit))) : 50;
+    let q = `${this.url}/rest/v1/${this.table}?select=${wantCards ? CARD_PROJECTION : "*"}&limit=${n}&order=updated_at.desc`;
     if (ownerId) q += `&owner_id=eq.${encodeURIComponent(ownerId)}`;
     if (state) q += `&state=eq.${encodeURIComponent(state)}`;
     const r = await this.fetch(q, { headers: this._h });
-    if (!r.ok) throw Errors.upstream("supabase", `world list failed (${r.status})`);
-    return await r.json();
+    if (!r.ok) {
+      // A 400 on the projected select is a statement about the SELECT, not about
+      // the data: this endpoint cannot project into the manifest. Fall back to
+      // the whole row once, remember it, and let the caller re-summarise.
+      if (wantCards && r.status === 400) {
+        this._noJsonProjection = true;
+        // The shape the caller asked for is still the shape it gets — the
+        // saving is what is lost, not the contract.
+        const rows = await this.list({ ownerId, state, limit });
+        return rows.map((row) => FileWorldStore.summarise(row));
+      }
+      throw Errors.upstream("supabase", `world list failed (${r.status})`);
+    }
+    const rows = await r.json();
+    return wantCards ? rows.map((row) => SupabaseWorldStore._cardFromRow(row)) : rows;
   }
   async delete(id) {
     const r = await this.fetch(`${this.url}/rest/v1/${this.table}?world_id=eq.${encodeURIComponent(id)}`, { method: "DELETE", headers: this._h });
@@ -364,39 +421,265 @@ export class SupabaseWorldStore {
   }
 }
 
+/** Where the pending-mirror markers live, inside the shadow's own directory. */
+const PENDING_DIR = ".mirror-pending";
+const PENDING_SUFFIX = ".pending";
+
 /**
  * Mirrors writes to a primary and a durable local shadow.
- * If the primary is down the world is still recoverable, and the caller is TOLD
- * the write was degraded rather than being handed a false ok:true.
+ *
+ * WHICH BACKING IS THE TRUTH. The two can disagree, and until now they were
+ * asked different questions by different methods: get() read the shadow, list()
+ * read the primary, and one repository answered the same question two ways —
+ * different title, different manifest_hash, for the same world.
+ *
+ * The rule, applied identically by get(), list() and delete():
+ *
+ *   1. THE PRIMARY IS THE TRUTH whenever it answers. It is the only backing the
+ *      whole fleet shares; it holds rows this node has never seen (another
+ *      instance, a dashboard, a seed, a migration), and an empty answer from it
+ *      is an ANSWER — this used to be read as a failure, so a world genuinely
+ *      removed from the primary reappeared from the shadow forever.
+ *   2. The shadow is authoritative for exactly one set of worlds: those with a
+ *      PENDING marker, meaning this node accepted a write or a delete that the
+ *      primary has not confirmed. The shadow is written first and
+ *      unconditionally, so for those worlds it is strictly ahead.
+ *   3. The shadow is also the degraded fallback: when the primary does not
+ *      answer at all, the last thing we know beats nothing at all.
+ *
+ * That is the whole rule, and get(), list() and delete() apply it identically —
+ * which is what stops one repository answering the same question two ways.
+ *
+ * WHAT THIS COSTS. A shadow row with NO marker means the primary confirmed that
+ * row at some point, so the primary no longer having it means it was deleted
+ * there. That inference is sound for every row this class has written, and it
+ * is wrong in exactly two places: a marker file whose write failed (the marker
+ * still exists in memory, so only a restart loses it), and a row written by a
+ * build older than these markers whose mirror had failed. In both cases the row
+ * is not served and not destroyed — the shadow file is untouched and re-saving
+ * the world restores it. The alternative, serving any shadow row the primary
+ * lacks, cannot ever converge: it re-creates deleted worlds indefinitely and
+ * pushes them back to the primary. Losing sight of a row that is still on disk
+ * is recoverable; resurrecting deleted content is not. The divergence is logged
+ * rather than passed over in silence.
+ *
+ * The markers are files, not a process-local flag: a restart between the failed
+ * write and the recovery used to destroy the only record that a row still had
+ * to be pushed. They live in <shadow.dir>/.mirror-pending, which FileWorldStore
+ * .list skips (it is not a `.json` name), so the two namespaces do not overlap.
  */
 export class MirroredWorldStore {
-  constructor(primary, shadow) { this.primary = primary; this.shadow = shadow; this.kind = `${primary.kind}+${shadow.kind}`; }
+  /**
+   * @param resyncBackoffMs  minimum gap between two failed resync sweeps. 0 (the
+   *   default) retries on every operation, which converges as fast as possible
+   *   at the cost of one extra failing call per pending world while the primary
+   *   is down. Raise it if a long outage with many pending worlds is a concern.
+   */
+  constructor(primary, shadow, { resyncBackoffMs = 0 } = {}) {
+    this.primary = primary;
+    this.shadow = shadow;
+    this.kind = `${primary.kind}+${shadow.kind}`;
+    this._dir = typeof shadow?.dir === "string" ? path.join(shadow.dir, PENDING_DIR) : null;
+    this._pending = null;            // Map<world_id, "put"|"delete">, loaded from disk once
+    this._draining = false;
+    this._lastFailedSweep = 0;
+    this._backoff = Number(resyncBackoffMs) || 0;
+  }
+
+  // -- the pending set -------------------------------------------------------
+
+  _markerPath(id) { return path.join(this._dir, encodeURIComponent(String(id)) + PENDING_SUFFIX); }
+
+  /**
+   * The divergences this node knows about, recovered from disk on first use so
+   * a restart does not forget them. Loaded once: a marker written by ANOTHER
+   * process is not seen here, and does not need to be — that process drains its
+   * own, and get() reports any divergence it meets (see _reportDivergence).
+   */
+  async _pendingSet() {
+    if (this._pending) return this._pending;
+    const map = new Map();
+    if (this._dir) {
+      for (const n of await fsp.readdir(this._dir).catch(() => [])) {
+        if (!n.endsWith(PENDING_SUFFIX)) continue;
+        try {
+          const j = JSON.parse(await fsp.readFile(path.join(this._dir, n), "utf8"));
+          if (j && j.world_id) map.set(String(j.world_id), j.op === "delete" ? "delete" : "put");
+        } catch { /* an unreadable marker is not a claim about anything */ }
+      }
+    }
+    this._pending = map;
+    return map;
+  }
+  async _mark(id, op) {
+    (await this._pendingSet()).set(String(id), op);
+    if (!this._dir) return;                       // no shadow directory: in-process only
+    try {
+      await fsp.mkdir(this._dir, { recursive: true });
+      const p = this._markerPath(id);
+      const tmp = p + ".tmp-" + crypto.randomBytes(4).toString("hex");
+      await fsp.writeFile(tmp, JSON.stringify({ world_id: String(id), op, at: new Date().toISOString() }));
+      await fsp.rename(tmp, p);
+    } catch { /* best effort: losing the marker costs convergence speed, not data */ }
+  }
+  async _clear(id) {
+    (await this._pendingSet()).delete(String(id));
+    if (this._dir) await fsp.rm(this._markerPath(id), { force: true }).catch(() => {});
+  }
+  /** What this store still owes the primary for one world: null | "put" | "delete". */
+  async mirrorState(id) { return (await this._pendingSet()).get(String(id)) || null; }
+
+  /**
+   * Push everything the primary has not been told about.
+   *
+   * This is the piece that did not exist. A write the primary refused left the
+   * row in the shadow only, and nothing — not a read, not a listing, not even
+   * re-issuing the identical save — ever pushed it back, because the
+   * idempotency check was made against the shadow and answered `idempotent`
+   * without touching the primary. So a healthy database was permanently missing
+   * a world its owner had been told was saved.
+   */
+  async _drain() {
+    const pend = await this._pendingSet();
+    if (!pend.size || this._draining) return;
+    if (this._backoff && Date.now() - this._lastFailedSweep < this._backoff) return;
+    this._draining = true;
+    let failed = false;
+    try {
+      for (const [id, op] of [...pend]) {
+        if (op === "delete") {
+          const r = await optional("supabase-world-delete-resync", () => this.primary.delete(id));
+          if (r.ok) await this._clear(id); else failed = true;
+          continue;
+        }
+        const rec = await this.shadow.get(id).catch(() => null);
+        if (!rec) { await this._clear(id); continue; }   // nothing left to push
+        const r = await optional("supabase-world-mirror-resync", () => this.primary.put(rec));
+        if (r.ok) await this._clear(id); else failed = true;
+      }
+    } finally {
+      this._draining = false;
+      if (failed) this._lastFailedSweep = Date.now();
+    }
+  }
+
+  // -- the store interface ---------------------------------------------------
+
   async put(record) {
     await this.shadow.put(record);                     // local durability first: cannot be lost
     const mirrored = await optional("supabase-world-mirror", () => this.primary.put(record));
+    // A successful write supersedes any tombstone for the same id: the world is
+    // back, and the delete it never applied is moot.
+    if (mirrored.ok) { await this._clear(record.world_id); await this._drain(); }
+    else await this._mark(record.world_id, "put");
     return { ...record, _mirrored: mirrored.ok, ...(mirrored.ok ? {} : { _mirror_error: mirrored.error }) };
   }
+
+  /**
+   * A shadow row the primary does not have and no marker explains. Under the
+   * rule above it is not served — but it is never passed over in silence, so an
+   * operator can see that a row is on this disk and nowhere else. Logged once
+   * per world per process; the id is already in this node's own logs.
+   */
+  async _reportDivergence(id) {
+    this._reported = this._reported || new Set();
+    if (this._reported.has(String(id))) return;
+    const local = await this.shadow.get(id).catch(() => null);
+    if (!local) return;                                        // simply not a world: nothing to report
+    this._reported.add(String(id));
+    console.warn(JSON.stringify({
+      level: "warn", degraded: "supabase-world-divergence", world_id: String(id),
+      detail: "the shadow holds a world the primary does not, and no pending marker explains it; it is not being served",
+      ts: new Date().toISOString(),
+    }));
+  }
+
   async get(id) {
-    const local = await this.shadow.get(id);
-    if (local) return local;
+    await this._drain();
+    const state = (await this._pendingSet()).get(String(id));
+    if (state === "delete") return null;                       // tombstoned here; the primary is behind
+    if (state === "put") return await this.shadow.get(id);     // the shadow is AHEAD of the primary
     const remote = await optional("supabase-world-read", () => this.primary.get(id));
-    return remote.ok ? remote.value : null;
+    if (!remote.ok) return await this.shadow.get(id);          // degraded: the last thing we know
+    if (remote.value) return remote.value;
+    await this._reportDivergence(id);
+    return null;                                               // the primary answered, and it said no
   }
-  async list(opts) {
+
+  /**
+   * The same truth rule as get(), so the two cannot disagree.
+   *
+   * Three things changed here. An EMPTY answer from the primary used to be
+   * treated as a FAILED answer (`remote.ok && remote.value.length`), so a world
+   * genuinely removed from the primary reappeared from the shadow forever — and
+   * a listing fell back to the WHOLE shadow catalogue on an answer that was
+   * simply "nothing matches that filter". The primary's rows were passed
+   * straight through without re-applying `ownerId` or `state`, so this file's
+   * own listing gate — the thing that keeps drafts out of the public catalogue
+   * — was simply absent on the deployed path. And the pending overlay did not
+   * exist, so the listing served the stale primary row for a world get()
+   * answered from the shadow.
+   */
+  async list(opts = {}) {
+    await this._drain();
+    const { ownerId = null, state = null, limit = 50, summary = false } = opts || {};
     const remote = await optional("supabase-world-list", () => this.primary.list(opts));
-    if (remote.ok && remote.value.length) {
-      // listPublished's contract is "discovery cards only — the manifest is NOT
-      // included in full", and it asks for that with summary:true. The primary
-      // has no such option, so with SUPABASE_URL set — the deployed
-      // configuration — every card carried its whole manifest again and the
-      // measured cliff the sidecar exists to remove was untouched in the only
-      // deployment that matters. A store that cannot honour an option that
-      // changes the SHAPE of its answer must not silently drop it.
-      return opts?.summary ? remote.value.map((r) => (r && r._summary ? r : FileWorldStore.summarise(r))) : remote.value;
+    if (!remote.ok) return await this.shadow.list(opts);        // outage degrades, never empties
+    const pend = await this._pendingSet();
+    const rows = [];
+    const seen = new Set();
+    // Local rows the primary has not accepted are ahead of it, so they come first.
+    for (const [id, op] of pend) {
+      if (op !== "put") continue;
+      const rec = await this.shadow.get(id).catch(() => null);
+      if (!rec) continue;
+      seen.add(rec.world_id);
+      rows.push(rec);
     }
-    return await this.shadow.list(opts);
+    for (const r of Array.isArray(remote.value) ? remote.value : []) {
+      if (!r || seen.has(r.world_id)) continue;
+      if (pend.get(String(r.world_id)) === "delete") continue;  // tombstoned here
+      seen.add(r.world_id);
+      rows.push(r);
+    }
+    // Re-applied on THIS side as well as on the wire. The wire filter is the
+    // fast path, not the gate: a dropped `&state=eq.`, a mis-set RLS policy, a
+    // view with a different definition or a future `or=` refactor all look like
+    // a primary that answered with rows it should not have, and nothing between
+    // the wire and the caller used to notice.
+    const filtered = rows.filter((r) => (!ownerId || r.owner_id === ownerId) && (!state || r.state === state));
+    filtered.sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
+    const page = filtered.slice(0, Number.isFinite(Number(limit)) ? Number(limit) : 50);
+    // listPublished's contract is "discovery cards only — the manifest is NOT
+    // included in full". A store that cannot honour an option that changes the
+    // SHAPE of its answer must not silently drop it.
+    return summary ? page.map((r) => (r && r._summary ? r : FileWorldStore.summarise(r))) : page;
   }
-  async delete(id) { await this.shadow.delete(id); await optional("supabase-world-delete", () => this.primary.delete(id)); }
+
+  /**
+   * Delete, honestly.
+   *
+   * This used to remove the shadow, wrap the primary in optional() and return
+   * undefined. With the primary DELETE failing the row survived remotely, the
+   * shadow miss fell through to the primary, and the "deleted" world was served
+   * again — manifest, owner and all — and stayed in the public catalogue, with
+   * no channel to tell the caller anything had gone wrong.
+   *
+   * Now the tombstone is written BEFORE either copy is touched, so a crash
+   * anywhere in here cannot resurrect the world; get() and list() honour it; the
+   * resync sweep retries the primary until it converges; and the caller is told
+   * whether the primary took it.
+   */
+  async delete(id) {
+    await this._mark(id, "delete");
+    await this.shadow.delete(id);
+    const mirrored = await optional("supabase-world-delete", () => this.primary.delete(id));
+    if (mirrored.ok) await this._clear(id);
+    return {
+      world_id: String(id), deleted: true, _mirrored: mirrored.ok,
+      ...(mirrored.ok ? {} : { _mirror_error: mirrored.error }),
+    };
+  }
 }
 
 /**
@@ -412,6 +695,7 @@ export class VersionHistoryStore {
   constructor(dir) {
     this.dir = dir || path.join(process.cwd(), ".dcs-data", "world-versions");
     fs.mkdirSync(this.dir, { recursive: true });
+    this.kind = "file";
   }
   _p(worldId, version) {
     if (!/^[A-Za-z0-9._:-]{1,200}$/.test(String(worldId))) throw Errors.validation(`unsafe world id: ${worldId}`);
@@ -452,6 +736,143 @@ export class VersionHistoryStore {
     }
     out.sort((a, b) => a.version - b.version);
     return out;
+  }
+}
+
+/**
+ * dcsgames_world_versions, over PostgREST.
+ *
+ * THE COLUMNS THIS TABLE HAS. Migration 0003 declares exactly
+ *   (world_id, version, manifest, manifest_hash, label, created_by, created_at)
+ * with `primary key (world_id, version)`. It has no `state` column, and this
+ * store must not invent one: PostgREST answers PGRST204 for a key the schema
+ * cache does not know, so a payload carrying `state` would fail EVERY write and
+ * the history would go on reaching nothing but the disk.
+ *
+ * The consequence is stated rather than hidden. `state` is the field
+ * WorldRepository._versionVisible uses to decide whether a stranger may see a
+ * retained version, and a version recovered from the DATABASE alone therefore
+ * has no provable state — which the repository already treats as private. So
+ * after a disk loss the owner still has every rollback target, and a stranger
+ * sees none of them. That is the fail-closed direction: the alternative is
+ * deciding visibility from the world's CURRENT state, which retroactively
+ * publishes every draft the world passed through. Carrying it properly needs
+ * `alter table ... add column state text` in a later migration.
+ */
+export class SupabaseVersionHistoryStore {
+  constructor({ url, serviceRoleKey, table = "dcsgames_world_versions", fetchImpl } = {}) {
+    this.url = String(url || "").replace(/\/$/, "");
+    this.key = serviceRoleKey;
+    this.table = table;
+    this.fetch = fetchImpl || globalThis.fetch;
+    this.kind = "supabase";
+  }
+  get _h() { return { apikey: this.key, Authorization: "Bearer " + this.key, "Content-Type": "application/json" }; }
+
+  /** Only the columns migration 0003 declares. Anything else is a PGRST204. */
+  static _wire(worldId, version, record) {
+    return {
+      world_id: String(worldId),
+      version: Number(version),
+      manifest: record?.manifest ?? null,
+      manifest_hash: record?.manifest_hash ?? null,
+      label: record?.label ?? null,
+      created_by: record?.created_by ?? null,
+      created_at: record?.created_at ?? new Date().toISOString(),
+    };
+  }
+  /**
+   * Append one version. History is append-only, so this is an INSERT and a
+   * duplicate key is a SUCCESS, not a failure — 23505 means the row this write
+   * wanted is already there, byte for byte or not, and rewriting it is the one
+   * thing rollback must never see.
+   */
+  async put(worldId, version, record) {
+    const r = await this.fetch(`${this.url}/rest/v1/${this.table}`, {
+      method: "POST",
+      headers: { ...this._h, Prefer: "return=minimal" },
+      body: JSON.stringify(SupabaseVersionHistoryStore._wire(worldId, version, record)),
+    });
+    if (r.status === 409) { await r.text().catch(() => ""); return { ...record, already_recorded: true }; }
+    if (!r.ok) throw Errors.upstream("supabase", `world version write failed (${r.status}): ${await r.text().catch(() => "")}`);
+    return record;
+  }
+  async get(worldId, version) {
+    const q = `${this.url}/rest/v1/${this.table}?world_id=eq.${encodeURIComponent(String(worldId))}&version=eq.${Number(version)}&select=*&limit=1`;
+    const r = await this.fetch(q, { headers: this._h });
+    if (!r.ok) throw Errors.upstream("supabase", `world version read failed (${r.status})`);
+    const rows = await r.json();
+    return rows[0] || null;
+  }
+  /** The listing projection — never the manifest, which is the whole payload. */
+  async list(worldId) {
+    const q = `${this.url}/rest/v1/${this.table}?world_id=eq.${encodeURIComponent(String(worldId))}&select=version,manifest_hash,label,created_by,created_at&order=version.asc`;
+    const r = await this.fetch(q, { headers: this._h });
+    if (!r.ok) throw Errors.upstream("supabase", `world version list failed (${r.status})`);
+    const rows = await r.json();
+    return rows.map((v) => ({
+      version: Number(v.version),
+      state: null,                 // the table has no such column; see the class comment
+      manifest_hash: v.manifest_hash ?? null,
+      label: v.label ?? null,
+      created_by: v.created_by ?? null,
+      created_at: v.created_at ?? null,
+    })).sort((a, b) => a.version - b.version);
+  }
+}
+
+/**
+ * Retained history in both places, built exactly like the world store above.
+ *
+ * The world store needs the pending-marker machinery because a world CHANGES: a
+ * shadow copy can be ahead of the primary, so the two can disagree about
+ * content. A retained version cannot. It is immutable and append-only, so the
+ * two copies can only ever disagree about PRESENCE, and the union of them is
+ * always the correct answer. That is why the truth rule here is simply "either
+ * backing counts", with the local row preferred where both have it — the local
+ * row carries `state`, which the declared table cannot.
+ */
+export class MirroredVersionHistoryStore {
+  constructor(primary, shadow) {
+    this.primary = primary;
+    this.shadow = shadow;
+    this.kind = `${primary.kind}+${shadow.kind}`;
+  }
+  get dir() { return this.shadow.dir; }
+
+  async put(worldId, version, record) {
+    const local = await this.shadow.put(worldId, version, record);   // durable first
+    // Already on disk means it was already offered to the primary. Re-sending
+    // it every time an idempotent save runs would be pure write amplification,
+    // and the resync in list() covers the case where that offer was refused.
+    if (local && local.already_recorded) return local;
+    const m = await optional("supabase-world-version-mirror", () => this.primary.put(worldId, version, record));
+    return { ...local, _mirrored: m.ok, ...(m.ok ? {} : { _mirror_error: m.error }) };
+  }
+  async get(worldId, version) {
+    const local = await this.shadow.get(worldId, version);
+    if (local) return local;
+    const r = await optional("supabase-world-version-read", () => this.primary.get(worldId, version));
+    return r.ok ? (r.value || null) : null;
+  }
+  async list(worldId) {
+    const local = await this.shadow.list(worldId);
+    const r = await optional("supabase-world-version-list", () => this.primary.list(worldId));
+    if (!r.ok) return local;                                  // outage degrades to the disk
+    const byVersion = new Map();
+    for (const v of Array.isArray(r.value) ? r.value : []) byVersion.set(Number(v.version), v);
+    for (const v of local) byVersion.set(Number(v.version), v);   // local wins: it has `state`
+    // Opportunistic resync, bounded by the difference and only attempted when
+    // the primary ANSWERED — so a missing table costs one failed list, not one
+    // failed write per retained version per request.
+    const remoteHas = new Set((Array.isArray(r.value) ? r.value : []).map((v) => Number(v.version)));
+    for (const v of local) {
+      if (remoteHas.has(Number(v.version))) continue;
+      const full = await this.shadow.get(worldId, Number(v.version)).catch(() => null);
+      if (!full) continue;
+      await optional("supabase-world-version-resync", () => this.primary.put(worldId, Number(v.version), full));
+    }
+    return [...byVersion.values()].sort((a, b) => a.version - b.version);
   }
 }
 
@@ -500,7 +921,13 @@ export class WorldRepository {
     // own — so renaming a world was acknowledged and never stored, and the
     // discovery card kept showing the old name.
     if (existing && existing.manifest_hash === hash && existing.state === state && (existing.title ?? null) === nextTitle) {
-      return { ...existing, idempotent: true };   // identical write -> no version churn
+      // The store's own get() has already drained anything the primary was owed
+      // for this world, so an identical re-save is now a genuine remedy for a
+      // degraded write rather than a short-circuit that guaranteed it could
+      // never be repaired. If the primary is STILL behind, say so — a caller
+      // told `idempotent:true` and nothing else would believe it was mirrored.
+      const pending = this.store.mirrorState ? await this.store.mirrorState(worldId) : null;
+      return { ...existing, idempotent: true, ...(pending === "put" ? { _mirrored: false } : {}) };
     }
     const now = new Date().toISOString();
     const record = {
@@ -575,7 +1002,9 @@ export class WorldRepository {
    * the drafts it passed through — that content was private when it was written
    * and there is no way to withdraw it, because history is deliberately
    * append-only. A version recorded before this field existed has no provable
-   * state, so it is treated as private.
+   * state, so it is treated as private. A version recovered from
+   * dcsgames_world_versions alone is in exactly that position, because the
+   * declared table has no `state` column — see SupabaseVersionHistoryStore.
    */
   _versionVisible(v, world, requesterId) {
     if (requesterId != null && world.owner_id != null && world.owner_id === requesterId) return true;
@@ -618,6 +1047,16 @@ export function createWorldRepository(env = process.env) {
   const base = env.DCS_DATA_DIR || path.join(process.cwd(), ".dcs-data");
   const file = new FileWorldStore(path.join(base, "worlds"));
   const versions = new VersionHistoryStore(path.join(base, "world-versions"));
-  if (url && key) return new WorldRepository(new MirroredWorldStore(new SupabaseWorldStore({ url, serviceRoleKey: key }), file), versions);
+  if (url && key) {
+    // Both stores get the same treatment. Retained history used to be built
+    // FILE-ONLY whatever the environment said, so migration 0003's
+    // dcsgames_world_versions never received a byte and B6 rollback rested
+    // entirely on a container disk that a redeploy throws away: the world
+    // survived and every rollback target did not.
+    return new WorldRepository(
+      new MirroredWorldStore(new SupabaseWorldStore({ url, serviceRoleKey: key }), file),
+      new MirroredVersionHistoryStore(new SupabaseVersionHistoryStore({ url, serviceRoleKey: key }), versions),
+    );
+  }
   return new WorldRepository(file, versions);
 }

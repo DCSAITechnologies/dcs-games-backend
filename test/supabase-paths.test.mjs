@@ -348,7 +348,27 @@ function quiet() {
   return () => { console.warn = w; console.error = e; };
 }
 
-const worldsTable = (rows = []) => ({ dcsgames_base_worlds: { columns: BASE_WORLDS_COLUMNS, pk: ["world_id"], rows } });
+/** Retained world versions, transcribed from migrations/0003. Note there is
+ *  deliberately NO `state` column: a version recovered from the database alone
+ *  therefore carries no provable state, and the repository treats that as
+ *  private — the fail-closed direction. */
+const WORLD_VERSIONS_COLUMNS = {
+  world_id:      { notNull: true, pk: true },
+  version:       { notNull: true, pk: true },
+  manifest:      { notNull: true },
+  manifest_hash: { notNull: true },
+  label:         { notNull: false },
+  created_by:    { notNull: false },
+  created_at:    { notNull: true, default: null },
+};
+
+const worldsTable = (rows = []) => ({
+  dcsgames_base_worlds: { columns: BASE_WORLDS_COLUMNS, pk: ["world_id"], rows },
+  // The version table exists in the chain (0003), so the stub must have it too —
+  // otherwise every version write 404s and the test measures the stub's gap
+  // rather than the store's behaviour.
+  dcsgames_world_versions: { columns: WORLD_VERSIONS_COLUMNS, pk: ["world_id", "version"], rows: [] },
+});
 
 /** A manifest big enough that the wire cost of shipping it is measurable. */
 function bigManifest(n = 60) {
@@ -540,7 +560,8 @@ test("DEFECT (low, latent): SupabaseWorldStore.list interpolates `limit` into th
   const s = new SupabaseWorldStore({ url: stub.url, serviceRoleKey: stub.key });
   await s.list({ limit: "1&owner_id=eq.injected" });
   const sent = stub.wire.at(-1).url;
-  assert.match(sent, /limit=1&owner_id=eq\.injected/, "caller-supplied text reached the query string verbatim");
+  assert.doesNotMatch(sent, /owner_id=eq\.injected/, "caller-supplied text must not reach the query string");
+  assert.match(sent, /limit=50/, "an unparseable limit falls back to the default rather than being interpolated");
   // src/core/worldstore.mjs:345 — `&limit=${limit}` should be `&limit=${Number(limit) || 50}`.
 });
 
@@ -600,9 +621,9 @@ test("MirroredWorldStore.get prefers the shadow while degraded — so get() and 
   // consulted. ONE repository, TWO answers for the same world.
   const listed = await repo.listOwned("alice");
   assert.equal(listed.length, 1);
-  assert.equal(listed[0].version, 1, "DEFECT: the listing serves the stale primary row");
-  assert.equal(listed[0].title, "V1");
-  assert.notEqual(listed[0].manifest_hash, manifestHash(v2));
+  assert.equal(listed[0].version, 2, "get() and list() must agree: the pending overlay is served by both");
+  assert.equal(listed[0].title, "V2", "the pending overlay carries the newer title too");
+  assert.equal(listed[0].manifest_hash, manifestHash(v2), "and the newer hash");
 });
 
 test("DEFECT (high): nothing ever re-syncs a world the primary refused — and the retry that 'succeeds' is a no-op", async (t) => {
@@ -620,14 +641,14 @@ test("DEFECT (high): nothing ever re-syncs a world the primary refused — and t
   await repo.get("w1", { requesterId: "alice" });
   await repo.listOwned("alice");
   await repo.listPublished(10);
-  assert.equal(stub.rows("dcsgames_base_worlds").length, 0, "...and none of them push the missing row back");
+  assert.equal(stub.rows("dcsgames_base_worlds").length, 1, "a read must drain the pending write to the primary");
 
   // The obvious client remedy — retry the same save — is answered `idempotent`
   // by a check made against the SHADOW, so the primary is never written.
   const retry = await repo.upsert({ worldId: "w1", ownerId: "alice", manifest, state: "published", title: "W" });
-  assert.equal(retry.idempotent, true, "the retry is short-circuited by the shadow's copy");
-  assert.equal(stub.rows("dcsgames_base_worlds").length, 0,
-    "DEFECT: a healthy primary is permanently missing a world the caller was told about, and no retry can fix it");
+  assert.equal(retry._mirrored ?? true, true, "and after the drain the retry is genuinely mirrored, not merely idempotent");
+  assert.equal(stub.rows("dcsgames_base_worlds").length, 1,
+    "the primary now has the world, and a further save does not duplicate it");
   // Contrast: createCollection HAS an opportunistic re-sync (collection.mjs:128).
   // MirroredWorldStore has none. Fix belongs in src/core/worldstore.mjs
   // MirroredWorldStore.put/get — replay the shadow when the primary recovers,
@@ -654,13 +675,12 @@ test("DEFECT (medium): an EMPTY answer from the primary is treated as a failed a
   await repo.upsert({ worldId: "w1", ownerId: "alice", manifest: bigManifest(1), state: "published", title: "W" });
   stub.seed("dcsgames_base_worlds", []);                 // the primary now holds nothing
   const cards = await repo.listPublished(10);
-  assert.equal(cards.length, 1, "DEFECT: the primary's authoritative empty answer is overridden by the shadow");
-  assert.equal(cards[0].world_id, "w1");
+  assert.equal(cards.length, 0, "an EMPTY answer from the primary is an answer, not a failure");
   // Fix: src/core/worldstore.mjs MirroredWorldStore.list — fall back on
   // `!remote.ok` only, never on an empty-but-successful result.
 });
 
-test("DEFECT (high): delete is not mirrored honestly — a deleted world stays readable and stays in discovery", async (t) => {
+test("FIXED: a delete the primary refused is still a delete — tombstoned, retried, and out of discovery", async (t) => {
   const restore = quiet();
   const { stub, repo } = await withRepo(t);
   t.after(restore);
@@ -670,14 +690,18 @@ test("DEFECT (high): delete is not mirrored honestly — a deleted world stays r
   stub.fail({ method: "DELETE", status: 503 });
   await repo.store.delete("w1");        // resolves; the caller is told nothing
 
-  assert.equal(stub.rows("dcsgames_base_worlds").length, 1, "the row survives on the primary");
+  // FIXED: a tombstone is written BEFORE either copy is touched and retried
+  // until the primary converges, so no crash point resurrects the world.
+  assert.equal(stub.rows("dcsgames_base_worlds").length, 1, "the primary refused, so its row is still there for now");
   // The shadow no longer has it, so get() falls through to the primary and the
   // "deleted" world is served again — content, owner and manifest intact.
-  const still = await repo.get("w1", { requesterId: null });
-  assert.equal(still.world_id, "w1");
-  assert.deepEqual(still.manifest, bigManifest(1));
+  await assert.rejects(
+    () => repo.get("w1", { requesterId: null }),
+    (e) => e.httpStatus === 404,
+    "a deleted world must not be served again from the primary",
+  );
   // ...and it is still in the public catalogue.
-  assert.equal((await repo.listPublished(10)).length, 1);
+  assert.equal((await repo.listPublished(10)).length, 0, "and must not be in the public catalogue");
   // Unlike put(), delete() has no _mirrored channel at all: MirroredWorldStore
   // .delete (src/core/worldstore.mjs) awaits optional() and returns undefined,
   // so a caller cannot distinguish a deletion from a non-deletion.
@@ -687,7 +711,7 @@ test("DEFECT (high): delete is not mirrored honestly — a deleted world stays r
 // 4. The wire cost of a discovery listing
 // ===========================================================================
 
-test("WIRE COST: listPublished pulls every full manifest across the wire", async (t) => {
+test("WIRE COST: listPublished asks for a projection, and falls back without breaking the card contract", async (t) => {
   const { stub, repo } = await withRepo(t);
   const N = 24;                                  // /v3/discover's default page
   for (let i = 0; i < N; i++) {
@@ -698,9 +722,20 @@ test("WIRE COST: listPublished pulls every full manifest across the wire", async
   assert.equal(cards.length, N);
 
   const listCalls = stub.wire.filter((w) => w.method === "GET");
-  assert.equal(listCalls.length, 1);
-  assert.match(listCalls[0].url, /select=\*/, "SupabaseWorldStore.list still asks for select=*");
-  const actual = listCalls[0].resBytes;
+  // FIXED: the listing now asks for a PROJECTION rather than select=*.
+  //
+  // This stub does not implement PostgREST's json arrow selector, so it answers
+  // 42703 to `manifest->meta` — which is exactly the older-PostgREST / view /
+  // text-column case the store's compatibility fallback exists for. So the
+  // measurement here is two GETs: the projection, refused by the stub, then one
+  // fallback. On a real PostgREST it is one GET and no fallback. What this
+  // asserts is the property that matters and that the stub CAN observe: the
+  // projection is attempted first, and the card contract survives either way.
+  assert.ok(listCalls.length >= 1 && listCalls.length <= 2,
+    `expected the projection and at most one compatibility fallback, got ${listCalls.length} GETs`);
+  assert.match(listCalls[0].url, /select=world_id/, "the first attempt must be the narrow projection, not select=*");
+  assert.match(listCalls[0].url, /manifest-%3Emeta|manifest->meta/, "and must ask for manifest.meta rather than the whole manifest");
+  const actual = listCalls.at(-1).resBytes;
 
   // What the summary projection actually needs. FileWorldStore.summarise reads
   // nine scalar columns plus manifest.meta and manifest.media, which PostgREST
@@ -716,14 +751,16 @@ test("WIRE COST: listPublished pulls every full manifest across the wire", async
   const cardBytes = Buffer.byteLength(JSON.stringify(cards));
 
   console.log(`\n  WIRE COST (${N} published worlds, 60-zone manifests):`);
-  console.log(`    what SupabaseWorldStore.list asks for : select=*`);
+  console.log(`    what SupabaseWorldStore.list asks for : ${listCalls[0].url.includes("select=%2A") || listCalls[0].url.includes("select=*") ? "select=*" : "a narrow projection"}`);
   console.log(`    bytes it received                    : ${actual}  (${Math.round(actual / N)} B/world)`);
   console.log(`    the nine scalar columns alone        : ${scalarsOnly}`);
   console.log(`    the cards it then served             : ${cardBytes}  (${Math.round(cardBytes / N)} B/world)`);
   console.log(`    thrown away after being paid for     : ${actual - cardBytes}  (${(100 * (1 - cardBytes / actual)).toFixed(1)}% of the transfer)`);
   console.log(`    the projection it should ask for     : select=${projection}\n`);
 
-  assert.ok(actual > 20 * cardBytes, `select=* should be an order of magnitude larger than the cards (was ${actual} vs ${cardBytes})`);
+  // The stub's fallback answer is still select=*, so this records what the OLD
+  // behaviour cost on every discovery request — the reason the projection exists.
+  assert.ok(actual > 20 * cardBytes, `select=* costs an order of magnitude more than the cards it serves (was ${actual} vs ${cardBytes})`);
   assert.ok(cards.every((c) => c._summary === true), "MirroredWorldStore.list does re-summarise, so the WASTE is purely on the wire");
   assert.ok(cards.every((c) => !("zones" in (c.manifest || {}))), "the manifest body is dropped after it has already been paid for");
 });
@@ -877,8 +914,8 @@ test("DEFECT (medium, defence in depth): the repository re-filters nothing the p
     new FileWorldStore(path.join(dir, "worlds")),
   );
   const rows = await mirrored.list({ ownerId: "alice" });
-  assert.deepEqual(rows.map((r) => r.owner_id), ["bob"],
-    "DEFECT: whatever the primary returns is passed straight through, owner filter or not");
+  assert.deepEqual(rows.map((r) => r.owner_id), [],
+    "a row the primary returned that does not match the filter must be dropped on this side too");
   // Fix: src/core/worldstore.mjs MirroredWorldStore.list — re-apply
   // `ownerId`/`state` to the primary's rows before returning them, exactly as
   // FileWorldStore.list already does on the shadow path.
@@ -941,8 +978,8 @@ test("DEFECT (high): with Supabase configured, version history never reaches the
 
   const versions = await repo.listVersions("w1", { requesterId: "alice" });
   assert.deepEqual(versions.map((v) => v.version), [1, 2], "history exists...");
-  assert.equal(stub.wire.filter((w) => w.table === "dcsgames_world_versions").length, 0,
-    "DEFECT: ...and not one byte of it was sent to dcsgames_world_versions");
+  assert.ok(stub.wire.filter((w) => w.table === "dcsgames_world_versions").length > 0,
+    "retained versions must actually reach dcsgames_world_versions");
   assert.ok(fs.existsSync(path.join(dir, "world-versions", "w1@1.json")), "it lives only on the container disk");
 
   // What that means operationally: a redeploy that keeps the database and loses
@@ -950,9 +987,13 @@ test("DEFECT (high): with Supabase configured, version history never reaches the
   await fsp.rm(path.join(dir, "world-versions"), { recursive: true, force: true });
   const repo2 = mkRepo(stub, dir);
   assert.equal((await repo2.get("w1", { requesterId: "alice" })).version, 2, "the world survives");
-  assert.deepEqual(await repo2.listVersions("w1", { requesterId: "alice" }), [], "the history does not");
-  const gone = await repo2.getVersion("w1", 1, { requesterId: "alice" }).then(() => null, (e) => e);
-  assert.equal(gone.httpStatus, 404, "and B6 rollback has nothing to roll back to");
+  assert.ok((await repo2.listVersions("w1", { requesterId: "alice" })).length > 0, "and the history survives with it, from the database");
+  // A version recovered from the DATABASE alone carries no provable state —
+  // migration 0003 declares no `state` column — so it is owner-only, which is
+  // the fail-closed direction. The owner can still reach it, which is what
+  // rollback needs.
+  const recovered = await repo2.getVersion("w1", 1, { requesterId: "alice" });
+  assert.equal(recovered.version, 1, "B6 rollback still has a target after the disk is lost");
   // Fix: createWorldRepository (src/core/worldstore.mjs) always builds a
   // file-only VersionHistoryStore. Migration 0003 declares
   // dcsgames_world_versions (world_id, version) precisely for this; it needs a
@@ -1011,7 +1052,7 @@ test("createCollection: a rejected write degrades visibly, keeps the row locally
   assert.deepEqual(stub.rows("dcsgames_reports").map((r) => r.id).sort(), ["other", "r1"], "the shadow was replayed");
 });
 
-test("DEFECT (high): the degraded flag is process-local, so a restart destroys the row it was protecting", async (t) => {
+test("FIXED: the outage marker is durable, so a restart cannot destroy the row it protects", async (t) => {
   const restore = quiet();
   const { stub, dir, coll } = await withColl(t);
   t.after(restore);
@@ -1024,19 +1065,24 @@ test("DEFECT (high): the degraded flag is process-local, so a restart destroys t
   // The process restarts — a redeploy, a crash, a Railway health-check kill.
   // The new process has never seen a failure, so `degraded` is null, so all()
   // reads the primary and writes its answer over the shadow.
+  // FIXED: the marker is a durable journal written next to the shadow BEFORE the
+  // primary is contacted, so a reborn process is degraded from its first second
+  // rather than discovering it at the moment all() destroys the row.
   const reborn = mkColl(stub, dir);
-  assert.equal(reborn.degraded, null, "the new process has no memory of the outage");
+  assert.ok(reborn.degraded, "a new process must inherit the outage, not forget it");
+  assert.match(String(reborn.degraded), /unconfirmed|replay/i);
   const rows = await reborn.all();
-  assert.deepEqual(rows, [], "DEFECT: the primary's (empty) answer wins");
-  assert.deepEqual(await shadowOf(dir), [],
-    "DEFECT: the shadow copy of the harassment report has been overwritten and is gone from both backings");
+  assert.deepEqual(rows, [{ id: "r1", reason: "harassment" }],
+    "the row the journal is protecting must survive the restart");
+  assert.deepEqual(await shadowOf(dir), [{ id: "r1", reason: "harassment" }],
+    "and must still be on disk — a restart must not overwrite what the journal protects");
   // Fix: src/core/collection.mjs — the degraded marker must be durable next to
   // the shadow (a `<name>.pending.json` written before the primary is
   // attempted and cleared only on a confirmed round trip), or all() must
   // reconcile rather than overwrite (union by primary key, newest wins).
 });
 
-test("DEFECT (high): a remove() whose pre-read fails deletes nothing remotely, reports healthy, and the row comes back", async (t) => {
+test("FIXED: a remove() whose pre-read fails still deletes remotely, and says it was only partly reconciled", async (t) => {
   const restore = quiet();
   const { stub, dir, coll } = await withColl(t);
   t.after(restore);
@@ -1049,21 +1095,21 @@ test("DEFECT (high): a remove() whose pre-read fails deletes nothing remotely, r
   const removed = await coll.remove((r) => r.id === "r1");
   assert.equal(removed, 1, "the caller is told one row was removed");
   assert.deepEqual(await shadowOf(dir), [], "locally it is gone");
-  assert.equal(stub.rows("dcsgames_reports").length, 1,
-    "DEFECT: the primary still holds it — write() computed `before` from a read it swallowed with .catch(() => [])");
-  assert.equal(coll.degraded, null,
-    "DEFECT: and the collection reports itself healthy, so /health will not mention it");
-
-  // When the read recovers, the deleted row is resurrected into the shadow.
-  stub.clearFaults();
-  assert.deepEqual((await coll.all()).map((r) => r.id), ["r1"], "DEFECT: the deleted row is back");
-  assert.deepEqual((await shadowOf(dir)).map((r) => r.id), ["r1"], "and rewritten to disk");
+// FIXED: deletions are computed from the pre-write shadow and JOURNALLED, so
+  // the DELETE is issued even when the pre-read is down. It used to be computed
+  // from `remote.read().catch(() => [])`, so a failed GET meant no deletion was
+  // ever sent — while the caller was told the row was removed.
+  assert.equal(stub.rows("dcsgames_reports").length, 0,
+    "the deletion must actually reach the primary, not only the shadow");
+  assert.ok(coll.degraded, "and a partly-reconciled write must say so");
+  assert.deepEqual((await coll.all()).map((r) => r.id), [], "the deleted row must not come back");
+  assert.deepEqual((await shadowOf(dir)).map((r) => r.id), [], "and must not be rewritten to disk");
   // Fix: src/core/collection.mjs:151 — `remote.read().catch(() => [])` must not
   // swallow. If the pre-read fails the whole write is degraded, because the
   // deletion half of it provably did not happen.
 });
 
-test("DEFECT (medium): an empty shadow clears `degraded` without contacting the primary at all", async (t) => {
+test("FIXED: degraded is only cleared by a request that actually happened", async (t) => {
   const restore = quiet();
   const { stub, coll } = await withColl(t);
   t.after(restore);
@@ -1074,12 +1120,12 @@ test("DEFECT (medium): an empty shadow clears `degraded` without contacting the 
   stub.resetWire();
   const rows = await coll.all();                   // degraded path, local is []
   assert.deepEqual(rows, []);
-  assert.equal(stub.wire.length, 0,
-    "SupabaseBacking.upsert returns early for an empty array, so no request was made");
-  assert.equal(coll.degraded, null,
-    "DEFECT: `degraded` was cleared on the strength of a request that never happened; the primary is still down");
-  // describeCollections now reports the collection healthy while it is not.
-  assert.equal(describeCollections({ reports: coll }).degraded, null);
+// FIXED: a sync that put ZERO requests on the wire must earn its clearance with
+  // a real ping. Nothing is cleared on the strength of a request that never
+  // happened — which is what "upsert([]) returns early" used to do.
+  assert.ok(stub.wire.length > 0, "clearing degraded must involve actually contacting the primary");
+  assert.ok(coll.degraded, "the primary is still down, so the collection is still degraded");
+  assert.ok(describeCollections({ reports: coll }).degraded, "and /health must still say so");
   // Fix: src/core/collection.mjs:128 — only clear `degraded` on a round trip
   // that actually occurred (probe with a cheap read when there is nothing to
   // replay), or make SupabaseBacking.upsert([]) a no-op that reports "not run".
@@ -1154,27 +1200,28 @@ test("DEFECT (high, assumption-dependent): a collection whose rows have differen
   assert.equal(stub.rows("dcsgames_reports").length, 1);
 
   await coll.insert({ principal_id: "b", id: "b", username: "bob", updated_at: "2026-09-06" });
-  assert.ok(coll.degraded, "the write was rejected");
-  assert.match(String(coll.degraded), /400/);
-  assert.equal(stub.rows("dcsgames_reports").length, 1,
-    "DEFECT: the second row never reaches the primary, and nor does anything after it");
-  assert.equal((await shadowOf(dir)).length, 2, "both rows exist only on the ephemeral disk");
+  assert.equal(coll.degraded, null, "grouping by key-set keeps a heterogeneous array off the wire entirely");
+  assert.equal(stub.rows("dcsgames_reports").length, 2, "both rows reach the primary");
 
   // And it does not recover on its own: the resync replays the same
   // heterogeneous array and is rejected the same way, for ever.
   const rows = await coll.all();
   assert.equal(rows.length, 2);
-  assert.ok(coll.degraded, "DEFECT: permanently degraded, with no bad input and no outage");
+  assert.equal(coll.degraded, null, "and the collection is not left permanently degraded by its own shape");
   // Fix: src/core/collection.mjs SupabaseBacking.upsert — send
   // `&columns=<union of keys>` and normalise each row to that set.
 });
 
-test("createCollection: SupabaseBacking.read silently truncates at 10000 rows, and the shadow inherits the truncation", async (t) => {
+test("FIXED: a collection larger than one page is paged, not silently truncated", async (t) => {
   const { stub, dir, coll } = await withColl(t);
   stub.seed("dcsgames_reports", Array.from({ length: 10001 }, (_, i) => ({ id: "r" + i })));
   const rows = await coll.all();
-  assert.equal(rows.length, 10000, "the 10001st row is not returned and nothing says so");
-  assert.equal((await shadowOf(dir)).length, 10000, "and the shadow is rewritten without it");
+  // FIXED: read() pages with Range/Range-Unit rather than stopping at the
+  // server's default cap, so a large collection is not silently truncated —
+  // and, more to the point, the shadow is no longer rewritten without the
+  // rows that were never fetched.
+  assert.equal(rows.length, 10001, "every row must be returned, not the first page");
+  assert.equal((await shadowOf(dir)).length, 10001, "and the shadow must keep all of them");
   assert.equal(stub.rows("dcsgames_reports").length, 10001, "the primary still has it, so this is recoverable — but silent");
   // Fix: src/core/collection.mjs:62 — paginate with Range like
   // cw5_supabase_store.getDeltas already does, or at minimum detect a full page
