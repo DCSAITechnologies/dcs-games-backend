@@ -152,6 +152,76 @@ dbTest("A2 GATE: forward migrate then restore from a dump reproduces the same sc
   }
 });
 
+dbTest("B15 GATE: the subscription guards are real constraints, not comments", async () => {
+  // Migration 0008 is deliberately STRICTER than the service that writes to it.
+  // A constraint that only restates what the code already does adds nothing; one
+  // that is stricter catches the code being wrong. These prove each guard
+  // actually fires in Postgres rather than existing only in a .sql file.
+  const db = rnd();
+  try {
+    const { dsn } = await proveReproducible(ADMIN, db);
+    const row = (extra) => `insert into public.dcsgames_subscriptions(principal_id, granted_by, expires_at${extra.cols}) values ('p1','tester-1', timestamptz '2026-09-30T00:00:00Z'${extra.vals});`;
+
+    // There is no status meaning "this person is paying". It cannot be written
+    // by accident, by an import, or by a migration that forgets why.
+    await assert.rejects(
+      () => psqlExec(dsn, row({ cols: ", status", vals: ", 'active'" })),
+      /dcsgames_subscriptions_status_check|violates check constraint/,
+      "the database must refuse a paid-looking status"
+    );
+
+    // A comped subscription cannot carry a price.
+    await assert.rejects(
+      () => psqlExec(dsn, row({ cols: ", price_minor", vals: ", 49900" })),
+      /price_minor|dcsgames_subscriptions_dark/,
+      "the database must refuse a priced subscription"
+    );
+
+    // A subscription that is not comped cannot exist at all.
+    await assert.rejects(
+      () => psqlExec(dsn, row({ cols: ", comped", vals: ", false" })),
+      /dcsgames_subscriptions_dark/,
+      "the database must refuse a non-comped subscription"
+    );
+    await assert.rejects(
+      () => psqlExec(dsn, row({ cols: ", test_mode", vals: ", false" })),
+      /dcsgames_subscriptions_dark/,
+      "the database must refuse a subscription that is not marked test mode"
+    );
+
+    // A grant made for a test window must die with the window. The SERVICE
+    // defaults this correctly; the DATABASE is what catches a caller that does not.
+    await assert.rejects(
+      () => psqlExec(dsn, `insert into public.dcsgames_subscriptions(principal_id, granted_by) values ('p_forever','tester-1');`),
+      /null value in column "expires_at"|not-null/,
+      "a subscription with no expiry must be impossible"
+    );
+    await assert.rejects(
+      () => psqlExec(dsn, `insert into public.dcsgames_subscriptions(principal_id, granted_by, expires_at) values ('p_late','tester-1', timestamptz '2027-01-01T00:00:00Z');`),
+      /internal_window/,
+      "a grant outliving the internal window must be impossible"
+    );
+
+    // And a legitimate comped grant still works, so the guards are not simply
+    // blocking everything — a test that only proves refusals proves nothing.
+    await psqlExec(dsn, `insert into public.dcsgames_subscriptions(principal_id, plan, granted_by, expires_at) values ('p_ok','dcs_plus','tester-1', timestamptz '2026-09-30T00:00:00Z');`);
+    assert.equal(await psqlScalar(dsn, "select status from public.dcsgames_subscriptions where principal_id='p_ok';"), "comped");
+    assert.equal(await psqlScalar(dsn, "select price_minor from public.dcsgames_subscriptions where principal_id='p_ok';"), "0");
+
+    // A refused subscribe is still auditable: demand must not vanish because it
+    // was correctly refused.
+    await psqlExec(dsn, `insert into public.dcsgames_subscription_events(id, principal_id, event, actor_id) values ('e1','p_ok','subscribe_refused','p_ok');`);
+    assert.equal(await psqlScalar(dsn, "select count(*) from public.dcsgames_subscription_events;"), "1");
+    await assert.rejects(
+      () => psqlExec(dsn, `insert into public.dcsgames_subscription_events(id, principal_id, event, actor_id) values ('e2','p_ok','paid','p_ok');`),
+      /violates check constraint/,
+      "there is no 'paid' event to record"
+    );
+  } finally {
+    await psqlExec(ADMIN, `drop database if exists ${db};`).catch(() => {});
+  }
+});
+
 dbTest("B15 GATE: money is dark at the DATABASE level, not only in application code", async () => {
   const db = rnd();
   try {
