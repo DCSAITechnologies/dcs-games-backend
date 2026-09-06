@@ -18,6 +18,9 @@ import { makeKeyEndpoint } from "./src/cw7/atlas-key.mjs";       // CW7: GET /at
 import { atlasReady, verifyReceipt, atlasPublicKeyBase64, issueWorldReceipt } from "./src/cw7/atlas-local-sign.mjs"; // CW7: local ed25519 sign+verify (off-chain, no gas)
 import { makeCrossProductRouter } from "./src/cw7/atlas-cross-product.mjs"; // CW7 v4.0: cross-product reputation (node-http routeTable)
 import { createEconomyRouter } from "./src/cw6/economy-router.mjs";          // CW6 v3.0: economy routes (DARK), non-express fallback router
+import { createWorldRepository } from "./src/core/worldstore.mjs";          // A3: durable, lossless, idempotent, ownership-aware world persistence
+import { createPrincipalResolver } from "./src/core/principal.mjs";         // A1: PARENT-OWNED canonical principal. No x-user-id fallback, ever.
+import { AppError, Errors, newCorrelationId, logError, optional } from "./src/core/errors.mjs"; // A4: structured errors, correlation ids, no silent swallow
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const PAYMENTS_LIVE = process.env.PAYMENTS_LIVE === "1";
@@ -31,15 +34,20 @@ setAdapter(makeHybridAdapter({ modelClient: _cerebras }));
 const GEN_MODE = _cerebras ? ("cerebras-hybrid:" + _cerebras.model + " ×" + _cerebras.keyCount + "key") : "deterministic-seeder";
 console.log("CW2 generation adapter:", GEN_MODE);
 
-const worlds = new Map<string, any>();
 const _store = HAS_SUPA
   ? new SupabasePersistenceStore({ url: SUPA, serviceRoleKey: KEY })
   : new InMemoryPersistenceStore();
 const persistence = new PersistenceEngine(_store);
 const idb = createIdentityStore();
-const atlas = makeAtlasRoutes({ worlds: Array.from(worlds.values()), events: [], receipts: [], verifiedWorldIds: [] });
+const atlas = makeAtlasRoutes({ worlds: [], events: [], receipts: [], verifiedWorldIds: [] }); // CW7 read surface; world truth now comes from the durable repository
 const crossProduct = makeCrossProductRouter({ resolveProductIdentities: (_id: string) => [] }); // CW7 v4.0: Sports identity wired later; honest empty until then
 const econRouter: any = createEconomyRouter({}); // CW6 v3.0: DARK; supabase + signReceipt injected later → honest empty + unsigned receipts, no fabricated sales
+const repo = createWorldRepository();                                        // A3: replaces the process-local Map + swallowed best-effort insert
+console.log("A3 world store:", repo.kind);
+
+const auth = createPrincipalResolver();                                      // A1: supabase-jwt when configured, real HS256 otherwise. Never a header.
+console.log("A1 auth mode:", auth.mode);
+
 const atlasKey = makeKeyEndpoint({ publicKey: () => atlasPublicKeyBase64() || process.env.ATLAS_PUBLIC_KEY || "" }); // prefer the raw key derived from the signer (matches sig + browser-embed verifiable)
 
 function send(res: http.ServerResponse, code: number, body: any) {
@@ -53,19 +61,30 @@ function sendHTML(res: http.ServerResponse, code: number, html: string) {
 function readBody(req: http.IncomingMessage): Promise<any> {
   return new Promise((resolve) => { let d = ""; req.on("data", (c) => (d += c)); req.on("end", () => { try { resolve(d ? JSON.parse(d) : {}); } catch { resolve({}); } }); });
 }
-// real Supabase JWT verification (zero-dep): GET /auth/v1/user with the bearer token
-async function resolveUid(req: http.IncomingMessage): Promise<string> {
-  const tok = (req.headers["authorization"] || "").toString().replace(/^Bearer\s+/i, "").trim();
-  const hdr = (req.headers["x-user-id"] || "").toString();
-  if (HAS_SUPA && tok) {
-    try {
-      const r = await fetch(SUPA + "/auth/v1/user", { headers: { apikey: KEY, Authorization: "Bearer " + tok } });
-      if (r.ok) { const u: any = await r.json(); if (u && u.id) return u.id; }
-    } catch { /* fall through */ }
-    return hdr || "u_new";              // invalid/absent live token -> not trusted
-  }
-  return tok || hdr || "u_new";         // dev/local: bearer is the id
+// A1: identity now comes from src/core/principal.mjs only. The former resolveUid()
+// trusted an x-user-id header and fell back to it when a token failed to verify —
+// confirmed exploitable against production on 6 Sep 2026. It is gone.
+
+/** Anonymous-allowed: returns a Principal or null. Throws 401 on a bad credential. */
+async function whoOrNull(req: http.IncomingMessage, cid: string) {
+  return await auth.resolve(req.headers as any, cid);
 }
+/** Private routes: returns a Principal or throws 401. */
+async function mustBe(req: http.IncomingMessage, cid: string) {
+  return await auth.require(req.headers as any, cid);
+}
+/** Builder/economy/testing surfaces: authenticated AND on the internal-tester allowlist. */
+async function mustBeInternalTester(req: http.IncomingMessage, cid: string) {
+  const p = await auth.require(req.headers as any, cid);
+  if (!p.isInternalTester) {
+    throw Errors.forbidden(
+      "DCS Games is in controlled internal testing until 30 Sep 2026; this surface is limited to authorized internal testers",
+      { correlationId: cid, meta: { window_ends: "2026-09-30" } }
+    );
+  }
+  return p;
+}
+
 async function supaGet(pathq: string): Promise<any[]> {
   if (!HAS_SUPA) return [];
   try {
@@ -74,28 +93,21 @@ async function supaGet(pathq: string): Promise<any[]> {
     return await r.json();
   } catch { return []; }
 }
-async function supaInsert(table: string, row: any): Promise<boolean> {
-  if (!HAS_SUPA) return false;
-  try {
-    const r = await fetch(SUPA + "/rest/v1/" + table, {
-      method: "POST",
-      headers: { apikey: KEY, Authorization: "Bearer " + KEY, "Content-Type": "application/json", Prefer: "resolution=merge-duplicates,return=minimal" },
-      body: JSON.stringify(row),
-    });
-    return r.ok;
-  } catch { return false; }
-}
-
 const server = http.createServer(async (req, res) => {
   if ((req.url || "").startsWith("/api/") && !(req.url || "").startsWith("/api/public/")) req.url = "/" + req.url.slice(5);
   const url = (req.url || "").split("?")[0];
   const method = req.method || "GET";
+  // A4: one correlation id per request, echoed on every response and every log line.
+  const cid = (req.headers["x-correlation-id"] as string) || newCorrelationId();
+  res.setHeader("X-Correlation-Id", cid);
   try {
     if (method === "OPTIONS") return send(res, 204, {});
     if (url === "/health") return send(res, 200, {
       ok: true, service: "dcs-games-backend", payments_live: PAYMENTS_LIVE,
-      auth: HAS_SUPA ? "supabase-jwt" : "dev-bearer",
-      persistence: HAS_SUPA ? "supabase" : "in-memory",
+      auth: auth.mode,
+      auth_header_fallback_removed: true,      // A1: x-user-id impersonation path deleted 6 Sep 2026
+      internal_testing_window_ends: "2026-09-30",
+      persistence: repo.kind,
       generation: GEN_MODE,
       lanes: ["cw1-identity", "cw2-generation", "cw5-persistence", "cw7-atlas"],
       schema: "runtime-ready (cw2 toRuntimeWorld; zero runtime patches)",
@@ -103,9 +115,11 @@ const server = http.createServer(async (req, res) => {
       netcode: "ws-separate-service", ts: new Date().toISOString(),
     });
 
-    // resolve the caller once (real JWT when live) so identity + routes share it
-    const uid = await resolveUid(req);
-    const idCtx = { db: idb, send, body: readBody, who: () => uid };
+    // A1: resolve once. Anonymous is null; a *bad* credential throws 401 here and
+    // never reaches a route, so no handler can be tricked into acting as someone else.
+    const principal = await whoOrNull(req, cid);
+    const uid = principal ? principal.id : "";
+    const idCtx = { db: idb, send, body: readBody, who: () => { if (!principal) throw Errors.unauthenticated("identity route requires authentication", { correlationId: cid }); return principal.id; } };
 
     // ---- dashboard data routes (real Supabase reads; honest empty until data flows) ----
     if (url === "/api/public/worlds" && method === "GET") {
@@ -113,10 +127,12 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, count: rows.length, worlds: rows, source: HAS_SUPA ? "supabase" : "empty" });
     }
     if (url === "/worlds/mine" && method === "GET") {
-      const rows = await supaGet("dcsgames_base_worlds?owner_id=eq." + encodeURIComponent(uid) + "&select=*&limit=50");
-      return send(res, 200, { ok: true, count: rows.length, worlds: rows, owner: uid });
+      const me = await mustBe(req, cid);                       // A1: 401 when unauthenticated
+      const rows = await supaGet("dcsgames_base_worlds?owner_id=eq." + encodeURIComponent(me.id) + "&select=*&limit=50");
+      return send(res, 200, { ok: true, count: rows.length, worlds: rows, owner: me.id });
     }
     if (url === "/me/revenue" && method === "GET") {
+      await mustBe(req, cid);                                  // A1: 401 when unauthenticated
       return send(res, 200, { ok: true, currency: "INR", payments_live: PAYMENTS_LIVE, total_minor: 0, payouts: [], split: { seller: 70, platform: 30 }, dark: true, note: "revenue DARK until DK flips" });
     }
 
@@ -139,7 +155,8 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (await handleIdentity(req, res, idCtx)) return;
-    if (await handleTrustSafetySSO(req, res, { user: uid && uid !== "u_new" ? { id: uid } : null, send, body: readBody, db: { mode: "memory" } })) return; // T&S/KYC (in-memory repo; DARK). Supabase persistence = follow-up migration 0002
+    if ((url.startsWith("/ts/") || url.startsWith("/kyc/")) ) await mustBeInternalTester(req, cid); // T&S console + payout KYC: internal testers only
+    if (await handleTrustSafetySSO(req, res, { user: principal ? { id: principal.id } : null, send, body: readBody, db: { mode: "memory" } })) return; // T&S/KYC (in-memory repo; DARK). Supabase persistence = follow-up migration 0002
 
     // ---- CW7 public trust surface ----
     if (url === "/atlas/key" && method === "GET") return send(res, 200, atlasKey.key());
@@ -168,59 +185,105 @@ const server = http.createServer(async (req, res) => {
     {
       const r = (econRouter as any)._routes.find((x: any) => x.method === method && x.path === apiPath);
       if (r) {
+        const me = await mustBeInternalTester(req, cid);      // economy surface: gated to authorized internal testers, money DARK
         const body = (method === "POST") ? await readBody(req) : {};
         const shimRes: any = { _c: 200, status(c: number) { this._c = c; return this; }, json(b: any) { return send(res, this._c, b); } };
-        await r.handler({ user: uid && uid !== "u_new" ? { id: uid } : null, body }, shimRes);
+        await r.handler({ user: { id: me.id }, body }, shimRes);
         return;
       }
     }
 
     if (url === "/worlds/generate" && method === "POST") {
+      const me = await mustBeInternalTester(req, cid);        // creation is a builder surface: internal testers only until 30 Sep 2026
       const b = await readBody(req);
       const world = await generateVia(b.prompt || "Pirate Island"); // adapter seam: Cerebras hybrid when keyed, else seeder (always C1-valid)
-      // auto-issue a real Atlas receipt so the world is verified + instantly playable (honest: unsigned if no key)
-      let receipt: any = null;
-      try {
-        receipt = issueWorldReceipt(world.world_id, uid !== "u_new" ? uid : world.meta?.creator_id);
-        world.meta = world.meta || {}; (world.meta as any).atlas_receipt_hash = receipt.receipt_hash; (world.meta as any).atlas_signed = !!receipt.sig;
-        (world as any).state = receipt.sig ? "published" : (world as any).state;
-      } catch { /* signing best-effort; never block generation */ }
-      const runtime = toRuntimeWorld(world);                 // CW2 fix: render-ready (env/material/transform.position/spawn) — carries meta.atlas_*
-      worlds.set(world.world_id, runtime);                   // manifest serves the runtime world -> ZERO runtime-side patches
+      // A4: signing is genuinely optional, but a failure is now logged and reported,
+      // not swallowed. An unsigned world is never presented as verified.
+      const signed = await optional("atlas-receipt-issue", async () => issueWorldReceipt(world.world_id, me.id), cid);
+      const receipt: any = signed.ok ? signed.value : null;
+      if (receipt) {
+        world.meta = world.meta || {};
+        (world.meta as any).atlas_receipt_hash = receipt.receipt_hash;
+        (world.meta as any).atlas_signed = !!receipt.sig;
+      }
+      const runtime = toRuntimeWorld(world);                 // render-ready (env/material/transform.position/spawn)
+      // A3: durable, ownership-stamped, lossless. A write failure surfaces as an error.
+      const saved = await repo.upsert({ worldId: world.world_id, ownerId: me.id, manifest: runtime, state: "draft", title: (world as any)?.meta?.title });
       const base = { world_id: world.world_id, objects: (world.objects || []).map((o: any) => ({ object_id: o.object_id, kind: o.kind, transform: o.transform || { x: 0, y: 0, z: 0 }, owner_id: o.owner_id ?? null })) };
       await persistence.registerBaseWorld(base);
-      // best-effort: surface the world in public/mine feeds with its real name + durable runtime manifest (never fail generate on a feed-insert issue)
-      if (HAS_SUPA) { try { const row: any = toBaseWorldRow(world); row.owner_id = uid; await supaInsert("dcsgames_base_worlds", row); } catch { /* feed insert is best-effort */ } }
-      return send(res, 200, { ok: true, world_id: world.world_id, status: "ready", manifest_url: "/worlds/" + world.world_id + "/manifest", atlas: receipt ? { receipt_hash: receipt.receipt_hash, verified: !!receipt.sig } : null });
+      return send(res, 200, {
+        ok: true, world_id: world.world_id, status: "ready", owner: me.id,
+        world_version: saved.version, manifest_hash: saved.manifest_hash,
+        manifest_url: "/worlds/" + world.world_id + "/manifest",
+        atlas: receipt ? { receipt_hash: receipt.receipt_hash, signed: !!receipt.sig } : null,
+        // Honest: "signed" is not "verified". Verification is what /verify proves.
+        atlas_signing_error: signed.ok ? undefined : signed.error,
+        persistence_degraded: saved._mirrored === false ? saved._mirror_error : undefined,
+        correlation_id: cid,
+      });
     }
     let m = url.match(/^\/worlds\/([^/]+)\/manifest$/);
     if (m && method === "GET") {
-      let w = worlds.get(m[1]);
-      if (!w && HAS_SUPA) { const rows = await supaGet("dcsgames_base_worlds?world_id=eq." + encodeURIComponent(m[1]) + "&select=manifest&limit=1"); w = rows[0]?.manifest; } // survive restart: serve durable runtime manifest
-      return w ? send(res, 200, w) : send(res, 404, { ok: false, error: "world_not_found" });
+      // A3: served from durable storage, so it survives a restart. Drafts are
+      // owner-only; published worlds are public. A miss is a real 404.
+      const rec = await repo.get(m[1], { requesterId: principal?.id ?? null });
+      return send(res, 200, rec.manifest);
     }
     // Publish: issue a real ed25519 Atlas receipt, mark published, return a verify link. Play stays instant (generate already serves it).
     m = url.match(/^\/worlds\/([^/]+)\/publish$/);
     if (m && method === "POST") {
+      const me = await mustBeInternalTester(req, cid);
       const id = m[1];
-      let wm: any = worlds.get(id);
-      if (!wm && HAS_SUPA) { const rows = await supaGet("dcsgames_base_worlds?world_id=eq." + encodeURIComponent(id) + "&select=manifest&limit=1"); wm = rows[0]?.manifest; }
-      if (!wm) return send(res, 404, { ok: false, error: "world_not_found" });
-      const receipt: any = issueWorldReceipt(id, uid !== "u_new" ? uid : wm.meta?.creator_id);
-      wm.meta = wm.meta || {}; wm.meta.atlas_receipt_hash = receipt.receipt_hash; wm.meta.atlas_signed = !!receipt.sig; wm.state = "published";
-      worlds.set(id, wm);
-      if (HAS_SUPA) { try { await supaInsert("dcsgames_base_worlds", { world_id: id, state: "published", manifest: wm }); } catch { /* best-effort */ } }
+      const rec = await repo.get(id, { requesterId: me.id, requireOwner: true });   // only the owner publishes
+      const wm: any = rec.manifest;
+      if (!atlasReady()) {
+        // A4/B10: refuse to mark a world published-and-verified when no signing key
+        // exists. Previously this returned ok:true with verified:false, which the UI
+        // rendered as a successful publish.
+        throw Errors.notConfigured("Atlas signing key (ATLAS_PRIVATE_KEY)", { correlationId: cid });
+      }
+      const receipt: any = issueWorldReceipt(id, me.id);
+      wm.meta = wm.meta || {}; wm.meta.atlas_receipt_hash = receipt.receipt_hash; wm.meta.atlas_signed = !!receipt.sig;
+      const saved = await repo.upsert({ worldId: id, ownerId: me.id, manifest: wm, state: "published" });
       const verify_url = "/verify?receipt=" + Buffer.from(JSON.stringify(receipt)).toString("base64");
-      return send(res, 200, { ok: true, published: true, verified: !!receipt.sig, receipt, verify_url, key_configured: atlasReady() });
+      return send(res, 200, { ok: true, published: true, signed: !!receipt.sig, world_version: saved.version, receipt, verify_url, correlation_id: cid });
     }
     m = url.match(/^\/worlds\/([^/]+)\/save$/);
-    if (m && method === "POST") { const b = await readBody(req); const delta = b.delta || b; delta.world_id = m[1]; const r = await persistence.save(delta); return send(res, 200, { ok: true, ...r }); }
+    if (m && method === "POST") {
+      const me = await mustBe(req, cid);
+      const b = await readBody(req);
+      if (b && b.manifest) {
+        // A3: full-manifest save — durable, lossless, ownership-checked, idempotent.
+        const saved = await repo.upsert({ worldId: m[1], ownerId: me.id, manifest: b.manifest, state: b.state || "draft", expected_version: b.expected_version ?? null });
+        return send(res, 200, { ok: true, world_id: m[1], world_version: saved.version, manifest_hash: saved.manifest_hash, idempotent: saved.idempotent, persistence_degraded: saved._mirrored === false ? saved._mirror_error : undefined, correlation_id: cid });
+      }
+      const delta = b.delta || b; delta.world_id = m[1];
+      const r = await persistence.save(delta);                     // CW5 runtime-object delta path
+      return send(res, 200, { ok: true, ...r, correlation_id: cid });
+    }
     m = url.match(/^\/worlds\/([^/]+)\/load$/);
-    if (m && method === "GET") { const snap = await persistence.load(m[1]); return send(res, 200, snap); }
+    if (m && method === "GET") {
+      const rec = await repo.get(m[1], { requesterId: principal?.id ?? null });
+      const snap = await persistence.load(m[1]);
+      return send(res, 200, { ok: true, world_id: m[1], world_version: rec.version, manifest_hash: rec.manifest_hash, state: rec.state, owner: rec.owner_id, manifest: rec.manifest, runtime_state: snap, correlation_id: cid });
+    }
 
-    return send(res, 404, { ok: false, error: "not_found", path: url });
+    return send(res, 404, { ok: false, error: "not_found", path: url, correlation_id: cid });
   } catch (e: any) {
-    return send(res, 500, { ok: false, error: "server_error", detail: String(e?.message || e) });
+    // A4: one honest exit. An AppError keeps its real status and code; anything
+    // else is logged in full and reported as a 500 with a correlation id. No path
+    // through this handler can produce ok:true for a failure.
+    if (e instanceof AppError) {
+      logError(e, method + " " + url);
+      return send(res, e.httpStatus, { ...e.toJSON(), correlation_id: cid });
+    }
+    const wrapped = Errors.internal(String(e?.message || e), { correlationId: cid, cause: e });
+    logError(wrapped, method + " " + url);
+    if (process.env.NODE_ENV !== "production") console.error(e?.stack || e);
+    return send(res, 500, wrapped.toJSON());
   }
 });
-server.listen(PORT, () => console.log("DCS Games Core API v3 on :" + PORT + " auth=" + (HAS_SUPA ? "supabase-jwt" : "dev-bearer")));
+export { server };
+if (process.env.DCS_NO_LISTEN !== "1") {
+  server.listen(PORT, () => console.log("DCS Games Core API v3 on :" + PORT + " auth=" + auth.mode + " store=" + repo.kind));
+}

@@ -1,0 +1,4 @@
+node_modules/
+.dcs-data/
+.env
+*.log

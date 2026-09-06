@@ -1,12 +1,14 @@
 {
   "name": "dcs-games-backend-integrated",
-  "version": "1.0.0",
+  "version": "3.1.0",
   "private": true,
   "type": "module",
-  "description": "DCS Games integrated Core API — CW1 identity + CW2 generation + CW5 persistence + CW7 atlas (CW4 netcode = separate WS service). Money DARK.",
+  "description": "DCS Games Core API — CW1 identity + CW2 generation + CW5 persistence + CW7 atlas + V3 world stack. Money DARK.",
   "scripts": {
     "start": "tsx server.mts",
-    "dev": "tsx server.mts"
+    "dev": "tsx server.mts",
+    "test": "node --import tsx --test test/*.test.mjs",
+    "test:unit": "node --test test/auth-principal.test.mjs test/world-persistence.test.mjs"
   },
   "dependencies": {
     "tsx": "^4.22.4"
