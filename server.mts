@@ -3,6 +3,7 @@
 // Auth: Bearer JWT verified against Supabase /auth/v1/user when SUPABASE_URL set; else dev-bearer (token = user id).
 // Money DARK. Honest data: unknown -> zeros/empty, never fabricated.
 import http from "node:http";
+import crypto from "node:crypto";
 import { generateWorld } from "./src/cw2/generate.mjs";
 import { generateVia, setAdapter } from "./src/cw2/adapter.mjs";              // CW2: generation adapter seam (seeder default; LLM hybrid when provisioned)
 import { makeHybridAdapter } from "./src/cw2/hybrid-enrich.mjs";              // CW2 v3.0: Cerebras hybrid enrich (seeder geometry + AI flavor, fail-safe)
@@ -18,6 +19,14 @@ import { makeKeyEndpoint } from "./src/cw7/atlas-key.mjs";       // CW7: GET /at
 import { atlasReady, verifyReceipt, atlasPublicKeyBase64, issueWorldReceipt } from "./src/cw7/atlas-local-sign.mjs"; // CW7: local ed25519 sign+verify (off-chain, no gas)
 import { makeCrossProductRouter } from "./src/cw7/atlas-cross-product.mjs"; // CW7 v4.0: cross-product reputation (node-http routeTable)
 import { createEconomyRouter } from "./src/cw6/economy-router.mjs";          // CW6 v3.0: economy routes (DARK), non-express fallback router
+import { createAssemblyRouter } from "./src/v3/router/assembly.mjs";            // B1: multi-provider world assembly
+import { validateManifest, MANIFEST_VERSION } from "./src/v3/manifest/schema.mjs"; // B0: canonical world contract
+import { ensureV3 } from "./src/v3/manifest/migrate.mjs";                       // B0: v1 -> v3 upgrade
+import { playtestAndRepair } from "./src/v3/playtest/agent.mjs";                // B4: playtest -> critic -> repair
+import { planExpansion, planEdit } from "./src/v3/expansion/planner.mjs";       // B6/B8: expansion + chat editing
+import { applyDelta, verifyPreservation, emptyLiveState } from "./src/v3/expansion/delta.mjs";
+import { createWorldMemory } from "./src/v3/memory/world-memory.mjs";           // B7: factual world chronology
+import { createCompanionService } from "./src/v3/companion/companion.mjs";      // B5: personal AI companion
 import { createSafetyService } from "./src/core/safety.mjs";                    // A5: age tiers, consent, report/block, moderation audit
 import { assertSchema, currentVersion } from "./src/core/schema.mjs";           // A2: boot-time schema assertion — refuse to serve an unsupported schema
 import { createWorldRepository } from "./src/core/worldstore.mjs";          // A3: durable, lossless, idempotent, ownership-aware world persistence
@@ -44,6 +53,9 @@ const idb = createIdentityStore();
 const atlas = makeAtlasRoutes({ worlds: [], events: [], receipts: [], verifiedWorldIds: [] }); // CW7 read surface; world truth now comes from the durable repository
 const crossProduct = makeCrossProductRouter({ resolveProductIdentities: (_id: string) => [] }); // CW7 v4.0: Sports identity wired later; honest empty until then
 const econRouter: any = createEconomyRouter({}); // CW6 v3.0: DARK; supabase + signReceipt injected later → honest empty + unsigned receipts, no fabricated sales
+const v3 = createAssemblyRouter();                                           // B1
+const worldMemory = createWorldMemory();                                     // B7
+const companions = createCompanionService({ worldMemory });                  // B5
 const safety = createSafetyService();                                        // A5: real persistence, so moderation output can never be faked
 const repo = createWorldRepository();                                        // A3: replaces the process-local Map + swallowed best-effort insert
 console.log("A3 world store:", repo.kind);
@@ -130,6 +142,8 @@ const server = http.createServer(async (req, res) => {
       lanes: ["cw1-identity", "cw2-generation", "cw5-persistence", "cw7-atlas"],
       schema: "runtime-ready (cw2 toRuntimeWorld; zero runtime patches)",
       routes: ["/api/public/worlds", "/api/worlds/mine", "/api/me/revenue", "/worlds/generate", "/worlds/:id/manifest", "/atlas/key", "/verify", "/safety/age", "/safety/report", "/safety/block", "/safety/consent/media"],
+      manifest_version: MANIFEST_VERSION,
+      v3: { assembly_router: true, playtest_gate: true, expansion_delta: true, world_memory: true, companion: true, chat_edit: true },
       safety: { age_gating: true, report_block: true, parental_consent: true, media_consent: true, automated_content_moderation: false, minor_onboarding_enabled: false },
       netcode: "ws-separate-service", ts: new Date().toISOString(),
     });
@@ -280,6 +294,169 @@ const server = http.createServer(async (req, res) => {
     if (url === "/safety/consent/media" && method === "GET") {
       const me = await mustBe(req, cid);
       return send(res, 200, { ok: true, consents: await safety.mediaConsents(me.id) });
+    }
+
+    // ================= DCS GAMES V3 =====================================
+    if (url === "/v3/providers" && method === "GET") {
+      // Honest provider status. Never claims a vendor that is not reachable.
+      return send(res, 200, { ok: true, ...(await v3.describe()) });
+    }
+
+    if (url === "/v3/worlds/generate" && method === "POST") {
+      const me = await mustBeInternalTester(req, cid);
+      await safety.requireCapability(me.id, "create");
+      const b = await readBody(req);
+      if (!b.prompt || typeof b.prompt !== "string") throw Errors.validation("prompt is required", { correlationId: cid });
+
+      const worldId = "w3_" + crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+      const built = await v3.assemble({ prompt: b.prompt, worldId, creatorId: me.id, seed: b.seed, style: b.style, media: b.media === true });
+      if (!built.validation.ok) {
+        throw Errors.internal("the assembled world did not satisfy WorldManifestV3", { correlationId: cid, meta: { errors: built.validation.errors.slice(0, 8) } });
+      }
+
+      // B4: the quality gate runs BEFORE the world is stored, and it can fail.
+      const gate = await playtestAndRepair(built.manifest);
+      if (!gate.passed) {
+        return send(res, 422, {
+          ok: false, error: "world_failed_playtest",
+          detail: "the generated world did not pass the playtest gate and was not saved",
+          verdict: gate.verdict,
+          findings: gate.rounds.at(-1).findings.slice(0, 10),
+          provenance: built.provenance,
+          correlation_id: cid,
+        });
+      }
+
+      const saved = await repo.upsert({ worldId, ownerId: me.id, manifest: gate.manifest, state: "draft", title: gate.manifest.meta.title });
+      await worldMemory.record(worldId, { kind: "created", summary: `"${gate.manifest.meta.title}" was generated from a prompt`, worldVersion: 1, actorId: me.id, detail: { prompt: b.prompt } });
+
+      return send(res, 200, {
+        ok: true, world_id: worldId, owner: me.id, world_version: saved.version,
+        manifest_hash: saved.manifest_hash, manifest_version: MANIFEST_VERSION,
+        title: gate.manifest.meta.title,
+        playtest: { verdict: gate.verdict, rounds: gate.rounds.length, repairs: gate.repairs.length },
+        counts: {
+          zones: gate.manifest.zones.length, structures: gate.manifest.structures.length,
+          npcs: gate.manifest.npcs.length, items: gate.manifest.items.length,
+          quests: gate.manifest.quests.length, behaviors: gate.manifest.behaviors.length,
+          interactions: gate.manifest.interactions.length, assets: gate.manifest.assets.length,
+        },
+        provenance: built.provenance,
+        degraded: built.degraded.length ? built.degraded : undefined,
+        manifest_url: "/v3/worlds/" + worldId + "/manifest",
+        correlation_id: cid,
+      });
+    }
+
+    {
+      let mm = url.match(/^\/v3\/worlds\/([^/]+)\/manifest$/);
+      if (mm && method === "GET") {
+        const rec = await repo.get(mm[1], { requesterId: principal?.id ?? null });
+        // Any world still on the v1 contract is upgraded on read, so old worlds
+        // keep working without a migration job.
+        const { manifest, migrated } = ensureV3(rec.manifest, { worldVersion: rec.version, creatorId: rec.owner_id });
+        return send(res, 200, { ok: true, world_id: rec.world_id, world_version: rec.version, state: rec.state, owner: rec.owner_id, migrated_on_read: migrated, manifest });
+      }
+
+      mm = url.match(/^\/v3\/worlds\/([^/]+)\/playtest$/);
+      if (mm && method === "POST") {
+        const me = await mustBe(req, cid);
+        const rec = await repo.get(mm[1], { requesterId: me.id });
+        const { manifest } = ensureV3(rec.manifest, { worldVersion: rec.version, creatorId: rec.owner_id });
+        const gate = await playtestAndRepair(manifest);
+        return send(res, gate.passed ? 200 : 422, {
+          ok: gate.passed, verdict: gate.verdict, rounds: gate.rounds,
+          repairs: gate.repairs, correlation_id: cid,
+        });
+      }
+
+      mm = url.match(/^\/v3\/worlds\/([^/]+)\/expand$/);
+      if (mm && method === "POST") {
+        const me = await mustBeInternalTester(req, cid);
+        const b = await readBody(req);
+        if (!b.request) throw Errors.validation("request is required, e.g. 'add a hospital district'", { correlationId: cid });
+        const rec = await repo.get(mm[1], { requesterId: me.id, requireOwner: true });
+        const { manifest: before } = ensureV3(rec.manifest, { worldVersion: rec.version, creatorId: rec.owner_id });
+
+        const live = { ...emptyLiveState(), ...(b.live_state || {}) };
+        const delta = planExpansion(before, { request: b.request, author: me.id, seed: b.seed });
+        const applied = applyDelta(before, delta, live);              // throws 409 if unsafe
+        const preserved = verifyPreservation(before, applied.manifest, live);
+        if (!preserved.ok) {
+          throw Errors.conflict("the expansion would have lost existing state", { correlationId: cid, meta: { problems: preserved.problems } });
+        }
+
+        const gate = await playtestAndRepair(applied.manifest);
+        if (!gate.passed) {
+          return send(res, 422, { ok: false, error: "expansion_failed_playtest", detail: "the expanded world did not pass the playtest gate and was not saved", verdict: gate.verdict, findings: gate.rounds.at(-1).findings.slice(0, 10), correlation_id: cid });
+        }
+
+        const saved = await repo.upsert({ worldId: rec.world_id, ownerId: me.id, manifest: gate.manifest, state: rec.state, title: gate.manifest.meta.title });
+        await worldMemory.record(rec.world_id, { kind: "expanded", summary: `${delta.label} was added`, worldVersion: gate.manifest.world_version, actorId: me.id, detail: { request: b.request, delta_id: delta.delta_id } });
+
+        return send(res, 200, {
+          ok: true, world_id: rec.world_id,
+          world_version: gate.manifest.world_version, previous_version: applied.previous_version,
+          record_version: saved.version, label: delta.label, applied: applied.applied,
+          preserved: preserved.ok, playtest: gate.verdict,
+          expansion_history: gate.manifest.expansion.history,
+          correlation_id: cid,
+        });
+      }
+
+      mm = url.match(/^\/v3\/worlds\/([^/]+)\/edit$/);
+      if (mm && method === "POST") {
+        const me = await mustBeInternalTester(req, cid);
+        const b = await readBody(req);
+        const rec = await repo.get(mm[1], { requesterId: me.id, requireOwner: true });
+        const { manifest: before } = ensureV3(rec.manifest, { worldVersion: rec.version, creatorId: rec.owner_id });
+
+        const plan = planEdit(before, { request: b.request, author: me.id });
+        if (plan.error) {
+          // Honest: an unrecognised edit is a 422 that says what IS supported.
+          return send(res, 422, { ok: false, error: "edit_not_understood", detail: plan.error, supported: plan.supported, hint: plan.hint, correlation_id: cid });
+        }
+        const applied = applyDelta(before, plan.delta, { ...emptyLiveState(), ...(b.live_state || {}) });
+        const gate = await playtestAndRepair(applied.manifest);
+        if (!gate.passed) {
+          return send(res, 422, { ok: false, error: "edit_failed_playtest", detail: "the edited world did not pass the playtest gate and was not saved", verdict: gate.verdict, findings: gate.rounds.at(-1).findings.slice(0, 6), correlation_id: cid });
+        }
+        const saved = await repo.upsert({ worldId: rec.world_id, ownerId: me.id, manifest: gate.manifest, state: rec.state, title: gate.manifest.meta.title });
+        await worldMemory.record(rec.world_id, { kind: "edited", summary: plan.summary, worldVersion: gate.manifest.world_version, actorId: me.id, detail: { request: b.request, intent: plan.intent } });
+        return send(res, 200, { ok: true, world_id: rec.world_id, summary: plan.summary, intent: plan.intent, world_version: gate.manifest.world_version, record_version: saved.version, playtest: gate.verdict, correlation_id: cid });
+      }
+
+      mm = url.match(/^\/v3\/worlds\/([^/]+)\/memory$/);
+      if (mm && method === "GET") {
+        await repo.get(mm[1], { requesterId: principal?.id ?? null });   // read permission
+        return send(res, 200, { ok: true, world_id: mm[1], timeline: await worldMemory.timeline(mm[1]), chronology: await worldMemory.chronology(mm[1]) });
+      }
+
+      // ---- B5 companion ------------------------------------------------
+      mm = url.match(/^\/v3\/worlds\/([^/]+)\/companion$/);
+      if (mm) {
+        const me = await mustBe(req, cid);
+        const worldId = mm[1];
+        if (method === "GET") return send(res, 200, { ok: true, companion: await companions.get(me.id, worldId) });
+        if (method === "POST") {
+          const b = await readBody(req);
+          const action = b.action || "adopt";
+          const rec = await repo.get(worldId, { requesterId: me.id });
+          const { manifest } = ensureV3(rec.manifest, { worldVersion: rec.version, creatorId: rec.owner_id });
+          if (action === "adopt") {
+            const c = await companions.adopt(me.id, worldId, { name: b.name, persona: b.persona });
+            return send(res, 200, { ok: true, companion: c, greeting: await companions.greeting(me.id, worldId, manifest) });
+          }
+          if (action === "follow") return send(res, 200, { ok: true, companion: await companions.follow(me.id, worldId, b.following !== false) });
+          if (action === "dismiss") return send(res, 200, { ok: true, companion: await companions.dismiss(me.id, worldId) });
+          if (action === "remember") return send(res, 200, { ok: true, companion: await companions.remember(me.id, worldId, { text: b.text, kind: b.kind, refs: b.refs }) });
+          if (action === "forget") return send(res, 200, { ok: true, companion: await companions.forget(me.id, worldId, b.memory_id) });
+          if (action === "context") return send(res, 200, { ok: true, companion: await companions.updateContext(me.id, worldId, { zone: b.zone ?? null, activeQuest: b.active_quest ?? null }) });
+          if (action === "ask") return send(res, 200, { ok: true, ...(await companions.ask(me.id, worldId, manifest, b.question, { zone: b.zone, activeQuest: b.active_quest })) });
+          if (action === "caption") return send(res, 200, { ok: true, ...(await companions.caption(me.id, worldId, manifest, { zone: b.zone, activeQuest: b.active_quest })) });
+          throw Errors.validation(`unknown companion action '${action}'`, { correlationId: cid, meta: { supported: ["adopt", "follow", "dismiss", "remember", "forget", "context", "ask", "caption"] } });
+        }
+      }
     }
 
     if (url === "/worlds/generate" && method === "POST") {
