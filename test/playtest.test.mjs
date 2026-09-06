@@ -1123,3 +1123,49 @@ test("B4: a quest a player has completed survives losing its last step", async (
   const guarded = repair(structuredClone(m), [], { liveState });
   assert.ok(guarded.manifest.quests.some((x) => x.id === q.id), "a completed quest must not be erased");
 });
+
+// -------------------------------------------- a lost zone is not a lost world
+
+test("B4 GATE: losing a zone does not brick the world", async () => {
+  // Every reference to a removed zone is a schema BLOCKER, schema findings
+  // carry no `fix`, and playtestAndRepair used to return on round one the
+  // moment no FINDING named a repair — before ever reaching the consistency
+  // pass, which is the one thing that could have mended them. So one missing
+  // label rejected a world permanently, with a note saying nothing could be
+  // done, from a pass that could have done it.
+  const m = await goodWorld("Zone Loss Probe", "w_zoneloss");
+  assert.ok(m.zones.length > 2, "this probe needs a world with several zones");
+  const gone = m.zones.at(-1).id;
+  const before = { structures: m.structures.length, npcs: m.npcs.length };
+  assert.ok(m.structures.some((s) => s.zone === gone), "the fixture needs buildings in the zone that vanishes");
+  m.zones = m.zones.filter((z) => z.id !== gone);
+  assert.equal(validateManifest(m).ok, false, "the damage must really be a schema error, or this proves nothing");
+
+  const out = await playtestAndRepair(m);
+  assert.equal(out.passed, true, `verdict ${out.verdict}: ${out.note || JSON.stringify(out.rounds.at(-1).findings.slice(0, 3))}`);
+  assert.ok(validateManifest(out.manifest).ok, JSON.stringify(validateManifest(out.manifest).errors.slice(0, 3)));
+
+  // The reference goes; the content stays. A building is still standing where
+  // it stands — what was lost is the name of the district it was in.
+  assert.equal(out.manifest.structures.length, before.structures, "buildings were deleted over a lost label");
+  assert.equal(out.manifest.npcs.length, before.npcs, "characters were deleted over a lost label");
+  for (const s of out.manifest.structures) assert.notEqual(s.zone, gone);
+  for (const n of out.manifest.npcs) assert.notEqual(n.zone, gone);
+  assert.ok(!out.manifest.navigation.links.some((l) => l.from === gone || l.to === gone), "a route to nowhere must go");
+});
+
+test("B4: the consistency pass runs even when no finding names a repair", async () => {
+  // The general form of the bug above: repair() does work that no validator
+  // asks for, so the loop must not decide there is nothing to do by reading the
+  // findings alone.
+  const m = await goodWorld("Consistency Probe", "w_consistency");
+  const gone = m.zones.at(-1).id;
+  m.zones = m.zones.filter((z) => z.id !== gone);
+  const findings = critique(m, {}).findings;
+  assert.ok(findings.length > 0, "the damaged world must have findings");
+  assert.equal(findings.some((f) => f.fix), false, "and none of them may name a fix, or this tests the wrong path");
+
+  const r = repair(m, []);   // no findings at all — only the consistency pass
+  assert.ok(r.applied.length > 0, "the consistency pass must still do its work");
+  assert.ok(validateManifest(r.manifest).ok, JSON.stringify(validateManifest(r.manifest).errors.slice(0, 3)));
+});

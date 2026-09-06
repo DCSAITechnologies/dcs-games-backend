@@ -815,6 +815,45 @@ export function repair(manifest, findings, { liveState = null } = {}) {
   }
   if (clearedRefs) applied.push({ fix: "clear_dangling_npc_behavior_refs", cleared: clearedRefs });
 
+  // A zone that is gone leaves the same kind of wreckage, and used to leave it
+  // permanently. Every reference to it is a schema BLOCKER, schema findings
+  // carry no `fix`, and so the whole pass bailed out on round one with "no
+  // automatic repair applies to these findings" — a world bricked by one
+  // missing label while the analogous cases just above were being cleaned up
+  // without comment.
+  //
+  // The reference goes, not the entity. The building is still standing where it
+  // stands and the character is still who they are; what was lost is the name of
+  // the district they were in. Deleting them over a lost label would destroy
+  // real content, and inventing a replacement district would be a fabrication.
+  // `zone` is optional in the schema but must resolve when present, which is
+  // exactly what makes clearing it the correct and sufficient repair.
+  const zoneIds = new Set(m.zones.map((z) => z.id));
+  let clearedZones = 0;
+  const forgetZone = (holder) => {
+    if (holder?.zone && !zoneIds.has(holder.zone)) { holder.zone = null; clearedZones++; }
+  };
+  for (const n of m.npcs) forgetZone(n);
+  for (const st of m.structures) forgetZone(st);
+  for (const sp of m.spawn?.player_spawns || []) forgetZone(sp);
+  for (const z of m.zones) {
+    if (z.parent_zone && !zoneIds.has(z.parent_zone)) { z.parent_zone = null; clearedZones++; }
+  }
+  if (clearedZones) applied.push({ fix: "clear_dangling_zone_refs", cleared: clearedZones });
+
+  // A link to nowhere is a route the player can never take. Unlike the entities
+  // above there is nothing left to keep: the edge IS the reference.
+  if (Array.isArray(m.navigation?.links)) {
+    const beforeL = m.navigation.links.length;
+    m.navigation.links = m.navigation.links.filter((l) => zoneIds.has(l?.from) && zoneIds.has(l?.to));
+    if (m.navigation.links.length < beforeL) applied.push({ fix: "prune_dangling_navigation_links", removed: beforeL - m.navigation.links.length });
+  }
+  if (Array.isArray(m.navigation?.walkable_zones)) {
+    const beforeW = m.navigation.walkable_zones.length;
+    m.navigation.walkable_zones = m.navigation.walkable_zones.filter((w) => zoneIds.has(w?.zone));
+    if (m.navigation.walkable_zones.length < beforeW) applied.push({ fix: "prune_dangling_walkable_zones", removed: beforeW - m.navigation.walkable_zones.length });
+  }
+
   const npcIds = new Set(m.npcs.map((n) => n.id));
   let prunedSteps = 0;
   const droppedQuests = [];
@@ -930,9 +969,17 @@ export async function playtestAndRepair(manifest, { maxRounds = 3, liveState = n
       return { manifest: current, passed: verdict.passed, verdict: verdict.verdict, rounds, repairs: rounds.flatMap((r) => r.repairs || []) };
     }
     const fixable = verdict.findings.filter((f) => f.fix);
-    if (!fixable.length) {
-      return { manifest: current, passed: false, verdict: verdict.verdict, rounds, repairs: [], note: "no automatic repair applies to these findings" };
-    }
+    // Not bailing out when no FINDING names a repair is deliberate.
+    //
+    // This used to return immediately in that case, which was true when every
+    // repair was driven by a finding and stopped being true when the internal
+    // consistency pass was added: that pass fixes things no validator names,
+    // and it lives inside repair(). Schema findings carry no `fix` — there is
+    // no single repair for "schema error" — so a world whose ONLY problems were
+    // schema errors could never reach the one pass that mends them. Lose a zone
+    // and every reference to it became a permanent BLOCKER: rejected on round
+    // one, with a note saying nothing could be done, by a pass that could have
+    // done it. Whether anything actually changed is already decided below.
     const r = repair(current, fixable, { liveState });
     rounds[rounds.length - 1].repairs = r.applied;
     rounds[rounds.length - 1].skipped_repairs = r.skipped;
@@ -943,7 +990,9 @@ export async function playtestAndRepair(manifest, { maxRounds = 3, liveState = n
         // "NEEDS_WORK" would imply another round might help when none will.
         manifest: current, passed: false, verdict: "REJECTED", rounds,
         repairs: rounds.flatMap((x) => x.repairs || []),
-        note: "no repair could be applied to the remaining findings",
+        note: fixable.length
+          ? "no repair could be applied to the remaining findings"
+          : "no automatic repair applies to these findings",
       };
     }
     current = r.manifest;
