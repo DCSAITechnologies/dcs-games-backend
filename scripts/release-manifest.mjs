@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // A7 — release manifest. Records exactly what is being deployed, so a rollback
 // target is a fact rather than a memory.
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -32,6 +32,61 @@ function treeDigest(dir, filter = () => true) {
   return { digest: h.digest("hex"), files: files.length };
 }
 
+/**
+ * The rollback block used to be a hand-written string naming three bundle
+ * files. A string cannot notice that a bundle is eight commits behind the
+ * repository it is supposed to be able to restore -- which is exactly what had
+ * happened to the frontend bundle, in a repository that has NO REMOTE and
+ * therefore no second copy of its history anywhere.
+ *
+ * So this reads the rollback directory, verifies each bundle with git, and
+ * records whether the CURRENT head of each repository is actually inside one.
+ * Nothing here is asserted; every field is read back out of git.
+ */
+function bundleFacts(file) {
+  const heads = [];
+  const lh = spawnSync("git", ["bundle", "list-heads", file], { encoding: "utf8" });
+  if (lh.status === 0) {
+    for (const line of lh.stdout.trim().split("\n").filter(Boolean)) {
+      const [sha, ...ref] = line.trim().split(/\s+/);
+      heads.push({ sha, ref: ref.join(" ") });
+    }
+  }
+  const v = spawnSync("git", ["bundle", "verify", file], { encoding: "utf8" });
+  return {
+    file: path.basename(file),
+    bytes: fs.statSync(file).size,
+    sha256: crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"),
+    // git's own words, not ours: a bundle is only restorable on its own if it
+    // "records a complete history".
+    self_contained: v.status === 0 && /records a complete history/.test(String(v.stdout) + String(v.stderr)),
+    heads,
+  };
+}
+
+function rollbackInventory(dir) {
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir).filter((f) => f.endsWith(".bundle")).sort().map((f) => bundleFacts(path.join(dir, f)));
+}
+
+/** Is this repository's HEAD commit the tip of a ref inside one of the bundles? */
+function preservation(label, repoDir, inventory) {
+  const head = git(repoDir, ["rev-parse", "HEAD"]);
+  const holder = inventory.find((b) => b.heads.some((h) => h.sha === head));
+  return {
+    head,
+    preserved_in_a_bundle: !!holder,
+    bundle: holder ? holder.file : null,
+    has_git_remote: (git(repoDir, ["remote"]) || "") !== "",
+    note: holder
+      ? null
+      : `NOT PRESERVED: no bundle in the rollback directory has ${label} HEAD ${String(head).slice(0, 7)} as a ref tip. Re-cut a bundle before relying on rollback.`,
+  };
+}
+
+const ROLLBACK_DIR = path.resolve(GB, "../../DCS_GAMES_SPRINT_SEP2026/rollback");
+const rollbackBundles = rollbackInventory(ROLLBACK_DIR);
+
 const manifest = {
   generated_at: new Date().toISOString(),
   release: process.env.DCS_RELEASE || `sprint-${new Date().toISOString().slice(0, 10)}`,
@@ -61,9 +116,15 @@ const manifest = {
     forensic_seed: "QUARANTINED — 0002_seed.sql replaced by an abort stub; original preserved under forensics/",
   },
   rollback: {
-    bundles: "DCS_GAMES_SPRINT_SEP2026/rollback/{frontend-live,backend-gb,schema-lineage}.bundle",
-    restore: "git clone <bundle> <dir>",
+    directory: "DCS_GAMES_SPRINT_SEP2026/rollback",
+    bundles_glob: "DCS_GAMES_SPRINT_SEP2026/rollback/*.bundle",
+    restore: "git clone <bundle> <dir>   # step-by-step: rollback/RESTORE_FRONTEND_FROM_BUNDLE.md",
     runbook: "DCS_GAMES_SPRINT_SEP2026/RUNBOOK_DEPLOY_ROLLBACK.md",
+    bundles: rollbackBundles,
+    preservation: {
+      backend: preservation("the backend", GB, rollbackBundles),
+      frontend: preservation("the frontend", SITE, rollbackBundles),
+    },
   },
 };
 
@@ -103,3 +164,10 @@ manifest.estate_root_documents = snapped;
 fs.writeFileSync(out, JSON.stringify(manifest, null, 2) + "\n");
 console.log(JSON.stringify(manifest, null, 2));
 console.error(`\nwritten: ${out}`);
+
+// A manifest nobody reads the warnings out of is a manifest that documents a
+// gap instead of closing it. Say it on stderr, where a release operator sees it.
+for (const [label, p] of Object.entries(manifest.rollback.preservation)) {
+  if (!p.preserved_in_a_bundle) console.error(`WARNING: ${p.note}`);
+  if (!p.has_git_remote) console.error(`WARNING: the ${label} repository has NO GIT REMOTE. Its history exists only on this machine plus whatever bundle is in ${manifest.rollback.directory}. Copy that directory off this machine.`);
+}

@@ -170,9 +170,21 @@ test("A3 GATE: the world survives a full process restart and loads canonically i
   assert.deepEqual(after_, before, "the manifest must be byte-equivalent across the restart");
 });
 
-test("A3: IDOR — another creator cannot read the draft", async () => {
-  const r = await req(`/worlds/${generatedId}/manifest`, { headers: auth(MALLORY) });
-  assert.equal(r.status, 403);
+test("A3: IDOR — another creator cannot read the draft, or learn that it exists", async () => {
+  // 404, not 403. A 403 here said "this world exists and is not yours", which
+  // let an unauthenticated caller tell a real world id from an invented one on
+  // every route. The reply to someone who may not see a world is now the same
+  // whether or not it is there — and it must match in BODY too, since a
+  // differing detail string leaks it just as well as a differing status.
+  const mine = await req(`/worlds/${generatedId}/manifest`, { headers: auth(MALLORY) });
+  const invented = await req(`/worlds/w3_does_not_exist_at_all/manifest`, { headers: auth(MALLORY) });
+  assert.equal(mine.status, 404);
+  assert.equal(invented.status, 404);
+  const a = await mine.json(), b = await invented.json();
+  assert.equal(a.error, b.error, "the error code must not distinguish the two");
+
+  // The owner still gets their own draft.
+  assert.equal((await req(`/worlds/${generatedId}/manifest`, { headers: auth(ALICE) })).status, 200);
 });
 
 test("A3: IDOR — another creator cannot overwrite the world", async () => {
