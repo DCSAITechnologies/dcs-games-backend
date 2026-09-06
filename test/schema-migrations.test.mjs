@@ -151,3 +151,41 @@ dbTest("A2 GATE: forward migrate then restore from a dump reproduces the same sc
     await psqlExec(ADMIN, `drop database if exists ${dst};`).catch(() => {});
   }
 });
+
+dbTest("B15 GATE: money is dark at the DATABASE level, not only in application code", async () => {
+  const db = rnd();
+  try {
+    const { dsn } = await proveReproducible(ADMIN, db);
+
+    // A test-mode listing cannot carry a price, whatever the service believes.
+    await assert.rejects(
+      () => psqlExec(dsn, `insert into public.dcsgames_listings(id, seller_id, title, price_minor, test_mode) values ('l1','s','Evil',49900,true);`),
+      /dcsgames_listings_dark_price/,
+      "the database must refuse a priced test-mode listing"
+    );
+
+    // A test-mode ledger entry cannot carry money.
+    await assert.rejects(
+      () => psqlExec(dsn, `insert into public.dcsgames_ledger(ref,buyer_id,gross_minor,seller_minor,platform_minor,test_mode) values ('lgr1','b',10000,7000,3000,true);`),
+      /dcsgames_ledger_dark_amount/,
+      "the database must refuse a funded test-mode ledger entry"
+    );
+
+    // And a split must always balance, even outside test mode.
+    await assert.rejects(
+      () => psqlExec(dsn, `insert into public.dcsgames_ledger(ref,buyer_id,gross_minor,seller_minor,platform_minor,test_mode) values ('lgr2','b',10000,7000,1000,false);`),
+      /split_balances/,
+      "an unbalanced split must never be storable"
+    );
+
+    // A legitimate zero-value row still works, so the guard is not simply blocking everything.
+    await psqlExec(dsn, `insert into public.dcsgames_listings(id, seller_id, title) values ('l_ok','s','Ashfall');`);
+    assert.equal(await psqlScalar(dsn, "select price_minor from public.dcsgames_listings where id='l_ok';"), "0");
+
+    // Ownership carries the same guard.
+    await assert.rejects(
+      () => psqlExec(dsn, `insert into public.dcsgames_ownership(id, owner_id, acquired_price_minor, test_mode) values ('o1','u',500,true);`),
+      /dcsgames_ownership_dark_price/
+    );
+  } finally { await psqlExec(ADMIN, `drop database if exists ${db};`).catch(() => {}); }
+});

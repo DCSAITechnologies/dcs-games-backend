@@ -28,6 +28,7 @@ import { planExpansion, planEdit } from "./src/v3/expansion/planner.mjs";       
 import { applyDelta, verifyPreservation, emptyLiveState } from "./src/v3/expansion/delta.mjs";
 import { createWorldMemory } from "./src/v3/memory/world-memory.mjs";           // B7: factual world chronology
 import { createCompanionService } from "./src/v3/companion/companion.mjs";      // B5: personal AI companion
+import { createMarketplaceService } from "./src/core/marketplace.mjs";        // B15: marketplace backend, money DARK
 import { createProgressionService } from "./src/core/progression.mjs";        // B15: retention from measured data only
 import { createSocialService } from "./src/core/social.mjs";                    // B15: durable profiles, friends, parties, teams, studios, discovery
 import { createSafetyService } from "./src/core/safety.mjs";                    // A5: age tiers, consent, report/block, moderation audit
@@ -62,6 +63,7 @@ const companions = createCompanionService({ worldMemory });                  // 
 let progression: any = null;                                                 // B15, constructed after social below
 const social = createSocialService();                                        // B15: replaces the in-memory fixture users
 progression = createProgressionService({ social, worldMemory });
+const market = createMarketplaceService();                                   // B15: prepared, and dark at the schema level
 const safety = createSafetyService();                                        // A5: real persistence, so moderation output can never be faked
 const repo = createWorldRepository();                                        // A3: replaces the process-local Map + swallowed best-effort insert
 console.log("A3 world store:", repo.kind);
@@ -172,6 +174,7 @@ const server = http.createServer(async (req, res) => {
       manifest_version: MANIFEST_VERSION,
       social: { profiles: true, friends: true, parties: true, teams: true, studios: true, discovery: true, ...social.describe() },
       safety_persistence: safety.describe(),
+      marketplace: market.describe(),
       v3: { assembly_router: true, playtest_gate: true, expansion_delta: true, world_memory: true, companion: true, chat_edit: true },
       safety: { age_gating: true, report_block: true, parental_consent: true, media_consent: true, automated_content_moderation: false, minor_onboarding_enabled: false },
       netcode: "ws-separate-service", ts: new Date().toISOString(),
@@ -323,6 +326,58 @@ const server = http.createServer(async (req, res) => {
     if (url === "/safety/consent/media" && method === "GET") {
       const me = await mustBe(req, cid);
       return send(res, 200, { ok: true, consents: await safety.mediaConsents(me.id) });
+    }
+
+    // ---- B15 marketplace. Prepared, gated, and DARK at the schema level ----
+    if (url === "/v3/marketplace" && method === "GET") {
+      const q = new URLSearchParams((req.url || "").split("?")[1] || "");
+      return send(res, 200, { ok: true, ...(await market.browse({ kind: q.get("kind"), sellerId: q.get("seller") })) });
+    }
+    if (url === "/v3/marketplace/storefronts" && method === "POST") {
+      const me = await mustBeInternalTester(req, cid);
+      const b = await readBody(req);
+      return send(res, 201, { ok: true, storefront: await market.createStorefront(me.id, { name: b.name, description: b.description, studioId: b.studio_id }) });
+    }
+    if (url === "/v3/marketplace/listings" && method === "POST") {
+      const me = await mustBeInternalTester(req, cid);
+      const b = await readBody(req);
+      // Only your own world may be listed.
+      if (b.world_id) await repo.get(b.world_id, { requesterId: me.id, requireOwner: true });
+      const listing = await market.createListing(me.id, {
+        storefrontId: b.storefront_id, worldId: b.world_id, kind: b.kind || "world",
+        title: b.title, description: b.description, priceMinor: b.price_minor ?? 0,
+      });
+      return send(res, 201, { ok: true, listing, payments_live: PAYMENTS_LIVE });
+    }
+    {
+      let mm = url.match(/^\/v3\/marketplace\/listings\/([^/]+)$/);
+      if (mm && method === "DELETE") {
+        const me = await mustBeInternalTester(req, cid);
+        return send(res, 200, { ok: true, listing: await market.unlist(me.id, mm[1]) });
+      }
+      mm = url.match(/^\/v3\/marketplace\/listings\/([^/]+)\/acquire$/);
+      if (mm && method === "POST") {
+        const me = await mustBeInternalTester(req, cid);
+        return send(res, 200, { ok: true, ...(await market.acquire(me.id, mm[1])) });
+      }
+    }
+    if (url === "/v3/marketplace/owned" && method === "GET") {
+      const me = await mustBe(req, cid);
+      return send(res, 200, { ok: true, owned: await market.ownedBy(me.id), payments_live: PAYMENTS_LIVE });
+    }
+    if (url === "/v3/marketplace/ledger" && method === "GET") {
+      const me = await mustBe(req, cid);
+      return send(res, 200, { ok: true, ...(await market.ledgerFor(me.id)) });
+    }
+    if (url === "/v3/marketplace/split" && method === "GET") {
+      // Modelling only: what a split WOULD be. It never settles anything.
+      const q = new URLSearchParams((req.url || "").split("?")[1] || "");
+      return send(res, 200, { ok: true, ...market.splitFor(q.get("gross_minor") || 0), payments_live: PAYMENTS_LIVE });
+    }
+    if (url === "/v3/marketplace/assert-dark" && method === "GET") {
+      // A public, checkable statement that no money exists anywhere in here.
+      const r = await market.assertDark();
+      return send(res, r.dark ? 200 : 500, { ok: r.dark, ...r, payments_live: PAYMENTS_LIVE });
     }
 
     // ---- B15 retention and the creator dashboard, from measured data only ----
