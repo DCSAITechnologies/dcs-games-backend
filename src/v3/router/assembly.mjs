@@ -1,0 +1,354 @@
+// B1 — the DCS World Assembly Router.
+//
+// Six lanes, each with a ranked provider list ending in a deterministic
+// fallback, composed into one WorldManifestV3. The router is the only thing that
+// knows a provider exists; the manifest records which one answered and nothing
+// else depends on it.
+//
+// It is deliberately NOT "replace Cerebras with one expensive LLM":
+//   world_architect  premium reasoning designs space and gameplay
+//   fast_inference   cheap high-volume classification and metadata
+//   spatial          terrain and navigation, provider-neutral
+//   asset_3d         curated archetypes now, external provider when one exists
+//   gameplay         declarative behaviour specs for doors, lifts, vehicles, AI
+//   media            images, voice, video — optional, never blocking
+import crypto from "node:crypto";
+import { Lane, LANES, STATUS } from "../providers/contract.mjs";
+import { architectAdapters, fastAdapters, gameplayAdapters } from "../providers/text.mjs";
+import { asset3dAdapters } from "../providers/asset3d.mjs";
+import { mediaAdapters } from "../providers/media.mjs";
+import { spatialAdapters } from "../providers/spatial.mjs";
+import { emptyManifest, validateManifest, MANIFEST_VERSION } from "../manifest/schema.mjs";
+import { hashString } from "../providers/local-planner.mjs";
+
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const num = (v, d = 0) => (typeof v === "number" && isFinite(v) ? v : d);
+const slug = (s, fallback) => {
+  const t = String(s ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  return t || fallback;
+};
+
+export function createAssemblyRouter(env = process.env) {
+  const lanes = {
+    [LANES.WORLD_ARCHITECT]: new Lane(LANES.WORLD_ARCHITECT, architectAdapters(env)),
+    [LANES.FAST_INFERENCE]: new Lane(LANES.FAST_INFERENCE, fastAdapters(env)),
+    [LANES.SPATIAL]: new Lane(LANES.SPATIAL, spatialAdapters(env)),
+    [LANES.ASSET_3D]: new Lane(LANES.ASSET_3D, asset3dAdapters(env)),
+    [LANES.GAMEPLAY]: new Lane(LANES.GAMEPLAY, gameplayAdapters(env)),
+    [LANES.MEDIA]: new Lane(LANES.MEDIA, mediaAdapters(env)),
+  };
+
+  return {
+    lanes,
+
+    /** Provider status for every lane, without invoking anything. */
+    async describe() {
+      const out = [];
+      for (const lane of Object.values(lanes)) out.push(await lane.describe());
+      return { manifest_version: MANIFEST_VERSION, lanes: out };
+    },
+
+    /**
+     * Assemble a complete WorldManifestV3 from a prompt.
+     *
+     * @param {{prompt:string, worldId:string, creatorId?:string, seed?:number, style?:string, media?:boolean}} req
+     * @returns {Promise<{manifest:object, validation:object, provenance:Array, degraded:Array}>}
+     */
+    async assemble(req) {
+      const prompt = String(req.prompt || "").trim();
+      if (!prompt) throw new TypeError("assemble() needs a prompt");
+      const seed = req.seed ?? hashString(prompt);
+      const provenance = [];
+      const degraded = [];
+
+      const record = (r) => {
+        provenance.push(r.provenance);
+        for (const a of r.attempts || []) degraded.push({ lane: r.provenance.lane, provider: a.provider, reason: a.reason });
+        return r.value;
+      };
+
+      // ---- 1. world architect ------------------------------------------
+      const plan = record(await lanes[LANES.WORLD_ARCHITECT].run({ prompt, seed, style: req.style, constraints: req.constraints }));
+
+      // ---- 2. fast inference: metadata -----------------------------------
+      const meta = record(await lanes[LANES.FAST_INFERENCE].run({ prompt, title: plan.title, zones: plan.zones }));
+
+      // ---- 3. spatial: terrain + navigation ------------------------------
+      const spatial = record(await lanes[LANES.SPATIAL].run({ seed, size: plan.size, zones: plan.zones, roads: plan.roads, structures: plan.structures, style: plan.style }));
+
+      // ---- 4. assets: one entry per archetype, referenced many times ------
+      const assetReq = {
+        style: plan.style || meta.mood,
+        seed,
+        requests: [
+          ...(plan.structures || []).map((s) => ({ archetype: s.archetype, kindHint: "building", footprint: s.footprint })),
+          ...(plan.npcs || []).map(() => ({ archetype: "humanoid", kindHint: "character" })),
+          ...(plan.items || []).map((i) => ({ archetype: i.kind, kindHint: "prop" })),
+        ],
+      };
+      const assetResult = record(await lanes[LANES.ASSET_3D].run(assetReq));
+
+      // ---- 5. gameplay behaviour -----------------------------------------
+      const gameplay = record(await lanes[LANES.GAMEPLAY].run({
+        seed, genre: meta.genre || plan.genre,
+        zones: plan.zones, structures: plan.structures, npcs: plan.npcs, items: plan.items,
+      }));
+
+      // ---- compose ------------------------------------------------------
+      const manifest = compose({ req, plan, meta, spatial, assets: assetResult.assets, gameplay, seed, provenance });
+
+      // ---- 6. media (optional, never blocking) ---------------------------
+      if (req.media) {
+        const m = await lanes[LANES.MEDIA].run({
+          kind: "image",
+          label: manifest.meta.title,
+          prompt: `Key art for a game world: ${manifest.meta.title}. ${manifest.meta.style || ""} ${plan.gameplay_loop || ""}`.slice(0, 400),
+          width: 1024, height: 576,
+        });
+        provenance.push(m.provenance);
+        if (m.value?.uri) {
+          manifest.assets.push({
+            id: "asset_thumbnail",
+            kind: "effect",
+            format: "external",
+            uri: m.value.uri,
+            license: { source: m.provenance.provider, commercial_use: "internal-testing-only" },
+            provenance: { lane: "media", provider: m.provenance.provider, placeholder: !!m.value.placeholder },
+          });
+          manifest.media.thumbnail_ref = "asset_thumbnail";
+          manifest.media.thumbnail_is_placeholder = !!m.value.placeholder;
+        }
+      }
+
+      manifest.provenance.generated_by = provenance;
+      manifest.provenance.source_prompt_hash = crypto.createHash("sha256").update(prompt).digest("hex");
+
+      const validation = validateManifest(manifest);
+      return { manifest, validation, provenance, degraded };
+    },
+  };
+}
+
+// ------------------------------------------------------------------- compose
+//
+// Turns lane outputs into a valid WorldManifestV3. It is defensive on purpose:
+// a model's output is untrusted input, so ids are re-slugged, positions are
+// clamped into their zone, and any reference that does not resolve is DROPPED
+// rather than guessed at — a dangling reference must reach the B4 critic as a
+// missing feature, never as an invented one.
+
+function compose({ req, plan, meta, spatial, assets, gameplay, seed, provenance }) {
+  const m = emptyManifest({
+    worldId: req.worldId,
+    title: plan.title || "Untitled World",
+    creatorId: req.creatorId ?? null,
+    seed,
+  });
+
+  const size = {
+    w: clamp(num(plan.size?.w, 260), 80, 2000),
+    h: clamp(num(plan.size?.h, 260), 80, 2000),
+  };
+
+  m.meta = {
+    ...m.meta,
+    prompt: req.prompt,
+    genre: meta.genre || plan.genre || null,
+    style: plan.style || meta.mood || null,
+    description: meta.summary || plan.gameplay_loop || null,
+    tags: Array.isArray(meta.tags) ? meta.tags.slice(0, 12) : [],
+    maturity: ["13+", "16+", "18+"].includes(plan.maturity) ? plan.maturity : (["13+", "16+", "18+"].includes(meta.maturity) ? meta.maturity : "13+"),
+    gameplay_loop: plan.gameplay_loop || null,
+  };
+
+  m.environment = {
+    ...m.environment,
+    weather: plan.environment?.weather || "clear",
+    time_of_day: clamp(num(plan.environment?.time_of_day, 0.5), 0, 1),
+    palette: plan.palette || null,
+  };
+
+  m.terrain = spatial.terrain;
+  m.physics = { ...m.physics, ...(spatial.physics || {}) };
+  m.navigation = spatial.navigation;
+
+  // ---- zones ---------------------------------------------------------------
+  const zoneById = new Map();
+  m.zones = (plan.zones || []).map((z, i) => {
+    const id = slug(z.id || z.name, `zone_${i}`);
+    const b = Array.isArray(z.bounds) && z.bounds.length === 4 ? z.bounds.map((n) => num(n)) : [0, 0, size.w, size.h];
+    const bounds = [
+      clamp(Math.min(b[0], b[2]), 0, size.w - 2),
+      clamp(Math.min(b[1], b[3]), 0, size.h - 2),
+      clamp(Math.max(b[0], b[2]), 2, size.w),
+      clamp(Math.max(b[1], b[3]), 2, size.h),
+    ];
+    if (bounds[2] - bounds[0] < 8) bounds[2] = clamp(bounds[0] + 8, 0, size.w);
+    if (bounds[3] - bounds[1] < 8) bounds[3] = clamp(bounds[1] + 8, 0, size.h);
+    const zone = {
+      id, name: z.name || id, kind: ZONE_KIND(z.kind), bounds,
+      parent_zone: null, tags: [], ambience: z.description || null,
+      density: num(z.density, 0.5),
+    };
+    zoneById.set(id, zone);
+    return zone;
+  });
+  if (!m.zones.length) {
+    const zone = { id: "zone_main", name: "Main", kind: "district", bounds: [0, 0, size.w, size.h], parent_zone: null, tags: [], ambience: null, density: 0.5 };
+    m.zones = [zone];
+    zoneById.set(zone.id, zone);
+  }
+
+  const inZone = (pos, zone) => {
+    const [x0, z0, x1, z1] = zone.bounds;
+    return { x: clamp(num(pos?.x, (x0 + x1) / 2), x0 + 1, x1 - 1), y: num(pos?.y, 0), z: clamp(num(pos?.z, (z0 + z1) / 2), z0 + 1, z1 - 1) };
+  };
+  const pickZone = (id, i) => zoneById.get(slug(id, "")) || m.zones[i % m.zones.length];
+
+  // ---- assets --------------------------------------------------------------
+  const assetById = new Map();
+  for (const a of assets || []) if (!assetById.has(a.id)) assetById.set(a.id, a);
+  m.assets = Array.from(assetById.values());
+
+  const assetFor = (archetype, kindHint) => {
+    const direct = `asset_${slug(archetype, "")}`;
+    if (assetById.has(direct)) return direct;
+    const byKind = m.assets.find((a) => a.kind === (kindHint === "character" ? "character" : kindHint === "prop" ? "prop" : "building"));
+    return byKind ? byKind.id : (m.assets[0]?.id ?? null);
+  };
+
+  // ---- structures ----------------------------------------------------------
+  const structById = new Map();
+  m.structures = (plan.structures || []).map((s, i) => {
+    const zone = pickZone(s.zone, i);
+    const id = slug(s.id, `struct_${i}`);
+    const fp = s.footprint || { w: 8, d: 8, h: 6 };
+    const ref = assetFor(s.archetype, "building");
+    const st = {
+      id, zone: zone.id, asset_ref: ref,
+      transform: {
+        position: inZone(s.position, zone),
+        rotation: { x: 0, y: num(s.rotation_y, 0), z: 0 },
+        scale: { x: 1, y: 1, z: 1 },
+      },
+      footprint: { w: num(fp.w, 8), d: num(fp.d, 8), h: num(fp.h, 6) },
+      interactable: !!s.enterable,
+      enterable: !!s.enterable,
+      purpose: s.purpose || s.archetype || null,
+      portals: [],
+      owner_id: null,
+    };
+    structById.set(id, st);
+    return st;
+  }).filter((s) => s.asset_ref);
+
+  // ---- npcs ----------------------------------------------------------------
+  const npcById = new Map();
+  m.npcs = (plan.npcs || []).map((n, i) => {
+    const zone = pickZone(n.zone, i);
+    const id = slug(n.id, `npc_${i}`);
+    const npc = {
+      id, name: n.name || id, role: n.role || null, zone: zone.id,
+      spawn: inZone(n.position || n.spawn, zone),
+      asset_ref: assetFor("humanoid", "character"),
+      behavior_ref: null,
+      dialogue: { seed: n.dialogue_seed || null, lines: [] },
+      schedule: [], faction: null, stats: null,
+    };
+    npcById.set(id, npc);
+    return npc;
+  }).filter((n) => n.asset_ref);
+
+  // ---- items ---------------------------------------------------------------
+  const itemById = new Map();
+  m.items = (plan.items || []).map((it, i) => {
+    const id = slug(it.id, `item_${i}`);
+    const item = { id, name: it.name || id, kind: it.kind || "misc", asset_ref: assetFor(it.kind, "prop"), stackable: false, effects: [] };
+    itemById.set(id, item);
+    return item;
+  }).filter((it) => it.asset_ref);
+
+  const resolves = (ref) => {
+    const r = slug(ref, "");
+    return zoneById.has(r) || structById.has(r) || npcById.has(r) || itemById.has(r) ? r : null;
+  };
+
+  // ---- behaviours + interactions ------------------------------------------
+  const behaviorIds = new Set();
+  m.behaviors = (gameplay.behaviors || []).map((b, i) => {
+    const id = slug(b.id, `behavior_${i}`);
+    if (behaviorIds.has(id) || (!b.spec && !b.script)) return null;
+    behaviorIds.add(id);
+    return { id, kind: BEHAVIOR_KIND(b.kind), spec: b.spec || null, script: null, inputs: b.inputs || null, outputs: b.outputs || null };
+  }).filter(Boolean);
+
+  m.interactions = (gameplay.interactions || []).map((x, i) => {
+    const target = resolves(x.target_ref);
+    const beh = slug(x.behavior_ref, "");
+    // Drop rather than repair: a dangling interaction is a real gap and B4 must see it.
+    if (!target || !behaviorIds.has(beh)) return null;
+    return { id: slug(x.id, `interaction_${i}`), trigger: TRIGGER(x.trigger), target_ref: target, behavior_ref: beh, params: x.params || null };
+  }).filter(Boolean);
+
+  // Attach behaviours to their NPCs so the runtime does not have to search.
+  for (const x of m.interactions) {
+    const npc = npcById.get(x.target_ref);
+    if (npc && !npc.behavior_ref) npc.behavior_ref = x.behavior_ref;
+  }
+
+  // ---- quests --------------------------------------------------------------
+  const questIds = new Set();
+  m.quests = (plan.quests || []).map((q, i) => {
+    const id = slug(q.id, `quest_${i}`);
+    if (questIds.has(id)) return null;
+    questIds.add(id);
+    const steps = (q.steps || []).map((st, j) => {
+      const target = resolves(st.target);
+      return { id: slug(st.id, `step_${j}`), kind: STEP_KIND(st.kind), target, description: st.description || null };
+    });
+    return {
+      id, title: q.title || `Quest ${i + 1}`,
+      giver_npc: npcById.has(slug(q.giver_npc, "")) ? slug(q.giver_npc, "") : null,
+      zone: null,
+      difficulty: ["easy", "normal", "hard"].includes(q.difficulty) ? q.difficulty : "normal",
+      steps,
+      rewards: Array.isArray(q.rewards) ? q.rewards : (q.reward ? [q.reward] : []),
+      prerequisites: [],
+    };
+  }).filter((q) => q && q.steps.length > 0);
+
+  // ---- spawn ---------------------------------------------------------------
+  const firstZone = m.zones[0];
+  const spawnPos = spatial.spawn_hint || inZone({ x: (firstZone.bounds[0] + firstZone.bounds[2]) / 2, y: 0, z: (firstZone.bounds[1] + firstZone.bounds[3]) / 2 }, firstZone);
+  m.spawn = {
+    player_spawns: [{ id: "spawn_main", position: { ...spawnPos, y: num(spawnPos.y, 0) + 1 }, zone: firstZone.id }],
+    respawn_policy: "nearest",
+    safe_radius: 8,
+  };
+
+  // ---- everything else -----------------------------------------------------
+  m.multiplayer = { enabled: false, max_players: 8, authoritative: "server", replicated_refs: [], shared_zones: m.zones.map((z) => z.id) };
+  m.companion = { enabled: true, persona_ref: null, knowledge_scope: "world", memory_refs: [] };
+  m.expansion = { history: [], compatibility: { min_runtime: "3.0.0", migrated_from: null }, hooks: plan.expansion_hooks || [] };
+  m.runtime_config = {
+    ...m.runtime_config,
+    render_distance: clamp(Math.round(Math.max(size.w, size.h) * 0.9), 120, 600),
+    streaming: (m.structures.length + m.npcs.length) > 60,
+  };
+
+  return m;
+}
+
+// ------------------------------------------------------------------ coercion
+
+const ZONE_KINDS = ["district", "interior", "landmark", "wilderness", "transit", "arena", "instance"];
+const BEHAVIOR_KINDS = ["door", "elevator", "vehicle", "enemy_ai", "npc_ai", "combat", "quest_trigger", "switch", "container", "terminal", "platform", "hazard", "pickup", "teleporter"];
+const TRIGGERS = ["proximity", "interact", "enter_zone", "exit_zone", "timer", "quest_state", "damage", "collision"];
+const STEP_KINDS = ["reach", "talk", "collect", "deliver", "defeat", "activate", "survive", "escort", "solve"];
+
+const ZONE_KIND = (v) => (ZONE_KINDS.includes(v) ? v : "district");
+const BEHAVIOR_KIND = (v) => (BEHAVIOR_KINDS.includes(v) ? v : "switch");
+const TRIGGER = (v) => (TRIGGERS.includes(v) ? v : "interact");
+const STEP_KIND = (v) => (STEP_KINDS.includes(v) ? v : "reach");
+
+export { LANES, STATUS };
