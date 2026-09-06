@@ -645,3 +645,22 @@ test("R3: a comped plan raises the ALLOWANCE and does not raise the LEVEL", asyn
   assert.equal(me.level, "explorer");
   assert.equal(me.publish_credits, 10);
 });
+
+test("a client cannot award itself an achievement with an absurd play duration", async () => {
+  // progression grants "hour played" from total seconds_played, and `seconds`
+  // is reported by the client — so an unbounded value is an achievement anyone
+  // can grant themselves in one request. Nothing times a session server-side,
+  // so the number is clamped and marked self-reported rather than trusted.
+  const social = createSocialService(tmp());
+  const row = await social.recordPlay("w1", "u1", 999_999_999);
+  assert.ok(row.seconds <= 4 * 60 * 60, `an absurd duration must be clamped, got ${row.seconds}`);
+  assert.equal(row.seconds_clamped, true);
+  assert.equal(row.seconds_self_reported, true, "nothing on this estate timed this, and the row must say so");
+
+  const nonsense = await social.recordPlay("w1", "u1", "not-a-number");
+  assert.equal(nonsense.seconds, null, "an unparseable duration is unknown, not zero and not accepted");
+
+  const honest = await social.recordPlay("w1", "u1", 120);
+  assert.equal(honest.seconds, 120, "a plausible duration is still recorded exactly");
+  assert.equal(honest.seconds_clamped, false);
+});

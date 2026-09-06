@@ -31,6 +31,10 @@ import { createCollection, describeCollections } from "./collection.mjs";
 import { createSafetyService } from "./safety.mjs";
 import { computeLevel, publishCredits, canPublish } from "../cw1/identity-core.mjs";
 
+/** The longest single play session that will be believed from a client, in
+ *  seconds (4 hours). Nothing on this estate times a session server-side. */
+const MAX_SESSION_SECONDS = 4 * 60 * 60;
+
 const FRIEND_STATES = ["requested", "accepted", "blocked"];
 const TEAM_ROLES = ["owner", "admin", "member"];
 const STUDIO_ROLES = ["owner", "admin", "creator", "member"];
@@ -715,9 +719,19 @@ export function createSocialService(env = process.env, deps = {}) {
     /** Record a real play. Discovery ranks on these rows and nothing else. */
     async recordPlay(worldId, principalId, seconds = null) {
       if (!worldId) throw Errors.validation("world_id is required");
+      // `seconds` is reported by the client, and progression grants the
+      // "hour played" achievement from the total — so an unbounded number here
+      // is an achievement anyone can award themselves in one request. It is
+      // clamped to a plausible single session and marked as self-reported, so
+      // no later reader can mistake it for something the server timed.
+      const raw = seconds == null ? null : Number(seconds);
+      const clean = raw == null || !Number.isFinite(raw) ? null : Math.min(MAX_SESSION_SECONDS, Math.max(0, Math.round(raw)));
       return await plays.insert({
         id: crypto.randomUUID(), world_id: worldId, principal_id: principalId || null,
-        started_at: new Date().toISOString(), seconds: seconds == null ? null : Math.max(0, Math.round(seconds)),
+        started_at: new Date().toISOString(),
+        seconds: clean,
+        seconds_self_reported: clean != null,
+        seconds_clamped: clean != null && raw > MAX_SESSION_SECONDS,
       });
     },
 
