@@ -26,6 +26,7 @@ import { ensureV3 } from "./src/v3/manifest/migrate.mjs";                       
 import { playtestAndRepair } from "./src/v3/playtest/agent.mjs";                // B4: playtest -> critic -> repair
 import { planExpansion, planEdit } from "./src/v3/expansion/planner.mjs";       // B6/B8: expansion + chat editing
 import { forkWorld, attributionChain, forkPolicyOf, FORK_POLICIES } from "./src/v3/expansion/fork.mjs"; // remix/fork with provenance
+import { planStitch, recordStitch, stitchSummary, checkStitchPermission } from "./src/v3/expansion/stitch.mjs"; // 9.2: world stitching
 import { applyDelta, verifyPreservation, emptyLiveState, newDelta } from "./src/v3/expansion/delta.mjs";
 import { createWorldMemory } from "./src/v3/memory/world-memory.mjs";           // B7: factual world chronology
 import { createCompanionService } from "./src/v3/companion/companion.mjs";      // B5: personal AI companion
@@ -754,6 +755,77 @@ const server = http.createServer(async (req, res) => {
           provider: r.provenance.provider, status: r.provenance.status,
           world_version: saved.version, correlation_id: cid,
         });
+      }
+
+      // ---- 9.2 world stitching: join two worlds, preserving both ----------
+      mm = url.match(/^\/v3\/worlds\/([^/]+)\/stitch$/);
+      if (mm && method === "POST") {
+        const me = await mustBeInternalTester(req, cid);
+        await safety.requireCapability(me.id, "create");
+        const b = await readBody(req);
+        if (!b.guest_world_id) throw Errors.validation("guest_world_id is required", { correlationId: cid });
+
+        const hostRec = await repo.get(mm[1], { requesterId: me.id, requireOwner: true });
+        const guestRec = await repo.get(b.guest_world_id, { requesterId: me.id });
+        const host = { world_id: hostRec.world_id, owner_id: hostRec.owner_id, state: hostRec.state, version: hostRec.version, manifest: ensureV3(hostRec.manifest, { worldVersion: hostRec.version, creatorId: hostRec.owner_id }).manifest };
+        const guest = { world_id: guestRec.world_id, owner_id: guestRec.owner_id, state: guestRec.state, version: guestRec.version, manifest: ensureV3(guestRec.manifest, { worldVersion: guestRec.version, creatorId: guestRec.owner_id }).manifest };
+
+        const { delta, stitch } = planStitch(host, guest, { stitcherId: me.id, side: b.side || "east", gap: b.gap, label: b.label });
+        const live = { ...emptyLiveState(), ...(b.live_state || {}) };
+        const applied = applyDelta(host.manifest, delta, live);        // throws 409 if unsafe
+        const preserved = verifyPreservation(host.manifest, applied.manifest, live);
+        if (!preserved.ok) {
+          throw Errors.conflict("the stitch would have lost existing state", { correlationId: cid, meta: { problems: preserved.problems } });
+        }
+        recordStitch(applied.manifest, stitch);
+
+        const gate = await playtestAndRepair(applied.manifest);
+        if (!gate.passed) {
+          return send(res, 422, {
+            ok: false, error: "stitch_failed_playtest",
+            detail: "the joined world did not pass the playtest gate and was not saved",
+            verdict: gate.verdict, findings: gate.rounds.at(-1).findings.slice(0, 10),
+            stitch, correlation_id: cid,
+          });
+        }
+
+        const saved = await repo.upsert({ worldId: host.world_id, ownerId: me.id, manifest: gate.manifest, state: hostRec.state, title: gate.manifest.meta.title });
+        await worldMemory.record(host.world_id, {
+          kind: "expanded",
+          summary: `"${stitch.guest_title || stitch.guest_world_id}" was stitched into this world`,
+          worldVersion: gate.manifest.world_version, actorId: me.id, detail: { guest_world_id: stitch.guest_world_id, namespace: stitch.namespace },
+        });
+
+        return send(res, 200, {
+          ok: true, world_id: host.world_id,
+          world_version: gate.manifest.world_version, previous_version: applied.previous_version,
+          record_version: saved.version,
+          stitch, preserved: preserved.ok, playtest: gate.verdict,
+          summary: stitchSummary(gate.manifest),
+          correlation_id: cid,
+        });
+      }
+
+      mm = url.match(/^\/v3\/worlds\/([^/]+)\/stitch\/preview$/);
+      if (mm && method === "POST") {
+        // Dry run: what WOULD be joined, and whether it is permitted. Saves nothing.
+        const me = await mustBeInternalTester(req, cid);
+        const b = await readBody(req);
+        const hostRec = await repo.get(mm[1], { requesterId: me.id, requireOwner: true });
+        const guestRec = await repo.get(b.guest_world_id, { requesterId: me.id });
+        const host = { world_id: hostRec.world_id, owner_id: hostRec.owner_id, state: hostRec.state, version: hostRec.version, manifest: ensureV3(hostRec.manifest, { worldVersion: hostRec.version, creatorId: hostRec.owner_id }).manifest };
+        const guest = { world_id: guestRec.world_id, owner_id: guestRec.owner_id, state: guestRec.state, version: guestRec.version, manifest: ensureV3(guestRec.manifest, { worldVersion: guestRec.version, creatorId: guestRec.owner_id }).manifest };
+        const perm = checkStitchPermission(host, guest, me.id);
+        if (!perm.ok) return send(res, 200, { ok: true, permitted: false, ...perm, correlation_id: cid });
+        const { stitch } = planStitch(host, guest, { stitcherId: me.id, side: b.side || "east", gap: b.gap });
+        return send(res, 200, { ok: true, permitted: true, stitch, correlation_id: cid });
+      }
+
+      mm = url.match(/^\/v3\/worlds\/([^/]+)\/parts$/);
+      if (mm && method === "GET") {
+        const rec = await repo.get(mm[1], { requesterId: principal?.id ?? null });
+        const { manifest } = ensureV3(rec.manifest, { worldVersion: rec.version, creatorId: rec.owner_id });
+        return send(res, 200, { ok: true, world_id: rec.world_id, ...stitchSummary(manifest) });
       }
 
       // ---- remix / fork, with permanent attribution and money dark ---------

@@ -294,8 +294,18 @@ export function applyDelta(manifest, delta, liveState = emptyLiveState()) {
     next.navigation = next.navigation || { links: [], walkable_zones: [], navmesh_ref: null };
     next.navigation.links = [...(next.navigation.links || []), ...delta.navigation_links];
   }
-  // Every added zone needs a walkability record, or navigation validation has
-  // nothing to say about it.
+  // A delta may supply MEASURED walkability for the zones it brings (a stitch
+  // carries the guest's own figures). Anything it does not cover falls back to a
+  // default, so navigation validation always has something to check.
+  if (Array.isArray(delta.navigation_walkable) && delta.navigation_walkable.length) {
+    next.navigation = next.navigation || { links: [], walkable_zones: [], navmesh_ref: null };
+    next.navigation.walkable_zones = next.navigation.walkable_zones || [];
+    for (const w of delta.navigation_walkable) {
+      const i = next.navigation.walkable_zones.findIndex((x) => x.zone === w.zone);
+      if (i >= 0) next.navigation.walkable_zones[i] = w;
+      else next.navigation.walkable_zones.push(w);
+    }
+  }
   for (const z of delta.add?.zones || []) {
     next.navigation = next.navigation || { links: [], walkable_zones: [], navmesh_ref: null };
     next.navigation.walkable_zones = next.navigation.walkable_zones || [];
@@ -304,17 +314,12 @@ export function applyDelta(manifest, delta, liveState = emptyLiveState()) {
     }
   }
 
-  // --- reseat added structures on the (possibly extended) ground -----------
-  for (const st of delta.add?.structures || []) {
-    const live = (next.structures || []).find((x) => x.id === st.id);
-    if (live?.transform?.position) live.transform.position.y = terrainHeightAt(next.terrain, live.transform.position.x, live.transform.position.z);
-  }
-  for (const n of delta.add?.npcs || []) {
-    const live = (next.npcs || []).find((x) => x.id === n.id);
-    if (live?.spawn) live.spawn.y = terrainHeightAt(next.terrain, live.spawn.x, live.spawn.z);
-  }
-
   // --- terrain patch: only the named region changes -----------------------
+  //
+  // This MUST run before structures are reseated. It used to run after, so a
+  // delta that brought its own terrain (a stitched region, most obviously) had
+  // its buildings seated on the freshly-extended filler ground rather than on
+  // the terrain the delta actually supplied.
   if (delta.terrain_patch && next.terrain?.kind === "heightmap" && Array.isArray(next.terrain.data)) {
     const [x0, z0] = delta.terrain_patch.region;
     const cw = next.terrain.resolution?.cell_w || 1;
@@ -329,6 +334,16 @@ export function applyDelta(manifest, delta, liveState = emptyLiveState()) {
         if (i < next.terrain.data[j].length) next.terrain.data[j][i] = v;
       });
     });
+  }
+
+  // --- reseat added structures on the (possibly extended) ground -----------
+  for (const st of delta.add?.structures || []) {
+    const live = (next.structures || []).find((x) => x.id === st.id);
+    if (live?.transform?.position) live.transform.position.y = terrainHeightAt(next.terrain, live.transform.position.x, live.transform.position.z);
+  }
+  for (const n of delta.add?.npcs || []) {
+    const live = (next.npcs || []).find((x) => x.id === n.id);
+    if (live?.spawn) live.spawn.y = terrainHeightAt(next.terrain, live.spawn.x, live.spawn.z);
   }
 
   // --- prune anything the removals orphaned -------------------------------
