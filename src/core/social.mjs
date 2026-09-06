@@ -20,6 +20,7 @@ import { computeLevel, publishCredits, canPublish } from "../cw1/identity-core.m
 const FRIEND_STATES = ["requested", "accepted", "blocked"];
 const TEAM_ROLES = ["owner", "admin", "member"];
 const STUDIO_ROLES = ["owner", "admin", "creator", "member"];
+const ORG_ROLES = ["owner", "admin", "member"];
 
 const id = (p) => p + "_" + crypto.randomBytes(6).toString("hex");
 
@@ -37,9 +38,11 @@ export function createSocialService(env = process.env) {
   const teamMembers = mk("team_members", "dcsgames_team_members", ["team_id", "member_id"]);
   const studios = mk("studios", "dcsgames_studios", ["id"]);
   const studioMembers = mk("studio_members", "dcsgames_studio_members", ["studio_id", "member_id"]);
+  const orgs = mk("orgs", "dcsgames_orgs", ["id"]);
+  const orgMembers = mk("org_members", "dcsgames_org_members", ["org_id", "member_id"]);
   const plays = mk("world_plays", "dcsgames_world_plays", ["id"]);
   const ratings = mk("world_ratings", "dcsgames_world_ratings", ["world_id", "principal_id"]);
-  const collections = { principals, friends, parties, partyMembers, teams, teamMembers, studios, studioMembers, plays, ratings };
+  const collections = { principals, friends, parties, partyMembers, teams, teamMembers, studios, studioMembers, orgs, orgMembers, plays, ratings };
 
   const svc = {
     dir,
@@ -357,6 +360,91 @@ export function createSocialService(env = process.env) {
       return await svc.getStudio(studioId);
     },
 
+    // =================================================================== orgs
+    //
+    // Round-2 capability 87: real seat-check logic, an in-memory store and no
+    // tables. It also had NO permission check on adding a member -- anyone could
+    // add themselves to any org, and then read it. Both are fixed here.
+
+    async createOrg(meId, { name, seats = 5 }) {
+      if (!meId) throw Errors.unauthenticated("creating an org needs an authenticated principal");
+      if (!name || String(name).trim().length < 2) throw Errors.validation("an org needs a name of at least 2 characters");
+      if (!Number.isInteger(seats) || seats < 1 || seats > 1000) throw Errors.validation("seats must be between 1 and 1000");
+      const org = { id: id("org"), name: String(name).trim().slice(0, 80), billing_owner: meId, seats, created_at: new Date().toISOString() };
+      await orgs.insert(org);
+      await orgMembers.insert({ org_id: org.id, member_id: meId, role: "owner", joined_at: org.created_at });
+      return await svc.getOrg(org.id, meId);
+    },
+
+    /** An org is private to its members. It used to be readable by anyone. */
+    async getOrg(orgId, requesterId) {
+      const o = await orgs.one((x) => x.id === orgId);
+      if (!o) throw Errors.notFound(`org ${orgId}`);
+      const members = await orgMembers.find((m) => m.org_id === orgId);
+      if (requesterId && !members.some((m) => m.member_id === requesterId)) {
+        throw Errors.forbidden("this org is visible only to its members");
+      }
+      const used = members.length;
+      return {
+        ...o, members,
+        seats_used: used,
+        seats_remaining: Math.max(0, o.seats - used),
+        // Seats are a capacity limit, not a billing charge: money is dark.
+        payments_live: false,
+        billing_note: "Seats are enforced as a capacity limit. No seat is billed while payments are disabled.",
+      };
+    },
+
+    async addOrgMember(meId, orgId, memberId, role = "member") {
+      if (!ORG_ROLES.includes(role)) throw Errors.validation(`role must be one of: ${ORG_ROLES.join(", ")}`);
+      if (!memberId) throw Errors.validation("member_id is required");
+      const o = await svc.getOrg(orgId, meId);
+      const mine = o.members.find((m) => m.member_id === meId);
+      // The missing check. Without it anyone could add themselves to any org.
+      if (!mine || !["owner", "admin"].includes(mine.role)) {
+        throw Errors.forbidden("only an owner or admin can add members to an org");
+      }
+      if (role === "owner") throw Errors.forbidden("an org has exactly one billing owner; transfer ownership instead");
+      if (o.members.some((m) => m.member_id === memberId)) return { ...o, idempotent: true };
+      if (o.seats_remaining <= 0) {
+        throw Errors.conflict(`this org has no seats left (${o.seats_used}/${o.seats})`, { meta: { seats: o.seats, used: o.seats_used } });
+      }
+      await orgMembers.insert({ org_id: orgId, member_id: memberId, role, joined_at: new Date().toISOString() });
+      return await svc.getOrg(orgId, meId);
+    },
+
+    async removeOrgMember(meId, orgId, memberId) {
+      const o = await svc.getOrg(orgId, meId);
+      const mine = o.members.find((m) => m.member_id === meId);
+      const isSelf = meId === memberId;
+      if (!isSelf && (!mine || !["owner", "admin"].includes(mine.role))) {
+        throw Errors.forbidden("only an owner or admin can remove members");
+      }
+      if (o.billing_owner === memberId) throw Errors.forbidden("the billing owner cannot be removed; transfer ownership first");
+      const n = await orgMembers.remove((m) => m.org_id === orgId && m.member_id === memberId);
+      if (!n) throw Errors.notFound("that membership");
+      return await svc.getOrg(orgId, isSelf ? o.billing_owner : meId);
+    },
+
+    async setOrgSeats(meId, orgId, seats) {
+      if (!Number.isInteger(seats) || seats < 1 || seats > 1000) throw Errors.validation("seats must be between 1 and 1000");
+      const o = await svc.getOrg(orgId, meId);
+      if (o.billing_owner !== meId) throw Errors.forbidden("only the billing owner can change the seat count");
+      if (seats < o.seats_used) {
+        // Silently dropping members to fit a smaller plan would be a data loss.
+        throw Errors.conflict(`this org already has ${o.seats_used} members; remove some before reducing to ${seats} seats`);
+      }
+      await orgs.update((x) => x.id === orgId, (x) => ({ ...x, seats }));
+      return await svc.getOrg(orgId, meId);
+    },
+
+    async myOrgs(meId) {
+      const mine = await orgMembers.find((m) => m.member_id === meId);
+      const out = [];
+      for (const m of mine) out.push(await svc.getOrg(m.org_id, meId));
+      return out;
+    },
+
     // ============================================================== discovery
     /** Record a real play. Discovery ranks on these rows and nothing else. */
     async recordPlay(worldId, principalId, seconds = null) {
@@ -443,4 +531,4 @@ export function createSocialService(env = process.env) {
   return svc;
 }
 
-export { FRIEND_STATES, TEAM_ROLES, STUDIO_ROLES };
+export { FRIEND_STATES, TEAM_ROLES, STUDIO_ROLES, ORG_ROLES };

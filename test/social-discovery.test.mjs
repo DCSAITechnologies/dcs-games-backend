@@ -307,3 +307,81 @@ test("B15: a placeholder thumbnail is labelled as one in discovery", async () =>
   const d = await s.discover([w]);
   assert.equal(d.worlds[0].thumbnail_is_placeholder, true, "a placeholder must never pass as generated art");
 });
+
+// ===================================================================== orgs
+//
+// Round-2 capability 87: real seat logic, an in-memory store, no tables — and
+// no permission check on adding a member, so anyone could add themselves to any
+// org and then read it.
+
+test("B15 GATE: only an owner or admin can add an org member", async () => {
+  const s = svc();
+  const o = await s.createOrg("u1", { name: "DCS Studios", seats: 5 });
+  await s.addOrgMember("u1", o.id, "u2", "member");
+  // The check that was missing entirely.
+  await assert.rejects(() => s.addOrgMember("u2", o.id, "u3"), (e) => e.httpStatus === 403 && /owner or admin/.test(e.detail));
+  // An outsider cannot even see the org, let alone join it.
+  await assert.rejects(() => s.addOrgMember("outsider", o.id, "outsider"), (e) => e.httpStatus === 403);
+});
+
+test("B15 GATE: an org is visible only to its members", async () => {
+  const s = svc();
+  const o = await s.createOrg("u1", { name: "DCS Studios" });
+  await assert.rejects(() => s.getOrg(o.id, "outsider"), (e) => e.httpStatus === 403 && /only to its members/.test(e.detail));
+  assert.equal((await s.getOrg(o.id, "u1")).id, o.id);
+});
+
+test("B15: seats are enforced as a capacity limit, and billed to nobody", async () => {
+  const s = svc();
+  const o = await s.createOrg("u1", { name: "Small", seats: 2 });
+  assert.equal(o.payments_live, false);
+  assert.match(o.billing_note, /No seat is billed/);
+  await s.addOrgMember("u1", o.id, "u2");
+  assert.equal((await s.getOrg(o.id, "u1")).seats_remaining, 0);
+  await assert.rejects(() => s.addOrgMember("u1", o.id, "u3"), (e) => e.httpStatus === 409 && /no seats left/.test(e.detail));
+});
+
+test("B15: reducing seats below the current membership is refused, not applied silently", async () => {
+  const s = svc();
+  const o = await s.createOrg("u1", { name: "Org", seats: 5 });
+  await s.addOrgMember("u1", o.id, "u2");
+  await s.addOrgMember("u1", o.id, "u3");
+  await assert.rejects(() => s.setOrgSeats("u1", o.id, 2), (e) => e.httpStatus === 409 && /remove some/.test(e.detail));
+  const ok = await s.setOrgSeats("u1", o.id, 3);
+  assert.equal(ok.seats, 3);
+});
+
+test("B15: only the billing owner can change the seat count", async () => {
+  const s = svc();
+  const o = await s.createOrg("u1", { name: "Org", seats: 5 });
+  await s.addOrgMember("u1", o.id, "u2", "admin");
+  await assert.rejects(() => s.setOrgSeats("u2", o.id, 9), (e) => e.httpStatus === 403);
+});
+
+test("B15: the billing owner cannot be removed, and a member can remove themselves", async () => {
+  const s = svc();
+  const o = await s.createOrg("u1", { name: "Org", seats: 5 });
+  await s.addOrgMember("u1", o.id, "u2");
+  await assert.rejects(() => s.removeOrgMember("u1", o.id, "u1"), (e) => e.httpStatus === 403);
+  const after = await s.removeOrgMember("u2", o.id, "u2");
+  assert.equal(after.members.length, 1);
+});
+
+test("B15: a second owner cannot be added, and orgs survive a restart", async () => {
+  const env = tmp();
+  const a = createSocialService(env);
+  const o = await a.createOrg("u1", { name: "Org", seats: 5 });
+  await assert.rejects(() => a.addOrgMember("u1", o.id, "u2", "owner"), (e) => e.httpStatus === 403);
+  const b = createSocialService(env);
+  const seen = await b.getOrg(o.id, "u1");
+  assert.equal(seen.name, "Org");
+  assert.equal(seen.seats_used, 1);
+});
+
+test("B15: creating an org validates its name and seat count", async () => {
+  const s = svc();
+  await assert.rejects(() => s.createOrg(null, { name: "Org" }), (e) => e.httpStatus === 401);
+  await assert.rejects(() => s.createOrg("u1", { name: "x" }), (e) => e.httpStatus === 422);
+  await assert.rejects(() => s.createOrg("u1", { name: "Org", seats: 0 }), (e) => e.httpStatus === 422);
+  await assert.rejects(() => s.createOrg("u1", { name: "Org", seats: 5000 }), (e) => e.httpStatus === 422);
+});

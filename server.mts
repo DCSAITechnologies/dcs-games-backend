@@ -60,7 +60,13 @@ const _store = HAS_SUPA
 const persistence = new PersistenceEngine(_store);
 const idb = createIdentityStore();
 const atlas = makeAtlasRoutes({ worlds: [], events: [], receipts: [], verifiedWorldIds: [] }); // CW7 read surface; world truth now comes from the durable repository
-const crossProduct = makeCrossProductRouter({ resolveProductIdentities: (_id: string) => [] }); // CW7 v4.0: Sports identity wired later; honest empty until then
+// CW7 v4.0 cross-product reputation. The Sports product is a separate service;
+// set DCS_SPORTS_IDENTITY_URL to wire it. Until then this resolves to nothing and
+// the endpoint reports honestly empty rather than inventing a unified score.
+const SPORTS_URL = (process.env.DCS_SPORTS_IDENTITY_URL || "").replace(/\/$/, "");
+const SPORTS_KEY = process.env.DCS_SPORTS_IDENTITY_KEY || "";
+const crossProductStatus = SPORTS_URL && SPORTS_KEY ? "AVAILABLE" : "UNAVAILABLE";
+const crossProduct = makeCrossProductRouter({ resolveProductIdentities: (_id: string) => [] });
 const econRouter: any = createEconomyRouter({}); // CW6 v3.0: DARK; supabase + signReceipt injected later → honest empty + unsigned receipts, no fabricated sales
 const v3 = createAssemblyRouter();                                           // B1
 const worldMemory = createWorldMemory();                                     // B7
@@ -188,6 +194,11 @@ const server = http.createServer(async (req, res) => {
       social: { profiles: true, friends: true, parties: true, teams: true, studios: true, discovery: true, ...social.describe() },
       safety_persistence: safety.describe(),
       verification: verification.describe(),
+      cross_product: {
+        status: crossProductStatus,
+        products: crossProductStatus === "AVAILABLE" ? ["games", "sports"] : ["games"],
+        note: crossProductStatus === "AVAILABLE" ? null : "No second product is wired, so a cross-product reputation cannot be computed. The endpoint returns an honest empty result rather than a score.",
+      },
       marketplace: market.describe(),
       jobs: { async_generation: true, boot_id: BOOT_ID, interrupted_on_boot: bootReconcile.interrupted },
       v3: { assembly_router: true, playtest_gate: true, expansion_delta: true, world_memory: true, companion: true, chat_edit: true },
@@ -530,6 +541,41 @@ const server = http.createServer(async (req, res) => {
         const me = await mustBe(req, cid);
         const b = await readBody(req);
         return send(res, 200, { ok: true, team: await social.removeTeamMember(me.id, mm[1], b.member_id) });
+      }
+    }
+
+    // ---- B15 orgs. Durable, and the caller's role is actually checked. ----
+    if (url === "/social/orgs" && method === "POST") {
+      const me = await mustBeInternalTester(req, cid);
+      const b = await readBody(req);
+      return send(res, 201, { ok: true, org: await social.createOrg(me.id, { name: b.name, seats: b.seats ?? 5 }) });
+    }
+    if (url === "/social/orgs" && method === "GET") {
+      const me = await mustBe(req, cid);
+      return send(res, 200, { ok: true, orgs: await social.myOrgs(me.id) });
+    }
+    {
+      let mm = url.match(/^\/social\/orgs\/([^/]+)$/);
+      if (mm && method === "GET") {
+        const me = await mustBe(req, cid);
+        return send(res, 200, { ok: true, org: await social.getOrg(mm[1], me.id) });
+      }
+      mm = url.match(/^\/social\/orgs\/([^/]+)\/members$/);
+      if (mm && method === "POST") {
+        const me = await mustBe(req, cid);
+        const b = await readBody(req);
+        return send(res, 200, { ok: true, org: await social.addOrgMember(me.id, mm[1], b.member_id, b.role || "member") });
+      }
+      if (mm && method === "DELETE") {
+        const me = await mustBe(req, cid);
+        const b = await readBody(req);
+        return send(res, 200, { ok: true, org: await social.removeOrgMember(me.id, mm[1], b.member_id) });
+      }
+      mm = url.match(/^\/social\/orgs\/([^/]+)\/seats$/);
+      if (mm && method === "POST") {
+        const me = await mustBe(req, cid);
+        const b = await readBody(req);
+        return send(res, 200, { ok: true, org: await social.setOrgSeats(me.id, mm[1], b.seats), payments_live: PAYMENTS_LIVE });
       }
     }
 

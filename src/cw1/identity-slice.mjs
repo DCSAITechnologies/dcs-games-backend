@@ -72,9 +72,15 @@ export async function handleIdentity(req, res, ctx) {
   if (seg[0]==="teams"&&seg[1]&&seg[2]==="members"&&m==="POST") { const b=await body(req); const tm=db.teams.get(seg[1]); if(!tm){send(res,404,{error:"no_team"});return true;} tm.members.push({id:b.id,role:["owner","editor","viewer"].includes(b.role)?b.role:"viewer"}); send(res,200,tm); return true; }
 
   // orgs (+ seats)
-  if (path==="/orgs"&&m==="POST") { const me=who(req); const id=uid("org"); const b=await body(req); db.orgs.set(id,{id,name:b.name||"Org",billing_owner:me,seats:b.seats||5,members:[{id:me,role:"owner"}]}); send(res,200,db.orgs.get(id)); return true; }
-  if (seg[0]==="orgs"&&seg[1]&&seg[2]==="members"&&m==="POST") { const o=db.orgs.get(seg[1]); const b=await body(req); if(!o){send(res,404,{error:"no_org"});return true;} const sc=seatCheck({seats:o.seats,current_members:o.members.length}); if(!sc.allowed){send(res,409,{error:"no_seats",...sc});return true;} if(!o.members.some(x=>x.id===b.id))o.members.push({id:b.id,role:["owner","admin","member"].includes(b.role)?b.role:"member"}); send(res,200,{...o,remaining_seats:sc.remaining-1}); return true; }
-  if (seg[0]==="orgs"&&seg[1]&&m==="GET") { const o=db.orgs.get(seg[1]); send(res,o?200:404,o||{error:"no_org"}); return true; }
+  // SECURITY (6 Sep 2026): POST /orgs/:id/members checked SEATS but not
+  // PERMISSION, so anyone could add themselves to any org and then read it, and
+  // GET /orgs/:id served the whole org unauthenticated. The store was also
+  // in-memory with no tables behind it. Replaced by /social/orgs, which is
+  // durable and checks the caller's role.
+  if (seg[0]==="orgs"&&m!=="OPTIONS") {
+    send(res,410,{ok:false,error:"gone",detail:"this endpoint did not check who was calling; use /social/orgs",superseded_by:"/social/orgs"});
+    return true;
+  }
 
   // studios (+ split, role-gated)
   if (path==="/studios"&&m==="POST") { const me=who(req); const id=uid("std"); const b=await body(req); db.studios.set(id,{id,name:b.name||"Studio",owner:me,members:[{id:me,role:"owner"}],worlds:[],split:null}); send(res,200,db.studios.get(id)); return true; }
