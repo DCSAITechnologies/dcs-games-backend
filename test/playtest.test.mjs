@@ -6,6 +6,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { validateManifest, QUEST_STEP_KINDS } from "../src/v3/manifest/schema.mjs";
 import { createAssemblyRouter } from "../src/v3/router/assembly.mjs";
 import { simulatePlaythrough, simulateQuests, critique, repair, playtestAndRepair, npcHasSpeech, UNREPAIRABLE } from "../src/v3/playtest/agent.mjs";
 import { runAllValidators, validateStructure, validateNavigation, validateQuests, validateGameplayLoop, validateReferences } from "../src/v3/playtest/validators.mjs";
@@ -579,7 +580,7 @@ test("B4: add_quest builds an objective only out of things that exist", () => {
   assert.ok(q, "a quest must be added");
   assert.ok(q.steps.length >= 2);
   const ids = new Set([...m.zones.map((z) => z.id)]);
-  for (const st of q.steps) assert.ok(ids.has(st.target_ref), `step ${st.id} points at ${st.target_ref}, which does not exist`);
+  for (const st of q.steps) assert.ok(ids.has(st.target), `step ${st.id} points at ${st.target}, which does not exist`);
   assert.equal(runAllValidators(r.manifest).some((f) => f.id === "no_quests"), false);
 });
 
@@ -590,7 +591,7 @@ test("B4: add_quest prefers a delivery when there is an item and someone to spea
   const r = repair(m, [{ id: "no_quests", severity: "major", fix: "add_quest" }]);
   const q = r.manifest.quests[0];
   assert.equal(q.giver_npc, "n1");
-  assert.deepEqual(q.steps.map((s) => s.target_ref), ["i1", "n1"]);
+  assert.deepEqual(q.steps.map((s) => s.target), ["i1", "n1"]);
 });
 
 test("B4 GATE: add_quest declines rather than inventing steps for an empty world", () => {
@@ -608,7 +609,7 @@ test("B4: reassign_giver prefers an NPC on the quest's own ground", () => {
     { id: "n_far", name: "Stranger", zone: "z1", dialogue: { seed: "hm", lines: [] } },
     { id: "n_near", name: "Local", zone: "z0", dialogue: { seed: "aye", lines: [] } },
   ];
-  m.quests = [{ id: "q1", name: "Look Around", giver_npc: "n_ghost", steps: [{ id: "s1", kind: "visit", target_ref: "z0" }] }];
+  m.quests = [{ id: "q1", title: "Look Around", giver_npc: "n_ghost", zone: null, difficulty: "easy", steps: [{ id: "s1", kind: "reach", target: "z0", description: "Go." }], rewards: [], prerequisites: [] }];
   const r = repair(m, [{ id: "quest_giver_missing", severity: "major", where: "q1", fix: "reassign_giver" }]);
   assert.equal(r.manifest.quests[0].giver_npc, "n_near");
 });
@@ -617,7 +618,7 @@ test("B4 GATE: reassign_giver clears the giver rather than attaching a stranger"
   const m = emptyish();
   m.zones = [{ id: "z0", name: "Hollow", bounds: [0, 0, 32, 32] }, { id: "z1", name: "Ridge", bounds: [32, 0, 64, 32] }];
   m.npcs = [{ id: "n_far", name: "Stranger", zone: "z1", dialogue: { seed: "hm", lines: [] } }];
-  m.quests = [{ id: "q1", name: "Look Around", giver_npc: "n_ghost", steps: [{ id: "s1", kind: "visit", target_ref: "z0" }] }];
+  m.quests = [{ id: "q1", title: "Look Around", giver_npc: "n_ghost", zone: null, difficulty: "easy", steps: [{ id: "s1", kind: "reach", target: "z0", description: "Go." }], rewards: [], prerequisites: [] }];
   const r = repair(m, [{ id: "quest_giver_missing", severity: "major", where: "q1", fix: "reassign_giver" }]);
   assert.equal(r.manifest.quests[0].giver_npc, null, "an unrelated NPC across the map is not a fix");
   assert.equal(runAllValidators(r.manifest).some((f) => f.id === "quest_giver_missing"), false);
@@ -649,4 +650,147 @@ test("B4 GATE: fabricating characters and buildings is a DECLARED refusal, not a
     assert.ok(s.why.length > 40, "and must say why in terms a person can act on");
   }
   assert.deepEqual(Object.keys(UNREPAIRABLE).sort(), ["add_npcs", "add_structures"]);
+});
+
+test("B4 GATE: a world is not failed for the consequences of its own correct repairs", async () => {
+  // The sequence staging produced: two quests were uncompletable, drop_quest
+  // correctly removed both rather than inventing targets for them, and the
+  // world was then rejected for `no_quests` — a finding add_quest handles and
+  // never got a chance to, because two rounds is exactly one repair
+  // opportunity. The repair pass was failing worlds for doing the right thing.
+  const m = await goodWorld("Bellreach", "w_cascade");
+  m.quests = [{
+    id: "q_broken", title: "Find the Bell", giver_npc: m.npcs[0].id, zone: null, difficulty: "easy",
+    steps: [{ id: "s1", kind: "collect", target: "item_that_does_not_exist", description: "Find it." }],
+    rewards: [], prerequisites: [],
+  }];
+
+  const g = await playtestAndRepair(m);
+  const dropped = g.rounds.flatMap((r) => r.repairs || []).some((a) => a.fix === "drop_quest");
+  assert.ok(dropped, "the uncompletable quest must still be dropped, not patched with an invented target");
+  assert.ok(g.passed, `the world must then be repaired to passing, got ${g.verdict}: ` +
+    JSON.stringify(g.rounds.at(-1).findings.map((f) => f.id)));
+  assert.ok(g.manifest.quests.length > 0, "and it must end with something to do");
+  for (const q of g.manifest.quests) {
+    for (const st of q.steps) {
+      const exists = [...g.manifest.zones, ...g.manifest.structures, ...g.manifest.npcs, ...(g.manifest.items || [])]
+        .some((e) => e.id === st.target);
+      assert.ok(exists, `replacement quest step points at ${st.target}, which does not exist`);
+    }
+  }
+});
+
+test("B4: the repair loop stops as soon as a round changes nothing", async () => {
+  // The extra round must cost nothing on worlds that cannot be helped.
+  const m = emptyish();
+  const g = await playtestAndRepair(m);
+  assert.equal(g.passed, false);
+  assert.match(g.note || "", /no repair could be applied/);
+  assert.ok(g.rounds.length <= 2, `should not keep re-validating an unchanged manifest, ran ${g.rounds.length} rounds`);
+});
+
+test("B4 GATE: no repair may produce a manifest the schema rejects", async () => {
+  // The third instance of one class of bug: add_quest was written against a
+  // remembered shape rather than the schema, and emitted `name`/`target_ref`/
+  // kind "visit" where WorldManifestV3 requires `title`/`target` and a kind
+  // from QUEST_STEP_KINDS. A repair that emits an invalid manifest is worse
+  // than the finding it fixes — it fails the whole generation on a schema
+  // error instead of one missing quest.
+  //
+  // So: run every fix over a REAL assembled world and validate the result.
+  const base = await goodWorld("Schema Probe", "w_schema");
+  const emitted = fixNamesEmittedByValidators();
+  const broke = [];
+  for (const fix of emitted) {
+    const m = structuredClone(base);
+    // Give each fix something plausible to act on.
+    const where = m.structures?.[0]?.id || m.zones?.[0]?.id;
+    const r = repair(m, [{ id: "synthetic", severity: "major", fix, where, data: { other: m.structures?.[1]?.id } }]);
+    const v = validateManifest(r.manifest);
+    if (!v.ok) broke.push(`${fix}: ${(v.errors || []).slice(0, 2).map((e) => `${e.path} ${e.message}`).join("; ")}`);
+  }
+  assert.deepEqual(broke, [], `these repairs emit a manifest the schema rejects:\n  ${broke.join("\n  ")}`);
+});
+
+test("B4 GATE: an added quest satisfies the schema on a world that has none", async () => {
+  const m = await goodWorld("Quest Probe", "w_quest");
+  m.quests = [];
+  const r = repair(m, [{ id: "no_quests", severity: "major", fix: "add_quest" }]);
+  assert.equal(r.manifest.quests.length, 1);
+  const v = validateManifest(r.manifest);
+  assert.ok(v.ok, `the added quest must be schema-valid: ${JSON.stringify((v.errors || []).slice(0, 3))}`);
+  const q = r.manifest.quests[0];
+  assert.ok(typeof q.title === "string" && q.title.length > 0, "the schema requires `title`, not `name`");
+  for (const st of q.steps) {
+    assert.ok(typeof st.target === "string", "the schema requires `target`, not `target_ref`");
+    assert.ok(QUEST_STEP_KINDS.includes(st.kind), `${st.kind} is not a real step kind`);
+  }
+});
+
+test("B4 GATE: removing an entity does not leave quests pointing at it", async () => {
+  // drop_or_substitute removed a structure and left quest steps aimed at it.
+  // A dangling reference fails WorldManifestV3, which turns a world the gate
+  // could have repaired into a hard generation failure — strictly worse than
+  // the finding it was fixing.
+  const m = await goodWorld("Orphan Probe", "w_orphan");
+  const victim = m.structures[0].id;
+  m.quests = [{
+    id: "q_points_at_victim", title: "Visit the Doomed Hall", giver_npc: null, zone: null, difficulty: "easy",
+    steps: [
+      { id: "s_a", kind: "reach", target: victim, description: "Go there." },
+      { id: "s_b", kind: "reach", target: m.zones[0].id, description: "Then here." },
+    ],
+    rewards: [], prerequisites: [],
+  }];
+  const r = repair(m, [{ id: "asset_missing", severity: "blocker", where: victim, fix: "drop_or_substitute" }]);
+
+  assert.equal(r.manifest.structures.some((s) => s.id === victim), false, "the broken entity is still removed");
+  const v = validateManifest(r.manifest);
+  assert.ok(v.ok, `the manifest must stay valid: ${JSON.stringify((v.errors || []).slice(0, 3))}`);
+  const q = r.manifest.quests.find((x) => x.id === "q_points_at_victim");
+  assert.ok(q, "a quest that still has a reachable step survives");
+  assert.deepEqual(q.steps.map((s) => s.target), [m.zones[0].id]);
+  assert.ok(r.applied.some((a) => a.fix === "prune_dangling_quest_steps"));
+});
+
+test("B4: a quest left with no reachable steps is removed, not patched", async () => {
+  const m = await goodWorld("Orphan Probe 2", "w_orphan2");
+  const victim = m.structures[0].id;
+  m.quests = [{
+    id: "q_only_victim", title: "Visit the Doomed Hall", giver_npc: null, zone: null, difficulty: "easy",
+    steps: [{ id: "s_a", kind: "reach", target: victim, description: "Go there." }],
+    rewards: [], prerequisites: [],
+  }];
+  const r = repair(m, [{ id: "asset_missing", severity: "blocker", where: victim, fix: "drop_or_substitute" }]);
+  assert.equal(r.manifest.quests.some((q) => q.id === "q_only_victim"), false);
+  assert.ok(r.applied.some((a) => a.fix === "drop_emptied_quests" && a.quests.includes("q_only_victim")));
+  assert.ok(validateManifest(r.manifest).ok);
+});
+
+test("B4 GATE: a malformed overlap finding does not write NaN into the world", () => {
+  // (needed - distance) with neither present is NaN, which propagated into the
+  // structure's position and then crashed heightAt with data[NaN][NaN] —
+  // aborting the whole repair pass from deep inside, far from the cause.
+  const m = emptyish();
+  m.terrain = { kind: "heightmap", size: { w: 64, h: 64 }, data: Array.from({ length: 16 }, () => Array(16).fill(0)) };
+  m.structures = [
+    { id: "a", name: "A", zone: "z0", transform: { position: { x: 10, y: 0, z: 10 } } },
+    { id: "b", name: "B", zone: "z0", transform: { position: { x: 12, y: 0, z: 12 } } },
+  ];
+  const r = repair(m, [{ id: "structures_overlap", severity: "minor", where: "a", fix: "separate", data: { other: "b" } }]);
+  for (const s of r.manifest.structures) {
+    for (const axis of ["x", "y", "z"]) {
+      assert.ok(Number.isFinite(s.transform.position[axis]), `${s.id}.${axis} became ${s.transform.position[axis]}`);
+    }
+  }
+  assert.match(r.skipped.find((x) => x.fix === "separate").why, /no measurements/);
+});
+
+test("B4: heightAt degrades on nonsense input instead of throwing", async () => {
+  const { heightAt } = await import("../src/v3/playtest/validators.mjs");
+  const t = { kind: "heightmap", size: { w: 64, h: 64 }, data: [[1, 2], [3, 4]] };
+  assert.equal(heightAt(t, NaN, 0), 0);
+  assert.equal(heightAt(t, 0, Infinity), 0);
+  assert.equal(heightAt(t, 1e9, 1e9), 4, "far out of bounds still clamps to the edge");
+  assert.equal(heightAt(null, 0, 0), 0);
 });

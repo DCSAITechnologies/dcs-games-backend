@@ -19,15 +19,25 @@ function finding(id, severity, message, { where = null, fix = null, data = null 
 
 const dist2 = (a, b) => (a.x - b.x) ** 2 + (a.z - b.z) ** 2;
 
-/** Sample the terrain height at a world position. */
+/**
+ * Sample the terrain height at a world position.
+ *
+ * Non-finite input returns 0 rather than throwing. Math.round(NaN) is NaN, and
+ * Math.max/min propagate it, so `data[NaN][NaN]` used to raise a TypeError from
+ * deep inside a repair and abort the entire repair pass — a crash caused by one
+ * malformed coordinate, reported nowhere near where it came from.
+ */
 export function heightAt(terrain, x, z) {
   if (!terrain || terrain.kind !== "heightmap" || !Array.isArray(terrain.data) || !terrain.data.length) return 0;
+  if (!Number.isFinite(x) || !Number.isFinite(z)) return 0;
   const rows = terrain.data.length, cols = terrain.data[0].length;
   const cw = terrain.resolution?.cell_w || terrain.size.w / cols;
   const ch = terrain.resolution?.cell_h || terrain.size.h / rows;
+  if (!Number.isFinite(cw) || !Number.isFinite(ch) || cw === 0 || ch === 0) return 0;
   const i = Math.max(0, Math.min(cols - 1, Math.round(x / cw)));
   const j = Math.max(0, Math.min(rows - 1, Math.round(z / ch)));
-  return terrain.data[j][i];
+  const row = terrain.data[j];
+  return Array.isArray(row) && Number.isFinite(row[i]) ? row[i] : 0;
 }
 
 // ---------------------------------------------------------------- structural

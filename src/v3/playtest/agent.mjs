@@ -298,7 +298,15 @@ export function repair(manifest, findings) {
         const dx = a.transform.position.x - b.transform.position.x;
         const dz = a.transform.position.z - b.transform.position.z;
         const len = Math.hypot(dx, dz) || 1;
-        const push = (f.data.needed - f.data.distance) / 2 + 1;
+        // A finding that arrives without its measurements would compute NaN
+        // here and write NaN into the structure's position — silent geometry
+        // corruption that only surfaces much later, as a crash somewhere else.
+        const needed = Number(f.data?.needed), distance = Number(f.data?.distance);
+        if (!Number.isFinite(needed) || !Number.isFinite(distance)) {
+          skipped.push({ ...f, why: "the overlap finding carries no measurements, and guessing a distance would move a building at random" });
+          break;
+        }
+        const push = (needed - distance) / 2 + 1;
         a.transform.position.x += (dx / len) * push;
         a.transform.position.z += (dz / len) * push;
         a.transform.position.y = heightAt(m.terrain, a.transform.position.x, a.transform.position.z);
@@ -509,28 +517,49 @@ export function repair(manifest, findings) {
         const talkers = (m.npcs || []).filter(npcHasSpeech);
         let quest = null;
 
+        // The shape here is the schema's, not a plausible-looking approximation
+        // of it: `title` (not name), `steps[].target` (not target_ref), and a
+        // kind from QUEST_STEP_KINDS. A quest built to the wrong shape fails
+        // WorldManifestV3 validation and takes the whole generation down with
+        // it, which is a worse outcome than the missing quest it was meant to
+        // fix.
         if (items.length && talkers.length) {
           const item = items[0], giver = talkers[0];
           quest = {
             id: "quest_recovered_delivery",
-            name: `Return the ${item.name || item.id}`,
+            title: `Return the ${item.name || item.id}`,
             giver_npc: giver.id,
+            zone: giver.zone || null,
+            difficulty: "easy",
             steps: [
-              { id: "step_find", kind: "collect", target_ref: item.id, count: 1, description: `Find the ${item.name || item.id}` },
-              { id: "step_return", kind: "talk", target_ref: giver.id, description: `Bring it to ${giver.name || giver.id}` },
+              { id: "step_find", kind: "collect", target: item.id, description: `Find the ${item.name || item.id}.` },
+              { id: "step_return", kind: "talk", target: giver.id, description: `Bring it to ${giver.name || giver.id}.` },
             ],
-            rewards: [],
+            rewards: [], prerequisites: [],
           };
         } else if (zones.length >= 2) {
           quest = {
             id: "quest_recovered_survey",
-            name: "Walk the ground",
+            title: "Walk the ground",
             giver_npc: talkers[0]?.id || null,
-            steps: zones.slice(0, 4).map((z, i) => ({
-              id: `step_visit_${z.id}`, kind: "visit", target_ref: z.id, order: i,
-              description: `Reach ${z.name || z.id}`,
+            zone: null,
+            difficulty: "easy",
+            steps: zones.slice(0, 4).map((z) => ({
+              id: `step_reach_${z.id}`, kind: "reach", target: z.id,
+              description: `Reach ${z.name || z.id}.`,
             })),
-            rewards: [],
+            rewards: [], prerequisites: [],
+          };
+        } else if (talkers.length) {
+          const giver = talkers[0];
+          quest = {
+            id: "quest_recovered_word",
+            title: `Speak with ${giver.name || giver.id}`,
+            giver_npc: giver.id,
+            zone: giver.zone || null,
+            difficulty: "easy",
+            steps: [{ id: "step_talk", kind: "talk", target: giver.id, description: `Find ${giver.name || giver.id} and hear them out.` }],
+            rewards: [], prerequisites: [],
           };
         }
 
@@ -553,7 +582,7 @@ export function repair(manifest, findings) {
         if (!q) { skipped.push({ ...f, why: "quest gone" }); break; }
         const stepZones = new Set(
           (q.steps || [])
-            .map((st) => byId(m.zones, st.target_ref) || byId(m.structures, st.target_ref) || byId(m.npcs, st.target_ref))
+            .map((st) => byId(m.zones, st.target) || byId(m.structures, st.target) || byId(m.npcs, st.target))
             .map((e) => e?.zone || e?.id)
             .filter(Boolean)
         );
@@ -609,7 +638,12 @@ export function repair(manifest, findings) {
     }
   }
 
-  // Dropping a quest can orphan its interactions; keep the manifest consistent.
+  // Repairs that REMOVE things can orphan the things that pointed at them.
+  // Keeping the manifest internally consistent is part of the repair, not an
+  // optional tidy-up: a dangling reference fails WorldManifestV3 validation,
+  // which turns a world the gate could have fixed into a hard generation
+  // failure. `drop_or_substitute` removed a structure and left quest steps
+  // aimed at it, and that is exactly what happened.
   const behaviorIds = new Set(m.behaviors.map((b) => b.id));
   const entityIds = new Set([
     ...m.zones.map((z) => z.id), ...m.structures.map((s) => s.id),
@@ -618,6 +652,24 @@ export function repair(manifest, findings) {
   const beforeI = m.interactions.length;
   m.interactions = m.interactions.filter((i) => behaviorIds.has(i.behavior_ref) && entityIds.has(i.target_ref));
   if (m.interactions.length < beforeI) applied.push({ fix: "prune_dangling_interactions", removed: beforeI - m.interactions.length });
+
+  const npcIds = new Set(m.npcs.map((n) => n.id));
+  let prunedSteps = 0;
+  const droppedQuests = [];
+  m.quests = (m.quests || []).filter((q) => {
+    const before = (q.steps || []).length;
+    q.steps = (q.steps || []).filter((st) => !st?.target || entityIds.has(st.target));
+    prunedSteps += before - q.steps.length;
+    // A giver who no longer exists is a schema error too; clearing it keeps the
+    // quest playable rather than deleting work over a missing name.
+    if (q.giver_npc && !npcIds.has(q.giver_npc)) q.giver_npc = null;
+    if (!q.steps.length) { droppedQuests.push(q.id); return false; }
+    return true;
+  });
+  if (prunedSteps) applied.push({ fix: "prune_dangling_quest_steps", removed: prunedSteps });
+  // A quest left with no steps can never be completed, so it goes the same way
+  // drop_quest sends one: removed, not patched with an invented target.
+  if (droppedQuests.length) applied.push({ fix: "drop_emptied_quests", quests: droppedQuests });
 
   return { manifest: m, applied, skipped };
 }
@@ -646,7 +698,23 @@ function findSafeSpawn(m) {
  * Returns the (possibly repaired) manifest and both verdicts, so a caller can
  * see exactly what the repair changed.
  */
-export async function playtestAndRepair(manifest, { maxRounds = 2 } = {}) {
+/**
+ * Validate, repair, re-validate — until the world passes or nothing more can be
+ * done.
+ *
+ * This used to allow two rounds, which is exactly one repair opportunity: round
+ * 2 could only validate. That is not enough, because a repair can legitimately
+ * create a new fixable finding. Staging showed the sequence plainly: two quests
+ * were uncompletable, `drop_quest` correctly removed both rather than
+ * fabricating targets for them, and the world was then rejected for `no_quests`
+ * — a finding that `add_quest` handles and never got the chance to. The repair
+ * pass was failing worlds for the consequences of its own correct decisions.
+ *
+ * A third round is the smallest change that lets a repair-induced finding be
+ * repaired, and the loop now stops as soon as a round applies nothing, so the
+ * extra round costs nothing on worlds that do not need it.
+ */
+export async function playtestAndRepair(manifest, { maxRounds = 3 } = {}) {
   const rounds = [];
   let current = manifest;
 
@@ -674,6 +742,16 @@ export async function playtestAndRepair(manifest, { maxRounds = 2 } = {}) {
     const r = repair(current, fixable);
     rounds[rounds.length - 1].repairs = r.applied;
     rounds[rounds.length - 1].skipped_repairs = r.skipped;
+    if (!r.applied.length) {
+      // Nothing changed, so re-validating would produce the same findings.
+      return {
+        // REJECTED rather than the critic's own verdict: we are giving up, and
+        // "NEEDS_WORK" would imply another round might help when none will.
+        manifest: current, passed: false, verdict: "REJECTED", rounds,
+        repairs: rounds.flatMap((x) => x.repairs || []),
+        note: "no repair could be applied to the remaining findings",
+      };
+    }
     current = r.manifest;
   }
   return { manifest: current, passed: false, verdict: "REJECTED", rounds, repairs: rounds.flatMap((r) => r.repairs || []) };
