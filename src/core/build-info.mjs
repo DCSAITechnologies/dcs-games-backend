@@ -17,10 +17,21 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 export function readBuildInfo(env = process.env, root = ROOT) {
+  // Two roots, because the module's own location and the process working
+  // directory are not the same thing in every image layout, and a stamp that
+  // is present but looked for in the wrong place is indistinguishable from a
+  // stamp that never shipped.
+  // An explicitly supplied root means "look only here" — otherwise a test
+  // asserting the unstamped case would find the repo's own stamp via cwd.
+  const roots = root === ROOT ? [root, process.cwd()] : [root];
+  const looked = [];
   let stamped = null;
-  try {
-    stamped = JSON.parse(fs.readFileSync(path.join(root, "build-info.json"), "utf8"));
-  } catch { /* not stamped; fall through */ }
+  for (const dir of roots) {
+    const f = path.join(dir, "build-info.json");
+    if (looked.includes(f)) continue;
+    looked.push(f);
+    try { stamped = JSON.parse(fs.readFileSync(f, "utf8")); break; } catch { /* keep looking */ }
+  }
 
   if (stamped?.commit) {
     return {
@@ -31,6 +42,7 @@ export function readBuildInfo(env = process.env, root = ROOT) {
       // anywhere. Say so rather than letting it read as a banked SHA.
       dirty: !!stamped.dirty,
       source: "stamp",
+      deployment_id: env.RAILWAY_DEPLOYMENT_ID || null,
     };
   }
 
@@ -42,6 +54,7 @@ export function readBuildInfo(env = process.env, root = ROOT) {
       built_at: null,
       dirty: false,
       source: "railway-git",
+      deployment_id: env.RAILWAY_DEPLOYMENT_ID || null,
     };
   }
 
@@ -51,6 +64,10 @@ export function readBuildInfo(env = process.env, root = ROOT) {
     built_at: null,
     dirty: false,
     source: "unknown",
-    note: "This build carries no commit stamp, so the running code cannot be tied to a commit. Deploy via scripts/stamp-build.mjs.",
+    // Railway injects this for every deploy including `railway up`, so even an
+    // unstamped build can be tied to a specific deployment in the deploy log.
+    deployment_id: env.RAILWAY_DEPLOYMENT_ID || null,
+    looked_in: looked,
+    note: "This build carries no commit stamp, so the running code cannot be tied to a commit by itself. Match deployment_id against the deploy log, or deploy via scripts/stamp-build.mjs.",
   };
 }
