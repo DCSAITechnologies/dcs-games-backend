@@ -9,7 +9,7 @@ import fs from "node:fs";
 import { validateManifest, QUEST_STEP_KINDS } from "../src/v3/manifest/schema.mjs";
 import { createAssemblyRouter } from "../src/v3/router/assembly.mjs";
 import { simulatePlaythrough, simulateQuests, critique, repair, playtestAndRepair, npcHasSpeech, UNREPAIRABLE } from "../src/v3/playtest/agent.mjs";
-import { runAllValidators, validateStructure, validateNavigation, validateQuests, validateGameplayLoop, validateReferences } from "../src/v3/playtest/validators.mjs";
+import { runAllValidators, validateStructure, validateNavigation, validateQuests, validateGameplayLoop, validateReferences, heightAt } from "../src/v3/playtest/validators.mjs";
 
 const OFFLINE = { DCS_PROVIDERS_OFFLINE: "1" };
 
@@ -625,16 +625,64 @@ test("B4 GATE: reassign_giver clears the giver rather than attaching a stranger"
 });
 
 test("B4: flatten_zone actually changes the terrain the runtime walks on", () => {
+  // The grid is `terrain.data`. This fixture used to say `terrain.heightmap`,
+  // which no manifest anywhere has ever had, so the test and the repair agreed
+  // with each other about a world that does not exist while the repair skipped
+  // on every real one. `heightmap` is the terrain KIND; `data` is the field.
   const m = emptyish();
-  m.terrain = { size: { w: 64, h: 64 }, heightmap: Array.from({ length: 32 }, (_, r) => Array.from({ length: 32 }, (_, c) => (c < 16 ? 0 : 40))) };
+  m.terrain = {
+    kind: "heightmap", size: { w: 64, h: 64 },
+    data: Array.from({ length: 32 }, () => Array.from({ length: 32 }, (_, c) => (c < 16 ? 0 : 40))),
+  };
   m.zones = [{ id: "z0", name: "Cliffside", bounds: [0, 0, 64, 64] }];
-  const before = m.terrain.heightmap.map((r) => [...r]);
+  const before = m.terrain.data.map((r) => [...r]);
   const r = repair(m, [{ id: "zone_not_walkable", severity: "major", where: "z0", fix: "flatten_zone", data: { zone: "z0", walkable_fraction: 0.05 } }]);
-  const after = r.manifest.terrain.heightmap;
+  const after = r.manifest.terrain.data;
   const spreadOf = (h) => { const f = h.flat(); return Math.max(...f) - Math.min(...f); };
   assert.ok(spreadOf(after) < spreadOf(before), "the ground must actually become more level");
   assert.ok(spreadOf(after) > 0, "but not a billiard table, which reads as broken terrain");
   assert.ok(r.applied.some((a) => a.fix === "flatten_zone" && a.cells > 0));
+});
+
+test("B4 GATE: flatten_zone fires on a REAL generated world, not only on a fixture", async () => {
+  // The assertion the hand-built fixture could not make. A repair that only
+  // works on a shape the generator never produces is a repair that never runs:
+  // `zone_not_walkable` survived every round and the world was REJECTED for a
+  // finding the gate believed it had a fix for.
+  const m = await goodWorld("a desert canyon outpost under a red sun", "w_flat");
+  assert.equal(m.terrain.kind, "heightmap", "this probe needs a world with real ground");
+  assert.ok(Array.isArray(m.terrain.data) && m.terrain.data.length, "the grid is `terrain.data`");
+  assert.equal(m.terrain.heightmap, undefined, "there is no `terrain.heightmap`, and never was");
+
+  const z = m.zones[0];
+  // Measure through heightAt — the same sampler the walk simulation uses, so
+  // this asserts the ground the PLAYER stands on changed, not just an array.
+  const spread = (mm) => {
+    const ys = [];
+    for (let x = z.bounds[0]; x < z.bounds[2]; x += 4) for (let zz = z.bounds[1]; zz < z.bounds[3]; zz += 4) ys.push(heightAt(mm.terrain, x, zz));
+    return Math.max(...ys) - Math.min(...ys);
+  };
+  const before = spread(m);
+  assert.ok(before > 1, `the probe zone needs real relief to level, got ${before}`);
+
+  m.navigation.walkable_zones = [{ zone: z.id, walkable_fraction: 0.02 }];
+  const r = repair(m, [{ id: "zone_not_walkable", severity: "major", where: z.id, fix: "flatten_zone", data: { zone: z.id, walkable_fraction: 0.02 } }]);
+
+  const skipped = r.skipped.find((x) => x.fix === "flatten_zone");
+  assert.equal(skipped, undefined, `flatten_zone declined a world it can fix: ${skipped?.why}`);
+  const done = r.applied.find((a) => a.fix === "flatten_zone");
+  assert.ok(done && done.cells > 0, `flatten_zone reported no work: ${JSON.stringify(r.applied)}`);
+  assert.ok(spread(r.manifest) < before, `the walkable ground must actually level: ${before} -> ${spread(r.manifest)}`);
+});
+
+test("B4 GATE: a world failed only for unwalkable ground is repaired, not rejected", async () => {
+  // The whole consequence, end to end: this is the false rejection the field
+  // name caused.
+  const m = await goodWorld("a desert canyon outpost under a red sun", "w_flat2");
+  m.navigation.walkable_zones = m.zones.map((z) => ({ zone: z.id, walkable_fraction: 0.02 }));
+  const out = await playtestAndRepair(m);
+  assert.equal(out.passed, true, `verdict ${out.verdict}, remaining: ${JSON.stringify((out.rounds.at(-1).findings || []).filter((f) => f.severity !== "minor" && f.severity !== "info").map((f) => f.id))}`);
+  assert.ok(out.repairs.some((r) => r.fix === "flatten_zone"), `it must have been the terrain pass that saved it: ${JSON.stringify(out.repairs.map((r) => r.fix))}`);
 });
 
 test("B4 GATE: fabricating characters and buildings is a DECLARED refusal, not an oversight", () => {
@@ -922,4 +970,156 @@ test("B4 GATE: a valid world stays valid through a full repair pass, however it 
     }
   }
   assert.deepEqual(failures, [], `repair produced a manifest the schema rejects:\n  ${failures.join("\n  ")}`);
+});
+
+// ------------------------------------------------ interaction ids are unique
+
+test("B4 GATE: a repair never gives two interactions the same id", async () => {
+  // Found on a HEALTHY generated world, not a damaged one. The planner hosts a
+  // pickup on the structure the item is found in, so the item's own id is not
+  // in the repair's `wired` set; `add_behaviors` wired it a second time and
+  // named the interaction `interaction_pickup_<item>` — an id the planner had
+  // already used. Five collisions in a five-item world, and the schema let it
+  // through because interactions were the one id-bearing collection it did not
+  // check for duplicates.
+  const emitted = fixNamesEmittedByValidators();
+  const collisions = [];
+  for (const prompt of ["Ashfall Harbour, a rainy nordic port town", "a neon cyberpunk megacity", "a lush jungle temple complex"]) {
+    const base = await goodWorld(prompt, "w_dupint");
+    // Every wiring repair at once, which is what a badly-broken world gets.
+    const m = structuredClone(base);
+    const findings = [...emitted].map((fix) => ({ id: "synthetic", severity: "major", fix, where: m.structures?.[0]?.id }));
+    const r = repair(m, findings);
+    const ids = r.manifest.interactions.map((i) => i.id);
+    const dup = [...new Set(ids.filter((x, i) => ids.indexOf(x) !== i))];
+    if (dup.length) collisions.push(`${prompt}: ${dup.join(", ")}`);
+    assert.ok(validateManifest(r.manifest).ok,
+      `${prompt}: ${JSON.stringify(validateManifest(r.manifest).errors.slice(0, 3))}`);
+  }
+  assert.deepEqual(collisions, [], `two interactions share an id:\n  ${collisions.join("\n  ")}`);
+});
+
+test("B4: an item the world already hands out is not given a second pickup", async () => {
+  const m = await goodWorld("Pickup Probe", "w_pickup");
+  const before = m.interactions.filter((i) => i.id.startsWith("interaction_pickup_")).length;
+  assert.ok(before > 0, "the planner is expected to place pickups");
+
+  const r = repair(m, [{ id: "no_gameplay", severity: "blocker", fix: "add_behaviors" }]);
+  const after = r.manifest.interactions.filter((i) => i.id.startsWith("interaction_pickup_")).length;
+  assert.equal(after, before, "an item that can already be picked up must not gain a second pickup");
+});
+
+test("B0: the schema rejects two interactions sharing an id", () => {
+  // Every other id-bearing collection was checked; this one was not, so a
+  // duplicate rode through validation and into the runtime, where interactions
+  // are keyed by id and one silently shadows the other.
+  const m = emptyManifestForTest();
+  m.interactions = [
+    { id: "interaction_x", trigger: "interact", target_ref: "z0", behavior_ref: null },
+    { id: "interaction_x", trigger: "proximity", target_ref: "z0", behavior_ref: null },
+  ];
+  const v = validateManifest(m);
+  assert.equal(v.ok, false);
+  assert.ok(v.errors.some((e) => /duplicate interaction id 'interaction_x'/.test(e.message)),
+    `errors: ${JSON.stringify(v.errors)}`);
+
+  // ...and accepts them once the ids differ, so the check is about duplication
+  // and not about interactions in general.
+  m.interactions[1].id = "interaction_y";
+  assert.equal(validateManifest(m).ok, true, JSON.stringify(validateManifest(m).errors));
+});
+
+/** A schema-valid manifest with a single zone, for schema-level assertions. */
+function emptyManifestForTest() {
+  return {
+    manifest_version: "3.0.0", world_id: "w_schema_probe", world_version: 1,
+    meta: { title: "Probe", created_at: new Date().toISOString() },
+    environment: {}, terrain: { kind: "flat", size: { w: 64, h: 64 } },
+    zones: [{ id: "z0", kind: "district", bounds: [0, 0, 64, 64] }],
+    assets: [], structures: [], npcs: [], items: [], quests: [], behaviors: [], interactions: [],
+    spawn: { player_spawns: [{ id: "sp", position: { x: 8, y: 1, z: 8 }, zone: "z0" }] },
+    provenance: { generated_by: [] },
+  };
+}
+
+// ---------------------------------------- a repair may not undo a guarantee
+
+test("B4 GATE: a repair never deletes an entity a player is recorded as holding", async () => {
+  // The sequence this closes, from server.mts's expansion path:
+  //   applyDelta -> verifyPreservation says the player's state is safe -> the
+  //   playtest gate runs -> the REPAIRED manifest is what gets stored.
+  // Preservation was certified on a manifest that is not the one saved. So a
+  // `drop_quest` on a quest the player had completed, or a `drop_or_substitute`
+  // on the house they own, destroyed state that had been certified safe a
+  // moment earlier, after the certification.
+  const m = await goodWorld("Ownership Probe", "w_own");
+  const owned = m.structures[0];
+  owned.owner_id = "player_42";
+  const doneQuest = m.quests[0].id;
+  const liveState = {
+    owned_entity_ids: [owned.id], inventory_item_ids: [], completed_quest_ids: [doneQuest],
+    visited_zone_ids: [], known_npc_ids: [], companion_memory_refs: [],
+  };
+  // Make both findings genuine: the structure's asset really is gone.
+  m.assets = m.assets.filter((a) => a.id !== owned.asset_ref);
+  const findings = [
+    { id: "missing_asset", severity: "blocker", where: owned.id, fix: "drop_or_substitute" },
+    { id: "quest_not_completable", severity: "blocker", where: doneQuest, fix: "drop_quest" },
+  ];
+
+  // Without live state the repair is exactly as destructive as it always was —
+  // the guard is opt-in, not a silent change of behaviour.
+  const blind = repair(structuredClone(m), findings);
+  assert.equal(blind.manifest.structures.some((s) => s.id === owned.id), false);
+  assert.equal(blind.manifest.quests.some((q) => q.id === doneQuest), false);
+
+  // With it, neither is touched, and the refusal says why.
+  const guarded = repair(structuredClone(m), findings, { liveState });
+  assert.ok(guarded.manifest.structures.some((s) => s.id === owned.id), "the player's structure was deleted");
+  assert.ok(guarded.manifest.quests.some((q) => q.id === doneQuest), "the player's completed quest was deleted");
+  for (const id of [owned.id, doneQuest]) {
+    const why = guarded.skipped.find((x) => x.where === id)?.why;
+    assert.match(why || "", /held by a player/, `the refusal must name why '${id}' survived: ${why}`);
+  }
+
+  // And the world is then REJECTED rather than shipped, which is the honest
+  // outcome: the only repair available would have destroyed player state.
+  const out = await playtestAndRepair(m, { liveState });
+  assert.equal(out.passed, false);
+  assert.ok(out.manifest.structures.some((s) => s.id === owned.id), "the rejected world must still hold the player's structure");
+});
+
+test("B4 GATE: the live-state guard covers every removing repair", async () => {
+  // Enumerated from the source rather than listed by hand, so a new removing
+  // repair cannot be added without either honouring the guard or failing here.
+  const m = await goodWorld("Removal Probe", "w_remove");
+  const cases = [
+    ["drop_or_substitute", m.structures[0].id, (mm, id) => mm.structures.some((s) => s.id === id)],
+    ["retarget_step", m.quests[0].id, (mm, id) => mm.quests.some((q) => q.id === id)],
+    ["drop_quest", m.quests[0].id, (mm, id) => mm.quests.some((q) => q.id === id)],
+    ["wire_or_drop", m.behaviors[0].id, (mm, id) => mm.behaviors.some((b) => b.id === id)],
+  ];
+  const lost = [];
+  for (const [fix, id, survives] of cases) {
+    const liveState = { owned_entity_ids: [id], inventory_item_ids: [], completed_quest_ids: [], visited_zone_ids: [], known_npc_ids: [], companion_memory_refs: [] };
+    const r = repair(structuredClone(m), [{ id: "synthetic", severity: "blocker", where: id, fix }], { liveState });
+    if (!survives(r.manifest, id)) lost.push(`${fix} deleted held '${id}'`);
+  }
+  assert.deepEqual(lost, [], lost.join("; "));
+});
+
+test("B4: a quest a player has completed survives losing its last step", async () => {
+  // The consistency pass drops a quest left with no steps. That is right for a
+  // quest nobody has played and wrong for one somebody has finished: the record
+  // of having done it is the player's, not the world's.
+  const m = await goodWorld("Emptied Quest Probe", "w_emptied");
+  const q = m.quests[0];
+  q.steps = [{ id: "step_ghost", kind: "talk", target: "npc_that_does_not_exist" }];
+
+  const blind = repair(structuredClone(m), []);
+  assert.equal(blind.manifest.quests.some((x) => x.id === q.id), false, "with nobody holding it, an emptied quest goes");
+
+  const liveState = { owned_entity_ids: [], inventory_item_ids: [], completed_quest_ids: [q.id], visited_zone_ids: [], known_npc_ids: [], companion_memory_refs: [] };
+  const guarded = repair(structuredClone(m), [], { liveState });
+  assert.ok(guarded.manifest.quests.some((x) => x.id === q.id), "a completed quest must not be erased");
 });

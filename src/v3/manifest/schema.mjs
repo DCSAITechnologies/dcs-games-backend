@@ -263,11 +263,20 @@ export function validateManifest(m) {
   });
 
   // --------------------------------------------------------- interactions
+  const interactionIds = new Set();
   if (m.interactions !== undefined) {
     if (!isArr(m.interactions)) iss.err("interactions", "must be an array when present");
     else m.interactions.forEach((x, i) => {
       const p = `interactions[${i}]`;
       if (!isStr(x?.id)) iss.err(`${p}.id`, "is required");
+      // Interactions were the one id-bearing collection with no duplicate
+      // check, and the omission was load-bearing: two repair cases both built
+      // `interaction_pickup_<item>` from the item id, produced two interactions
+      // with that id aimed at different targets, and nothing anywhere noticed.
+      // The runtime keys interactions by id, so a duplicate is one object
+      // shadowing another — a prompt that opens the wrong thing.
+      else if (interactionIds.has(x.id)) iss.err(`${p}.id`, `duplicate interaction id '${x.id}'`);
+      else interactionIds.add(x.id);
       requireEnum(x?.trigger, TRIGGERS, `${p}.trigger`, iss);
       behaviorRef(x?.behavior_ref, `${p}.behavior_ref`);
       const t = x?.target_ref;

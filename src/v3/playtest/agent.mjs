@@ -243,12 +243,78 @@ export const UNREPAIRABLE = {
   add_structures: "a world with no structures needs a place built, not a placeholder box dropped in to clear a validator",
 };
 
-export function repair(manifest, findings) {
+/**
+ * Everything a player is recorded as holding, as one set of ids.
+ *
+ * Same six categories `verifyPreservation` checks, read the same way, so the
+ * repair pass and the preservation verifier cannot disagree about what "held"
+ * means.
+ */
+function heldIds(liveState) {
+  if (!liveState) return new Set();
+  return new Set([
+    ...(liveState.owned_entity_ids || []), ...(liveState.inventory_item_ids || []),
+    ...(liveState.completed_quest_ids || []), ...(liveState.visited_zone_ids || []),
+    ...(liveState.known_npc_ids || []), ...(liveState.companion_memory_refs || []),
+  ].filter((x) => typeof x === "string" && x));
+}
+
+/**
+ * @param {object} manifest
+ * @param {Array} findings
+ * @param {{liveState?:object}} [opts] — what players hold, if the caller knows.
+ *   Every repair that DELETES honours it: an entity a player owns, carries, has
+ *   completed or has been told about is never removed to clear a finding.
+ *
+ *   Without it the repair pass is exactly as destructive as it always was, which
+ *   is why the guard is opt-in rather than a behaviour change nobody asked for.
+ *   With it, the sequence that motivated it cannot happen: an expansion is
+ *   checked by verifyPreservation, PASSES, and the manifest that is then stored
+ *   is not that one but the repaired one — so a `drop_quest` on a quest the
+ *   player had completed, or a `drop_or_substitute` on the house they own,
+ *   destroyed state that had just been certified safe, after the certification.
+ *   A repair may not undo a guarantee the caller has already given.
+ */
+export function repair(manifest, findings, { liveState = null } = {}) {
   const m = structuredClone(manifest);
   const applied = [];
   const skipped = [];
+  const held = heldIds(liveState);
+  const heldNote = (id) => `'${id}' is held by a player (owned, carried, completed or remembered); a repair may not delete it`;
 
   const byId = (arr, id) => (arr || []).find((x) => x.id === id);
+
+  /**
+   * Add an interaction, unless the world already has one with that id.
+   *
+   * Four repair cases push interactions and every one of them built the id from
+   * an entity id, so two cases acting on the same entity produced two
+   * interactions with the SAME id and different targets. `add_behaviors` did it
+   * on a perfectly healthy generated world: the planner hosts a pickup on the
+   * structure the item sits in, so the item id was not in the `wired` set, and
+   * `add_behaviors` wired the item a second time as `interaction_pickup_<item>`
+   * — an id the planner had already used. Nothing caught it, because
+   * `interactions[]` was the one id-bearing collection the schema did not check
+   * for duplicates (it does now).
+   *
+   * Returns whether it added, so a repair cannot report work it did not do.
+   */
+  const addInteraction = (x) => {
+    m.interactions = m.interactions || [];
+    if (m.interactions.some((i) => i.id === x.id)) return false;
+    m.interactions.push(x);
+    return true;
+  };
+
+  /** Items some behaviour already grants — the same test validateQuests uses. */
+  const obtainableItems = () => {
+    const out = new Set();
+    for (const b of m.behaviors || []) {
+      if (b.kind === "pickup" && b.spec?.item) out.add(b.spec.item);
+      if (b.kind === "container" && Array.isArray(b.spec?.contains)) for (const it of b.spec.contains) out.add(it);
+    }
+    return out;
+  };
 
   for (const f of findings) {
     switch (f.fix) {
@@ -392,7 +458,10 @@ export function repair(manifest, findings) {
         if (!item || !host) { skipped.push({ ...f, why: "no host structure for the item" }); break; }
         const bid = `behavior_pickup_${item}`;
         if (!byId(m.behaviors, bid)) m.behaviors.push({ id: bid, kind: "pickup", spec: { item, respawn_s: null } });
-        m.interactions.push({ id: `interaction_pickup_${item}`, trigger: "proximity", target_ref: host.id, behavior_ref: bid, params: { radius: 3, added_by: "repair" } });
+        if (!addInteraction({ id: `interaction_pickup_${item}`, trigger: "proximity", target_ref: host.id, behavior_ref: bid, params: { radius: 3, added_by: "repair" } })) {
+          skipped.push({ ...f, why: `'${item}' already has a pickup interaction; a second one would be the same object twice` });
+          break;
+        }
         applied.push({ fix: "place_item", target: item, host: host.id });
         break;
       }
@@ -420,13 +489,13 @@ export function repair(manifest, findings) {
           if (!byId(m.behaviors, bid)) {
             m.behaviors.push({ id: bid, kind: "npc_ai", spec: { npc: npc.id, mode: "dialogue" } });
           }
-          m.interactions.push({
+          if (!addInteraction({
             id: `interaction_talk_${npc.id}`,
             trigger: "interact",
             target_ref: npc.id,
             behavior_ref: bid,
             params: { prompt: `Talk to ${npc.name || npc.id}`, added_by: "repair" },
-          });
+          })) continue;
           added++;
         }
         if (!added) { skipped.push({ ...f, why: mute.length ? `every NPC is mute (${mute.length}); dialogue cannot be invented` : "no NPC to wire" }); break; }
@@ -439,6 +508,7 @@ export function repair(manifest, findings) {
         // patched with an invented target. A world with fewer real quests beats
         // a world with a quest that lies.
         const qid = String(f.where).split(".")[0];
+        if (held.has(qid)) { skipped.push({ ...f, why: heldNote(qid) }); break; }
         const before = m.quests.length;
         m.quests = m.quests.filter((q) => q.id !== qid);
         if (m.quests.length < before) applied.push({ fix: "drop_quest", target: qid, note: "removed rather than fabricating a target" });
@@ -447,6 +517,7 @@ export function repair(manifest, findings) {
       }
       case "drop_or_substitute": {
         const id = f.where;
+        if (held.has(id)) { skipped.push({ ...f, why: heldNote(id) }); break; }
         const beforeS = m.structures.length, beforeN = m.npcs.length;
         m.structures = m.structures.filter((s) => s.id !== id);
         m.npcs = m.npcs.filter((n) => n.id !== id);
@@ -455,6 +526,7 @@ export function repair(manifest, findings) {
         break;
       }
       case "wire_or_drop": {
+        if (held.has(f.where)) { skipped.push({ ...f, why: heldNote(f.where) }); break; }
         m.behaviors = m.behaviors.filter((b) => b.id !== f.where);
         applied.push({ fix: "drop_orphan_behavior", target: f.where });
         break;
@@ -486,11 +558,11 @@ export function repair(manifest, findings) {
           if (!byId(m.behaviors, bid)) {
             m.behaviors.push({ id: bid, kind: "door", spec: { opens: "inward", speed: 2, auto_close_s: 30 } });
           }
-          m.interactions.push({
+          if (!addInteraction({
             id: `interaction_door_${st.id}`, trigger: "interact",
             target_ref: st.id, behavior_ref: bid,
             params: { prompt: `Enter ${st.name || st.id}`, added_by: "repair" },
-          });
+          })) continue;
           doors++;
         }
         if (!doors) { skipped.push({ ...f, why: "no enterable structure is missing a door" }); break; }
@@ -510,10 +582,8 @@ export function repair(manifest, findings) {
         const made = [];
         const wire = (target, bid, kind, spec, prompt) => {
           if (!byId(m.behaviors, bid)) { m.behaviors.push({ id: bid, kind, spec }); made.push(kind); }
-          if (!wired.has(target)) {
-            m.interactions.push({ id: `interaction_${kind}_${target}`, trigger: "interact", target_ref: target, behavior_ref: bid, params: { prompt, added_by: "repair" } });
-            wired.add(target);
-          }
+          if (wired.has(target)) return;
+          if (addInteraction({ id: `interaction_${kind}_${target}`, trigger: "interact", target_ref: target, behavior_ref: bid, params: { prompt, added_by: "repair" } })) wired.add(target);
         };
         for (const n of m.npcs || []) {
           if (!npcHasSpeech(n)) continue;
@@ -522,7 +592,13 @@ export function repair(manifest, findings) {
         for (const st of (m.structures || []).filter((x) => x.enterable)) {
           wire(st.id, `behavior_door_${st.id}`, "door", { opens: "inward", speed: 2, auto_close_s: 30 }, `Enter ${st.name || st.id}`);
         }
+        // An item the world already hands out does not need a second pickup.
+        // The planner hosts pickups on the structure the item is found in, so
+        // the item's own id is not in `wired` and this loop used to wire it
+        // again — the same object twice, and an interaction id already taken.
+        const alreadyObtainable = obtainableItems();
         for (const it of m.items || []) {
+          if (alreadyObtainable.has(it.id)) continue;
           wire(it.id, `behavior_pickup_${it.id}`, "pickup", { item: it.id }, `Take ${it.name || it.id}`);
         }
         if (!made.length) {
@@ -632,20 +708,42 @@ export function repair(manifest, findings) {
         // not a place you can be, so the terrain under it is eased toward its
         // own median height. The heightmap is the same data the runtime walks
         // on, so this is a real change, not a relabelling of the finding.
+        // The grid lives at `terrain.data`. This read `terrain.heightmap`, which
+        // no manifest has ever had — the schema calls the field `data`, and so
+        // do heightAt(), extendTerrain(), applyDelta() and the spatial provider
+        // that produces it. `heightmap` is the terrain KIND, not the field.
+        //
+        // So on every real world this repair skipped with "no heightmap to
+        // flatten", `zone_not_walkable` survived every round, and a world that
+        // was one terrain pass away from shipping was rejected instead. It went
+        // unnoticed because the test built its fixture from the same wrong
+        // memory the repair did, and so agreed with it about a world that does
+        // not exist. This is the fourth time that has happened here; the test
+        // now runs over a real assembled manifest as well as a hand-built one.
+        const t = m.terrain;
         const z = byId(m.zones, f.where);
-        const hm = m.terrain?.heightmap;
-        if (!z || !Array.isArray(hm) || !hm.length) {
-          skipped.push({ ...f, why: !z ? "zone gone" : "this world has no heightmap to flatten" });
+        const hm = Array.isArray(t?.data) && t.data.length && Array.isArray(t.data[0]) ? t.data : null;
+        if (!z || !hm) {
+          skipped.push({ ...f, why: !z ? "zone gone" : "this world has no terrain grid to flatten" });
           break;
         }
-        const size = m.terrain.size || { w: hm[0].length, h: hm.length };
         const [x0, z0, x1, z1] = z.bounds;
         const cols = hm[0].length, rows = hm.length;
-        const cx0 = Math.max(0, Math.floor((x0 / size.w) * cols)), cx1 = Math.min(cols - 1, Math.ceil((x1 / size.w) * cols));
-        const cz0 = Math.max(0, Math.floor((z0 / size.h) * rows)), cz1 = Math.min(rows - 1, Math.ceil((z1 / size.h) * rows));
+        const size = t.size || { w: cols, h: rows };
+        // Metres to cells exactly as heightAt does it, because the point of the
+        // repair is to change the ground the walk simulation samples. A private
+        // mapping here would ease cells the agent never stands on.
+        const cw = t.resolution?.cell_w || size.w / cols;
+        const ch = t.resolution?.cell_h || size.h / rows;
+        if (!Number.isFinite(cw) || !Number.isFinite(ch) || cw <= 0 || ch <= 0) {
+          skipped.push({ ...f, why: "the terrain grid has no usable cell size" });
+          break;
+        }
+        const cx0 = Math.max(0, Math.floor(x0 / cw)), cx1 = Math.min(cols - 1, Math.ceil(x1 / cw));
+        const cz0 = Math.max(0, Math.floor(z0 / ch)), cz1 = Math.min(rows - 1, Math.ceil(z1 / ch));
         const vals = [];
-        for (let r = cz0; r <= cz1; r++) for (let c = cx0; c <= cx1; c++) vals.push(hm[r][c]);
-        if (!vals.length) { skipped.push({ ...f, why: "the zone covers no heightmap cells" }); break; }
+        for (let r = cz0; r <= cz1; r++) for (let c = cx0; c <= cx1; c++) if (Number.isFinite(hm[r]?.[c])) vals.push(hm[r][c]);
+        if (!vals.length) { skipped.push({ ...f, why: "the zone covers no terrain cells" }); break; }
         vals.sort((a, b) => a - b);
         const median = vals[Math.floor(vals.length / 2)];
         // Eased, not levelled: a billiard-table zone reads as broken terrain.
@@ -653,11 +751,35 @@ export function repair(manifest, findings) {
         let touched = 0;
         for (let r = cz0; r <= cz1; r++) {
           for (let c = cx0; c <= cx1; c++) {
+            if (!Number.isFinite(hm[r]?.[c])) continue;
             hm[r][c] = hm[r][c] + (median - hm[r][c]) * EASE;
             touched++;
           }
         }
-        applied.push({ fix: "flatten_zone", zone: z.id, cells: touched, toward: Number(median.toFixed(3)), ease: EASE });
+        if (!touched) { skipped.push({ ...f, why: "the zone covers no terrain cells" }); break; }
+        // Re-measure the ground that just changed.
+        //
+        // `zone_not_walkable` is raised from `navigation.walkable_zones`, which
+        // is a RECORDED measurement, not a live read of the terrain. Easing the
+        // heightmap without updating it left the finding standing on a stale
+        // number: the repair applied, reported success, and the identical
+        // finding came back the next round — the world levelled and rejected
+        // anyway. The measurement is re-taken with the spatial provider's own
+        // definition of walkable (local slope under 2.2 over a 4m step) so the
+        // number still means what every other reader thinks it means.
+        m.navigation = m.navigation || {};
+        m.navigation.walkable_zones = m.navigation.walkable_zones || [];
+        const measured = measureWalkability(m.terrain, z);
+        const wi = m.navigation.walkable_zones.findIndex((w) => w.zone === z.id);
+        const entry = { zone: z.id, ...measured, source: "repair:flatten_zone" };
+        if (wi >= 0) m.navigation.walkable_zones[wi] = entry;
+        else m.navigation.walkable_zones.push(entry);
+
+        applied.push({
+          fix: "flatten_zone", zone: z.id, cells: touched,
+          toward: Number(median.toFixed(3)), ease: EASE,
+          walkable_fraction: measured.walkable_fraction,
+        });
         break;
       }
 
@@ -703,7 +825,9 @@ export function repair(manifest, findings) {
     // A giver who no longer exists is a schema error too; clearing it keeps the
     // quest playable rather than deleting work over a missing name.
     if (q.giver_npc && !npcIds.has(q.giver_npc)) q.giver_npc = null;
-    if (!q.steps.length) { droppedQuests.push(q.id); return false; }
+    // A quest a player has finished stays, even with nothing left to do in it:
+    // deleting it would erase their record of having done it.
+    if (!q.steps.length && !held.has(q.id)) { droppedQuests.push(q.id); return false; }
     return true;
   });
   if (prunedSteps) applied.push({ fix: "prune_dangling_quest_steps", removed: prunedSteps });
@@ -712,6 +836,36 @@ export function repair(manifest, findings) {
   if (droppedQuests.length) applied.push({ fix: "drop_emptied_quests", quests: droppedQuests });
 
   return { manifest: m, applied, skipped };
+}
+
+/**
+ * What fraction of a zone can actually be stood on?
+ *
+ * Deliberately the spatial provider's definition, sampled the same way (a grid
+ * of at most 12x12 points inset from the bounds, walkable where the local slope
+ * over a 4m step is under 2.2). `navigation.walkable_zones` is read by the
+ * navigation validator and by the runtime, and a repair that wrote a number
+ * meaning something else would be lying to both of them.
+ */
+function measureWalkability(terrain, z) {
+  const [x0, z0, x1, z1] = z.bounds;
+  const stepX = Math.max(4, (x1 - x0) / 12), stepZ = Math.max(4, (z1 - z0) / 12);
+  let ok = 0, total = 0, sumY = 0;
+  for (let sx = x0 + 2; sx < x1 - 2; sx += stepX) {
+    for (let sz = z0 + 2; sz < z1 - 2; sz += stepZ) {
+      total++;
+      const y = heightAt(terrain, sx, sz);
+      const slope = Math.max(
+        Math.abs(y - heightAt(terrain, Math.min(sx + 4, x1 - 1), sz)),
+        Math.abs(y - heightAt(terrain, sx, Math.min(sz + 4, z1 - 1)))
+      );
+      if (slope < 2.2) { ok++; sumY += y; }
+    }
+  }
+  return {
+    walkable_fraction: total ? Number((ok / total).toFixed(3)) : 0,
+    mean_ground_y: total && ok ? Number((sumY / ok).toFixed(2)) : 0,
+  };
 }
 
 function findSafeSpawn(m) {
@@ -754,7 +908,7 @@ function findSafeSpawn(m) {
  * repaired, and the loop now stops as soon as a round applies nothing, so the
  * extra round costs nothing on worlds that do not need it.
  */
-export async function playtestAndRepair(manifest, { maxRounds = 3 } = {}) {
+export async function playtestAndRepair(manifest, { maxRounds = 3, liveState = null } = {}) {
   const rounds = [];
   let current = manifest;
 
@@ -779,7 +933,7 @@ export async function playtestAndRepair(manifest, { maxRounds = 3 } = {}) {
     if (!fixable.length) {
       return { manifest: current, passed: false, verdict: verdict.verdict, rounds, repairs: [], note: "no automatic repair applies to these findings" };
     }
-    const r = repair(current, fixable);
+    const r = repair(current, fixable, { liveState });
     rounds[rounds.length - 1].repairs = r.applied;
     rounds[rounds.length - 1].skipped_repairs = r.skipped;
     if (!r.applied.length) {
