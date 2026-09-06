@@ -26,6 +26,14 @@ jobs:
       - name: Secret scan
         run: node scripts/secret-scan.mjs .
 
+      - name: Release verification (money dark, chain linear, seed quarantined)
+        run: |
+          if [ -f scripts/verify-release.mjs ]; then
+            node scripts/verify-release.mjs
+          else
+            echo "verify-release.mjs not present yet"
+          fi
+
       - name: Dependency audit
         run: npm audit --audit-level=high
 
