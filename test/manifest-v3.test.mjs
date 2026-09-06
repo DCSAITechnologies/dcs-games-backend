@@ -238,3 +238,33 @@ test("an unlicensed asset warns but does not fail — licensing is a launch bloc
   assert.ok(r.warnings.some((w) => /licence/.test(w.message)));
   assert.match(r.warnings.find((w) => /licence/.test(w.message)).hint, /public-launch blocker/);
 });
+
+test("V3 GATE: every seed produces a schema-valid manifest, not just the ones we happened to try", async () => {
+  // Seed 20 on the default archetype produced `zone_central` twice and failed
+  // WorldManifestV3 — a 500 on generate, the whole world lost to a name
+  // collision. DEFAULT_ARCHETYPE listed four districts while districtCount runs
+  // 3..5, so `i % length` wrapped. It surfaced only because one authorisation
+  // test happened to land on that seed.
+  const { createAssemblyRouter } = await import("../src/v3/router/assembly.mjs");
+  const r = createAssemblyRouter({});
+  const prompts = [
+    "a monastery on a cliff where bells ring",   // matches no archetype -> default
+    "a drowned tidal village",
+    "a neon city at night",
+    "a haunted manor",
+    "a forest camp by a river",
+    "a derelict space station",
+    "a castle keep above the fields",
+  ];
+  const bad = [];
+  for (let seed = 0; seed < 40; seed++) {
+    const prompt = prompts[seed % prompts.length];
+    const b = await r.assemble({ prompt, worldId: `w_seed_${seed}`, creatorId: "u", seed });
+    if (!b.validation.ok) {
+      bad.push(`seed ${seed} (${prompt}): ${b.validation.errors.slice(0, 2).map((e) => `${e.path} ${e.message}`).join("; ")}`);
+    }
+    const ids = b.manifest.zones.map((z) => z.id);
+    if (new Set(ids).size !== ids.length) bad.push(`seed ${seed}: duplicate zone ids ${ids.join(",")}`);
+  }
+  assert.deepEqual(bad, [], `these seeds cannot be generated at all:\n  ${bad.join("\n  ")}`);
+});

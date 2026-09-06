@@ -794,3 +794,51 @@ test("B4: heightAt degrades on nonsense input instead of throwing", async () => 
   assert.equal(heightAt(t, 1e9, 1e9), 4, "far out of bounds still clamps to the edge");
   assert.equal(heightAt(null, 0, 0), 0);
 });
+
+test("B4 GATE: link_zone connects an orphan cluster to the spawn, not to itself", async () => {
+  // The repair used to link each unreachable zone to its NEAREST zone. When
+  // several zones are orphaned together — the usual case, since a cluster is
+  // orphaned as a cluster — the nearest zone is another orphan, so the repair
+  // wired orphans to each other and never to the spawn. It reported success
+  // every round, the loop counted that as progress, and the world was rejected
+  // anyway. Staging applied the identical three links in rounds 1 and 2.
+  const m = emptyish();
+  m.terrain = { kind: "heightmap", size: { w: 400, h: 100 }, data: Array.from({ length: 16 }, () => Array(64).fill(0)) };
+  m.zones = [
+    { id: "z_spawn", name: "Home", bounds: [0, 0, 50, 100] },
+    { id: "z_a", name: "Far A", bounds: [200, 0, 250, 100] },
+    { id: "z_b", name: "Far B", bounds: [260, 0, 310, 100] },
+    { id: "z_c", name: "Far C", bounds: [320, 0, 370, 100] },
+  ];
+  m.spawn = { player_spawns: [{ id: "sp", position: { x: 25, y: 0, z: 50 }, zone: "z_spawn" }] };
+  m.navigation = { links: [], walkable_zones: [] };
+
+  // The orphans are far from home and close to each other — precisely the
+  // arrangement that made "nearest" the wrong answer.
+  const orphans = ["z_a", "z_b", "z_c"].map((id) => ({ id: "zone_unreachable", severity: "major", where: id, fix: "link_zone" }));
+  const r = repair(m, orphans);
+
+  const adj = new Map(r.manifest.zones.map((z) => [z.id, new Set()]));
+  for (const l of r.manifest.navigation.links) { adj.get(l.from)?.add(l.to); adj.get(l.to)?.add(l.from); }
+  const seen = new Set(["z_spawn"]); const q = ["z_spawn"];
+  while (q.length) for (const n of adj.get(q.shift()) || []) if (!seen.has(n)) { seen.add(n); q.push(n); }
+
+  for (const z of m.zones) {
+    assert.ok(seen.has(z.id), `${z.id} is still unreachable from the spawn after the repair claimed to link it`);
+  }
+});
+
+test("B4: link_zone does not pile up duplicate links round after round", () => {
+  const m = emptyish();
+  m.zones = [
+    { id: "z_spawn", name: "Home", bounds: [0, 0, 50, 50] },
+    { id: "z_a", name: "A", bounds: [60, 0, 110, 50] },
+  ];
+  m.spawn = { player_spawns: [{ id: "sp", position: { x: 25, y: 0, z: 25 }, zone: "z_spawn" }] };
+  const first = repair(m, [{ id: "zone_unreachable", severity: "major", where: "z_a", fix: "link_zone" }]);
+  assert.equal(first.manifest.navigation.links.length, 1);
+
+  const second = repair(first.manifest, [{ id: "zone_unreachable", severity: "major", where: "z_a", fix: "link_zone" }]);
+  assert.equal(second.manifest.navigation.links.length, 1, "a second pass must not append the same link again");
+  assert.match(second.skipped.find((s) => s.fix === "link_zone").why, /already reachable/);
+});

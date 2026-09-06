@@ -97,7 +97,10 @@ const ARCHETYPES = {
 
 const DEFAULT_ARCHETYPE = {
   genre: "adventure", weather: "clear", time: 0.5,
-  districts: ["central", "north_quarter", "south_quarter", "outskirts"],
+  // Five, because districtCount runs 3..5. Every named archetype already has at
+  // least five; this one had four, so any world that fell back to the default
+  // and rolled a 5-district layout wrapped round to "central" a second time.
+  districts: ["central", "north_quarter", "south_quarter", "outskirts", "riverside"],
   buildings: ["hall", "house", "workshop", "store", "tower", "shed"],
   npcRoles: ["guide", "merchant", "guard", "resident"],
   items: ["key", "satchel", "note", "tool"],
@@ -130,8 +133,16 @@ export function planWorldLocally(req = {}) {
   // --- districts: irregular strips off a spine, not an even grid ------------
   const zones = [];
   let cursorX = 12;
+  // Uniqueness is enforced here rather than trusted from the archetype lists:
+  // `i % length` wraps, and a duplicate zone id fails WorldManifestV3, which is
+  // a 500 on generate — the whole world lost to a name collision. Seed 20 on
+  // the default archetype produced `zone_central` twice, deterministically.
+  const usedZoneIds = new Set();
   for (let i = 0; i < districtCount; i++) {
-    const name = A.districts[i % A.districts.length];
+    const base = A.districts[i % A.districts.length];
+    let name = base, n = 1;
+    while (usedZoneIds.has(`zone_${name}`)) name = `${base}_${++n}`;
+    usedZoneIds.add(`zone_${name}`);
     const w = Math.floor((size.w - 24) / districtCount * (0.72 + r() * 0.55));
     const depth = Math.floor(size.h * (0.42 + r() * 0.45));
     const zTop = Math.floor(r() * (size.h - depth - 10)) + 5;

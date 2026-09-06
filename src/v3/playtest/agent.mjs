@@ -321,20 +321,49 @@ export function repair(manifest, findings) {
         break;
       }
       case "link_zone": {
-        // Link the orphan to its nearest neighbour by centre distance. This is a
-        // real navigation link, not a claim that one already existed.
+        // Link the orphan to the nearest zone the player can ALREADY reach.
+        //
+        // This used to pick the nearest zone by centre distance, full stop.
+        // When several zones are unreachable together — the usual case, since
+        // an orphaned cluster is orphaned as a cluster — the nearest neighbour
+        // is very often another orphan, so the repair joined orphans to each
+        // other and never to the spawn. It reported success every round, the
+        // loop counted that as progress, and `zone_unreachable` survived to
+        // fail the world. Staging showed it exactly: the same three links
+        // applied in round 1 and again in round 2, unchanged.
         const z = byId(m.zones, f.where);
         if (!z || m.zones.length < 2) { skipped.push({ ...f, why: "nothing to link to" }); break; }
+
+        m.navigation = m.navigation || { links: [] };
+        m.navigation.links = m.navigation.links || [];
+
+        // Who can the player reach right now, over the links that exist?
+        const adj = new Map(m.zones.map((zz) => [zz.id, new Set()]));
+        for (const l of m.navigation.links) {
+          if (adj.has(l.from) && adj.has(l.to)) { adj.get(l.from).add(l.to); adj.get(l.to).add(l.from); }
+        }
+        const start = m.spawn?.player_spawns?.[0]?.zone || m.zones[0].id;
+        const reachable = new Set([start]);
+        const queue = [start];
+        while (queue.length) {
+          for (const n of adj.get(queue.shift()) || []) if (!reachable.has(n)) { reachable.add(n); queue.push(n); }
+        }
+        if (reachable.has(z.id)) { skipped.push({ ...f, why: "already reachable from the spawn" }); break; }
+
         const c = (zz) => ({ x: (zz.bounds[0] + zz.bounds[2]) / 2, z: (zz.bounds[1] + zz.bounds[3]) / 2 });
         let best = null;
         for (const other of m.zones) {
-          if (other.id === z.id) continue;
+          if (other.id === z.id || !reachable.has(other.id)) continue;
           const d = dist(c(z), c(other));
           if (!best || d < best.d) best = { id: other.id, d };
         }
-        if (!best) { skipped.push({ ...f, why: "no neighbour" }); break; }
-        m.navigation = m.navigation || { links: [] };
-        m.navigation.links = m.navigation.links || [];
+        if (!best) { skipped.push({ ...f, why: "no zone the player can already reach" }); break; }
+
+        const already = m.navigation.links.some(
+          (l) => (l.from === best.id && l.to === z.id) || (l.from === z.id && l.to === best.id)
+        );
+        if (already) { skipped.push({ ...f, why: `a link to '${best.id}' already exists, so the zone is unreachable for another reason` }); break; }
+
         m.navigation.links.push({ from: best.id, to: z.id, kind: "path", cost: Number(best.d.toFixed(1)), added_by: "repair" });
         applied.push({ fix: "link_zone", target: f.where, linked_to: best.id });
         break;
