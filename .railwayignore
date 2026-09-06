@@ -1,0 +1,11 @@
+# Railway uses .gitignore when this file is absent — which excluded
+# build-info.json, the one file whose whole purpose is to travel with the
+# upload so /health can say which commit is serving. This file exists to let it
+# through while still keeping the upload small.
+node_modules
+.git
+.dcs-data
+coverage
+reports/tmp
+*.log
+.DS_Store
