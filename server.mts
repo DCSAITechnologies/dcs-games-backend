@@ -27,6 +27,7 @@ import { planExpansion, planEdit } from "./src/v3/expansion/planner.mjs";       
 import { applyDelta, verifyPreservation, emptyLiveState } from "./src/v3/expansion/delta.mjs";
 import { createWorldMemory } from "./src/v3/memory/world-memory.mjs";           // B7: factual world chronology
 import { createCompanionService } from "./src/v3/companion/companion.mjs";      // B5: personal AI companion
+import { createSocialService } from "./src/core/social.mjs";                    // B15: durable profiles, friends, parties, teams, studios, discovery
 import { createSafetyService } from "./src/core/safety.mjs";                    // A5: age tiers, consent, report/block, moderation audit
 import { assertSchema, currentVersion } from "./src/core/schema.mjs";           // A2: boot-time schema assertion — refuse to serve an unsupported schema
 import { createWorldRepository } from "./src/core/worldstore.mjs";          // A3: durable, lossless, idempotent, ownership-aware world persistence
@@ -56,6 +57,7 @@ const econRouter: any = createEconomyRouter({}); // CW6 v3.0: DARK; supabase + s
 const v3 = createAssemblyRouter();                                           // B1
 const worldMemory = createWorldMemory();                                     // B7
 const companions = createCompanionService({ worldMemory });                  // B5
+const social = createSocialService();                                        // B15: replaces the in-memory fixture users
 const safety = createSafetyService();                                        // A5: real persistence, so moderation output can never be faked
 const repo = createWorldRepository();                                        // A3: replaces the process-local Map + swallowed best-effort insert
 console.log("A3 world store:", repo.kind);
@@ -143,6 +145,7 @@ const server = http.createServer(async (req, res) => {
       schema: "runtime-ready (cw2 toRuntimeWorld; zero runtime patches)",
       routes: ["/api/public/worlds", "/api/worlds/mine", "/api/me/revenue", "/worlds/generate", "/worlds/:id/manifest", "/atlas/key", "/verify", "/safety/age", "/safety/report", "/safety/block", "/safety/consent/media"],
       manifest_version: MANIFEST_VERSION,
+      social: { profiles: true, friends: true, parties: true, teams: true, studios: true, discovery: true, persistence: "durable" },
       v3: { assembly_router: true, playtest_gate: true, expansion_delta: true, world_memory: true, companion: true, chat_edit: true },
       safety: { age_gating: true, report_block: true, parental_consent: true, media_consent: true, automated_content_moderation: false, minor_onboarding_enabled: false },
       netcode: "ws-separate-service", ts: new Date().toISOString(),
@@ -296,6 +299,159 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, consents: await safety.mediaConsents(me.id) });
     }
 
+    // ================= B15 social, profile and discovery ==================
+    if (url === "/me/profile" && method === "GET") {
+      const me = await mustBe(req, cid);
+      return send(res, 200, { ok: true, ...(await social.me(me)) });
+    }
+    if (url === "/me/profile" && method === "PATCH") {
+      const me = await mustBe(req, cid);
+      const b = await readBody(req);
+      await social.updateProfile(me, b);
+      return send(res, 200, { ok: true, ...(await social.me(me)) });
+    }
+    {
+      const mm = url.match(/^\/profiles\/([^/]+)$/);
+      if (mm && method === "GET") {
+        // Public and deliberately minimal: no email, no principal id.
+        return send(res, 200, { ok: true, profile: await social.publicProfile(mm[1]) });
+      }
+    }
+
+    if (url === "/social/friends" && method === "GET") {
+      const me = await mustBe(req, cid);
+      return send(res, 200, { ok: true, ...(await social.friendList(me.id)) });
+    }
+    if (url === "/social/friends" && method === "POST") {
+      const me = await mustBe(req, cid);
+      const b = await readBody(req);
+      if (await safety.isBlocked(me.id, b.friend_id)) throw Errors.forbidden("this relationship is blocked", { correlationId: cid });
+      return send(res, 201, { ok: true, request: await social.requestFriend(me.id, b.friend_id) });
+    }
+    if (url === "/social/friends/accept" && method === "POST") {
+      const me = await mustBe(req, cid);
+      const b = await readBody(req);
+      return send(res, 200, { ok: true, friendship: await social.acceptFriend(me.id, b.friend_id) });
+    }
+    if (url === "/social/friends" && method === "DELETE") {
+      const me = await mustBe(req, cid);
+      const b = await readBody(req);
+      return send(res, 200, { ok: true, ...(await social.removeFriend(me.id, b.friend_id)) });
+    }
+
+    if (url === "/social/parties" && method === "POST") {
+      const me = await mustBe(req, cid);
+      const b = await readBody(req);
+      return send(res, 201, { ok: true, party: await social.createParty(me.id, { worldId: b.world_id, maxSize: b.max_size ?? 8, open: b.open !== false }) });
+    }
+    if (url === "/social/parties" && method === "GET") {
+      const me = await mustBe(req, cid);
+      return send(res, 200, { ok: true, parties: await social.myParties(me.id) });
+    }
+    {
+      let mm = url.match(/^\/social\/parties\/([^/]+)$/);
+      if (mm && method === "GET") return send(res, 200, { ok: true, party: await social.getParty(mm[1]) });
+      mm = url.match(/^\/social\/parties\/([^/]+)\/join$/);
+      if (mm && method === "POST") {
+        const me = await mustBe(req, cid);
+        return send(res, 200, { ok: true, party: await social.joinParty(me.id, mm[1]) });
+      }
+      mm = url.match(/^\/social\/parties\/([^/]+)\/leave$/);
+      if (mm && method === "POST") {
+        const me = await mustBe(req, cid);
+        return send(res, 200, { ok: true, party: await social.leaveParty(me.id, mm[1]) });
+      }
+    }
+
+    if (url === "/social/teams" && method === "POST") {
+      const me = await mustBe(req, cid);
+      const b = await readBody(req);
+      return send(res, 201, { ok: true, team: await social.createTeam(me.id, b.name) });
+    }
+    if (url === "/social/teams" && method === "GET") {
+      const me = await mustBe(req, cid);
+      return send(res, 200, { ok: true, teams: await social.myTeams(me.id) });
+    }
+    {
+      let mm = url.match(/^\/social\/teams\/([^/]+)$/);
+      if (mm && method === "GET") return send(res, 200, { ok: true, team: await social.getTeam(mm[1]) });
+      mm = url.match(/^\/social\/teams\/([^/]+)\/members$/);
+      if (mm && method === "POST") {
+        const me = await mustBe(req, cid);
+        const b = await readBody(req);
+        return send(res, 200, { ok: true, team: await social.addTeamMember(me.id, mm[1], b.member_id, b.role || "member") });
+      }
+      if (mm && method === "DELETE") {
+        const me = await mustBe(req, cid);
+        const b = await readBody(req);
+        return send(res, 200, { ok: true, team: await social.removeTeamMember(me.id, mm[1], b.member_id) });
+      }
+    }
+
+    if (url === "/social/studios" && method === "POST") {
+      const me = await mustBeInternalTester(req, cid);       // creator-org surface
+      const b = await readBody(req);
+      return send(res, 201, { ok: true, studio: await social.createStudio(me.id, b.name) });
+    }
+    {
+      let mm = url.match(/^\/social\/studios\/([^/]+)$/);
+      if (mm && method === "GET") {
+        await mustBeInternalTester(req, cid);
+        return send(res, 200, { ok: true, studio: await social.getStudio(mm[1]) });
+      }
+      mm = url.match(/^\/social\/studios\/([^/]+)\/members$/);
+      if (mm && method === "POST") {
+        const me = await mustBeInternalTester(req, cid);
+        const b = await readBody(req);
+        return send(res, 200, { ok: true, studio: await social.addStudioMember(me.id, mm[1], b.member_id, b.role || "member") });
+      }
+      mm = url.match(/^\/social\/studios\/([^/]+)\/split$/);
+      if (mm && method === "POST") {
+        const me = await mustBeInternalTester(req, cid);
+        const b = await readBody(req);
+        const studio = await social.setStudioSplit(me.id, mm[1], b.splits);
+        return send(res, 200, { ok: true, studio, payments_live: PAYMENTS_LIVE, note: "the split is recorded for modelling; no money moves" });
+      }
+    }
+
+    // ---- discovery: ranks on MEASURED activity only ---------------------
+    if (url === "/v3/discover" && method === "GET") {
+      const q = new URLSearchParams((req.url || "").split("?")[1] || "");
+      const published = await repo.listPublished(200);
+      const result = await social.discover(published, {
+        sort: q.get("sort") || "recent",
+        genre: q.get("genre"),
+        q: q.get("q"),
+        limit: Math.min(60, parseInt(q.get("limit") || "24", 10) || 24),
+      });
+      return send(res, 200, { ok: true, ...result });
+    }
+    {
+      const mm = url.match(/^\/v3\/worlds\/([^/]+)\/play$/);
+      if (mm && method === "POST") {
+        // Recording a play is what makes discovery honest: no row, no ranking.
+        const me = await whoOrNull(req, cid);
+        const b = await readBody(req);
+        await repo.get(mm[1], { requesterId: me?.id ?? null });
+        await social.recordPlay(mm[1], me?.id ?? null, b.seconds);
+        return send(res, 201, { ok: true, stats: await social.worldStats(mm[1]) });
+      }
+    }
+    {
+      const mm = url.match(/^\/v3\/worlds\/([^/]+)\/rate$/);
+      if (mm && method === "POST") {
+        const me = await mustBe(req, cid);
+        const b = await readBody(req);
+        await repo.get(mm[1], { requesterId: me.id });
+        await social.rateWorld(me.id, mm[1], b.rating);
+        return send(res, 200, { ok: true, stats: await social.worldStats(mm[1]) });
+      }
+    }
+    {
+      const mm = url.match(/^\/v3\/worlds\/([^/]+)\/stats$/);
+      if (mm && method === "GET") return send(res, 200, { ok: true, world_id: mm[1], stats: await social.worldStats(mm[1]) });
+    }
+
     // ================= DCS GAMES V3 =====================================
     if (url === "/v3/providers" && method === "GET") {
       // Honest provider status. Never claims a vendor that is not reachable.
@@ -329,6 +485,8 @@ const server = http.createServer(async (req, res) => {
 
       const saved = await repo.upsert({ worldId, ownerId: me.id, manifest: gate.manifest, state: "draft", title: gate.manifest.meta.title });
       await worldMemory.record(worldId, { kind: "created", summary: `"${gate.manifest.meta.title}" was generated from a prompt`, worldVersion: 1, actorId: me.id, detail: { prompt: b.prompt } });
+      await social.ensureProfile(me);
+      await social.recordWorldCreated(me.id);   // real counters, so /me is measured rather than decorative
 
       return send(res, 200, {
         ok: true, world_id: worldId, owner: me.id, world_version: saved.version,
@@ -512,6 +670,9 @@ const server = http.createServer(async (req, res) => {
       const receipt: any = issueWorldReceipt(id, me.id);
       wm.meta = wm.meta || {}; wm.meta.atlas_receipt_hash = receipt.receipt_hash; wm.meta.atlas_signed = !!receipt.sig;
       const saved = await repo.upsert({ worldId: id, ownerId: me.id, manifest: wm, state: "published" });
+      await social.ensureProfile(me);
+      await social.recordWorldPublished(me.id);
+      await worldMemory.record(id, { kind: "published", summary: "the world was published with a signed Atlas receipt", worldVersion: saved.version, actorId: me.id });
       const verify_url = "/verify?receipt=" + Buffer.from(JSON.stringify(receipt)).toString("base64");
       return send(res, 200, { ok: true, published: true, signed: !!receipt.sig, world_version: saved.version, receipt, verify_url, correlation_id: cid });
     }

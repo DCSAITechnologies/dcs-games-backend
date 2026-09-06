@@ -22,7 +22,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const MIGRATIONS_DIR = path.resolve(HERE, "../../migrations");
 
 /** The schema version this code requires. Boot fails loudly below it. */
-export const REQUIRED_SCHEMA_VERSION = 4;
+export const REQUIRED_SCHEMA_VERSION = 5;
 
 /** Tables the running service genuinely depends on. Missing one is fatal. */
 export const REQUIRED_TABLES = [
@@ -32,6 +32,9 @@ export const REQUIRED_TABLES = [
   "dcsgames_world_events",
   "dcsgames_internal_testers",
   "dcsgames_reports",
+  "dcsgames_principals",
+  "dcsgames_principal_friends",
+  "dcsgames_world_plays",
 ];
 
 export function loadMigrations(dir = MIGRATIONS_DIR) {

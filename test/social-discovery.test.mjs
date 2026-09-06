@@ -1,0 +1,309 @@
+// B15 — recovering the BUILT_DARK capabilities.
+//
+// Round-2 classified profiles, friends, parties, teams and studios as reachable
+// code with a process-local Map behind it, seeded with three fixture users. It
+// also found a column conflict that would have broken the first real friend
+// request. These tests assert the replacement is durable, correctly keyed and
+// honest about money.
+import test from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { createSocialService } from "../src/core/social.mjs";
+
+const tmp = () => ({ DCS_DATA_DIR: fs.mkdtempSync(path.join(os.tmpdir(), "dcs-social-")) });
+const svc = () => createSocialService(tmp());
+const P = (id, email = null, tester = false) => ({ id, email, isInternalTester: tester });
+
+// ================================================================== profile
+
+test("B15: a profile is created on first sight and is idempotent", async () => {
+  const s = svc();
+  const a = await s.ensureProfile(P("u1", "alice@dcsai.ai"));
+  const b = await s.ensureProfile(P("u1", "alice@dcsai.ai"));
+  assert.equal(a.principal_id, b.principal_id);
+  assert.equal(a.username, "alice");
+  assert.equal((await s.me(P("u1"))).username, "alice");
+});
+
+test("B15: a username collision does not break a first login", async () => {
+  const s = svc();
+  const a = await s.ensureProfile(P("u1", "alice@dcsai.ai"));
+  const b = await s.ensureProfile(P("u2", "alice@example.com"));
+  assert.equal(a.username, "alice");
+  assert.notEqual(b.username, "alice");
+  assert.match(b.username, /^alice_/);
+});
+
+test("B15 GATE: the profile survives a restart — it was an in-memory fixture before", async () => {
+  const env = tmp();
+  const a = createSocialService(env);
+  await a.ensureProfile(P("u1", "alice@dcsai.ai"));
+  await a.updateProfile(P("u1"), { display_name: "Alice", bio: "builds harbours" });
+  const b = createSocialService(env);                 // new service object, same disk
+  const me = await b.me(P("u1"));
+  assert.equal(me.display_name, "Alice");
+  assert.equal(me.bio, "builds harbours");
+});
+
+test("B15: the level comes from real signals, and is honestly conservative", async () => {
+  const s = svc();
+  const me = await s.me(P("u1", "alice@dcsai.ai"));
+  // No email provider is configured, so email_verified is false rather than assumed.
+  assert.equal(me.level_signals.email_verified, false);
+  assert.equal(me.level, "explorer");
+  assert.equal(me.level_signals.dcs_plus, false, "subscriptions are dark");
+  assert.equal(me.publish_credits, 1);
+  assert.equal(me.publish_credits_unlimited, false);
+  assert.equal(me.can_publish.allowed, true);
+});
+
+test("B15 GATE: the profile reports money as explicitly dark", async () => {
+  const s = svc();
+  const me = await s.me(P("u1"));
+  assert.equal(me.economy.payments_live, false);
+  assert.equal(me.economy.balance_minor, 0);
+  assert.equal(me.economy.dcs_plus, false);
+  assert.match(me.economy.note, /disabled/);
+});
+
+test("B15: only whitelisted profile fields can be edited", async () => {
+  const s = svc();
+  await s.ensureProfile(P("u1"));
+  await s.updateProfile(P("u1"), { display_name: "Alice" });
+  await assert.rejects(() => s.updateProfile(P("u1"), { worlds_published: 999 }), (e) => e.httpStatus === 403);
+  await assert.rejects(() => s.updateProfile(P("u1"), { is_internal_tester: true }), (e) => e.httpStatus === 403);
+});
+
+test("B15: a public profile leaks neither the email nor the principal id", async () => {
+  const s = svc();
+  await s.ensureProfile(P("u1", "alice@dcsai.ai"));
+  const pub = await s.publicProfile("alice");
+  assert.equal(pub.username, "alice");
+  assert.ok(!("email" in pub), "a public profile must not expose an email address");
+  assert.ok(!("principal_id" in pub), "a public profile must not expose the auth principal");
+});
+
+test("B15: creating and publishing worlds moves the real counters", async () => {
+  const s = svc();
+  await s.ensureProfile(P("u1"));
+  await s.recordWorldCreated("u1");
+  await s.recordWorldCreated("u1");
+  await s.recordWorldPublished("u1");
+  const me = await s.me(P("u1"));
+  assert.equal(me.worlds_created, 2);
+  assert.equal(me.worlds_published, 1);
+  assert.equal(me.xp, 150);
+});
+
+// ================================================================== friends
+
+test("B15 GATE: friendship uses the canonical columns and survives a restart", async () => {
+  const env = tmp();
+  const a = createSocialService(env);
+  const row = await a.requestFriend("u1", "u2");
+  // The live code wrote a_id/b_id; production has user_id/friend_id.
+  assert.ok("user_id" in row && "friend_id" in row, "the canonical columns must be used");
+  assert.ok(!("a_id" in row), "a_id does not exist in production and must not be written");
+  assert.equal(row.status, "requested");
+
+  const b = createSocialService(env);
+  await b.acceptFriend("u2", "u1");
+  assert.equal(await b.areFriends("u1", "u2"), true);
+});
+
+test("B15: a friend list separates accepted, incoming and outgoing", async () => {
+  const s = svc();
+  await s.requestFriend("u1", "u2");
+  await s.requestFriend("u3", "u1");
+  const mine = await s.friendList("u1");
+  assert.deepEqual(mine.friends, []);
+  assert.equal(mine.outgoing[0].id, "u2");
+  assert.equal(mine.incoming[0].id, "u3");
+
+  await s.acceptFriend("u1", "u3");
+  const after = await s.friendList("u1");
+  assert.equal(after.friends[0].id, "u3");
+  assert.equal(after.incoming.length, 0);
+});
+
+test("B15: a crossing friend request accepts rather than creating a duplicate", async () => {
+  const s = svc();
+  await s.requestFriend("u1", "u2");
+  const back = await s.requestFriend("u2", "u1");
+  assert.equal(back.status, "accepted", "two people asking each other should just become friends");
+  const l = await s.friendList("u1");
+  assert.equal(l.friends.length, 1);
+  assert.equal(l.outgoing.length, 0);
+});
+
+test("B15: you cannot befriend yourself, and a repeat request is idempotent", async () => {
+  const s = svc();
+  await assert.rejects(() => s.requestFriend("u1", "u1"), (e) => e.httpStatus === 422);
+  await s.requestFriend("u1", "u2");
+  const again = await s.requestFriend("u1", "u2");
+  assert.equal(again.idempotent, true);
+  assert.equal((await s.friendList("u1")).outgoing.length, 1);
+});
+
+test("B15: accepting a request that does not exist is a 404", async () => {
+  const s = svc();
+  await assert.rejects(() => s.acceptFriend("u1", "u2"), (e) => e.httpStatus === 404);
+});
+
+// ================================================================== parties
+
+test("B15: a party round-trips and enforces its size", async () => {
+  const s = svc();
+  const p = await s.createParty("u1", { maxSize: 2 });
+  assert.deepEqual(p.members, ["u1"]);
+  await s.joinParty("u2", p.id);
+  assert.equal((await s.getParty(p.id)).size, 2);
+  await assert.rejects(() => s.joinParty("u3", p.id), (e) => e.httpStatus === 409 && /full/.test(e.detail));
+});
+
+test("B15: an invite-only party refuses an uninvited join", async () => {
+  const s = svc();
+  const p = await s.createParty("u1", { open: false });
+  await assert.rejects(() => s.joinParty("u2", p.id), (e) => e.httpStatus === 403);
+});
+
+test("B15: the leader leaving hands over instead of orphaning the party", async () => {
+  const s = svc();
+  const p = await s.createParty("u1", { maxSize: 4 });
+  await s.joinParty("u2", p.id);
+  const after = await s.leaveParty("u1", p.id);
+  assert.equal(after.leader_id, "u2");
+  assert.deepEqual(after.members, ["u2"]);
+});
+
+test("B15: the last member leaving closes the party rather than leaving a ghost", async () => {
+  const s = svc();
+  const p = await s.createParty("u1");
+  const after = await s.leaveParty("u1", p.id);
+  assert.equal(after.closed, true);
+  assert.equal((await s.myParties("u1")).length, 0);
+});
+
+// ==================================================================== teams
+
+test("B15: teams enforce role permissions", async () => {
+  const s = svc();
+  const t = await s.createTeam("u1", "Harbour Crew");
+  await s.addTeamMember("u1", t.id, "u2", "member");
+  // A plain member cannot add anyone.
+  await assert.rejects(() => s.addTeamMember("u2", t.id, "u3"), (e) => e.httpStatus === 403);
+  // But they can leave.
+  const after = await s.removeTeamMember("u2", t.id, "u2");
+  assert.equal(after.members.length, 1);
+});
+
+test("B15: a team's owner cannot be removed, and a second owner cannot be added", async () => {
+  const s = svc();
+  const t = await s.createTeam("u1", "Crew");
+  await assert.rejects(() => s.removeTeamMember("u1", t.id, "u1"), (e) => e.httpStatus === 403);
+  await assert.rejects(() => s.addTeamMember("u1", t.id, "u2", "owner"), (e) => e.httpStatus === 403);
+});
+
+test("B15: a team needs a real name", async () => {
+  const s = svc();
+  await assert.rejects(() => s.createTeam("u1", "x"), (e) => e.httpStatus === 422);
+  await assert.rejects(() => s.createTeam(null, "Crew"), (e) => e.httpStatus === 401);
+});
+
+// ================================================================== studios
+
+test("B15 GATE: a studio split is recorded but never settles money", async () => {
+  const s = svc();
+  const st = await s.createStudio("u1", "NovaStudio");
+  assert.equal(st.payments_live, false);
+  assert.equal(st.split_total_bps, 10000);
+  assert.match(st.split_note, /no money moves/);
+
+  await s.addStudioMember("u1", st.id, "u2", "creator");
+  const after = await s.getStudio(st.id);
+  // Adding a member must not silently dilute anyone.
+  assert.equal(after.members.find((m) => m.member_id === "u2").split_bps, 0);
+  assert.equal(after.split_total_bps, 10000);
+});
+
+test("B15: a split must total exactly 100% and only name real members", async () => {
+  const s = svc();
+  const st = await s.createStudio("u1", "NovaStudio");
+  await s.addStudioMember("u1", st.id, "u2", "creator");
+
+  await assert.rejects(() => s.setStudioSplit("u1", st.id, [{ member_id: "u1", split_bps: 5000 }]), (e) => /10000/.test(e.detail));
+  await assert.rejects(() => s.setStudioSplit("u1", st.id, [{ member_id: "u1", split_bps: 5000 }, { member_id: "stranger", split_bps: 5000 }]), (e) => /not a member/.test(e.detail));
+
+  const ok = await s.setStudioSplit("u1", st.id, [{ member_id: "u1", split_bps: 7000 }, { member_id: "u2", split_bps: 3000 }]);
+  assert.equal(ok.split_total_bps, 10000);
+  assert.equal(ok.payments_live, false);
+});
+
+test("B15: only an owner or admin can configure a split", async () => {
+  const s = svc();
+  const st = await s.createStudio("u1", "NovaStudio");
+  await s.addStudioMember("u1", st.id, "u2", "creator");
+  await assert.rejects(() => s.setStudioSplit("u2", st.id, [{ member_id: "u1", split_bps: 10000 }]), (e) => e.httpStatus === 403);
+});
+
+// ================================================================ discovery
+
+const worldRow = (id, title, genre, updated) => ({
+  world_id: id, title, version: 1, owner_id: "u1", updated_at: updated,
+  manifest: { meta: { title, genre, tags: [genre], maturity: "13+" }, media: {} },
+});
+
+test("B15 GATE: discovery ranks on MEASURED activity, and says so when there is none", async () => {
+  const s = svc();
+  const worlds = [worldRow("w1", "Ashfall", "adventure", "2026-09-01"), worldRow("w2", "Neon", "openworld", "2026-09-05")];
+  const d = await s.discover(worlds, { sort: "most_played" });
+  assert.equal(d.count, 2);
+  assert.ok(d.worlds.every((w) => w.stats.plays === 0));
+  assert.match(d.note, /real zeros, not placeholders/);
+  assert.ok(d.worlds.every((w) => w.stats.rating_avg === null), "an unrated world has no average, not a default");
+});
+
+test("B15: recording real plays changes the ranking", async () => {
+  const s = svc();
+  const worlds = [worldRow("w1", "Ashfall", "adventure", "2026-09-01"), worldRow("w2", "Neon", "openworld", "2026-09-05")];
+  await s.recordPlay("w1", "p1", 300);
+  await s.recordPlay("w1", "p2", 120);
+  await s.recordPlay("w2", "p1", 60);
+
+  const d = await s.discover(worlds, { sort: "most_played" });
+  assert.equal(d.worlds[0].world_id, "w1");
+  assert.equal(d.worlds[0].stats.plays, 2);
+  assert.equal(d.worlds[0].stats.unique_players, 2);
+  assert.equal(d.worlds[0].stats.total_seconds, 420);
+  assert.equal(d.note, null, "with real activity there is nothing to disclaim");
+});
+
+test("B15: ratings are one per player and average honestly", async () => {
+  const s = svc();
+  await s.rateWorld("p1", "w1", 5);
+  await s.rateWorld("p2", "w1", 3);
+  await s.rateWorld("p1", "w1", 4);        // a player changing their mind
+  const st = await s.worldStats("w1");
+  assert.equal(st.rating_count, 2, "one rating per player");
+  assert.equal(st.rating_avg, 3.5);
+  await assert.rejects(() => s.rateWorld("p1", "w1", 9), (e) => e.httpStatus === 422);
+  await assert.rejects(() => s.rateWorld(null, "w1", 4), (e) => e.httpStatus === 401);
+});
+
+test("B15: discovery filters by genre and free text", async () => {
+  const s = svc();
+  const worlds = [worldRow("w1", "Ashfall Harbour", "adventure", "2026-09-01"), worldRow("w2", "Neon Block", "openworld", "2026-09-05")];
+  assert.equal((await s.discover(worlds, { genre: "adventure" })).count, 1);
+  assert.equal((await s.discover(worlds, { q: "neon" })).count, 1);
+  assert.equal((await s.discover(worlds, { q: "nothing matches this" })).count, 0);
+});
+
+test("B15: a placeholder thumbnail is labelled as one in discovery", async () => {
+  const s = svc();
+  const w = worldRow("w1", "Ashfall", "adventure", "2026-09-01");
+  w.manifest.media = { thumbnail_ref: "asset_thumbnail", thumbnail_is_placeholder: true };
+  const d = await s.discover([w]);
+  assert.equal(d.worlds[0].thumbnail_is_placeholder, true, "a placeholder must never pass as generated art");
+});
