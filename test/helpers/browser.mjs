@@ -198,7 +198,8 @@ export class Page {
     await new Promise((r) => setTimeout(r, waitMs));
   }
   async eval(expr) {
-    const r = await this.send("Runtime.evaluate", { expression: `(function(){${expr}})()`, returnByValue: true, awaitPromise: true });
+    // async so a test can await inside the page (settling a frame, for example).
+    const r = await this.send("Runtime.evaluate", { expression: `(async function(){${expr}})()`, returnByValue: true, awaitPromise: true });
     if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text);
     return r.result.value;
   }
