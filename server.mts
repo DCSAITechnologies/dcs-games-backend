@@ -1760,15 +1760,21 @@ const server = http.createServer(async (req, res) => {
             { correlationId: cid, meta: { rejected_state: String(b.state) } }
           );
         }
-        // The manifest is what every later stage trusts. validateManifest was
-        // imported and never called, so a structurally broken world could be
-        // stored and only fail much later, somewhere that could not explain it.
-        const v = validateManifest(b.manifest);
-        if (!v.ok) {
-          throw Errors.validation("the manifest is not a valid WorldManifestV3", {
-            correlationId: cid,
-            meta: { errors: v.errors.slice(0, 8).map((e: any) => `${e.path}: ${e.message}`) },
-          });
+        // Structural sanity only, deliberately.
+        //
+        // This is the V2 save route. V2 worlds are not V3-shaped, and stored
+        // worlds that DO declare `manifest_version: "3.0.0"` are not all
+        // complete — partial manifests are saved legitimately mid-edit.
+        // Validating against WorldManifestV3 here rejected all of them, which is
+        // a compatibility break dressed up as a fix; full validation belongs on
+        // the V3 write paths, where a complete manifest is the actual contract
+        // (generate already refuses to store one that fails it).
+        //
+        // What remains is the part that cannot be argued with: a manifest has to
+        // be an object. An array or a string reaching the store corrupts a world
+        // in a way nothing downstream can interpret.
+        if (!b.manifest || typeof b.manifest !== "object" || Array.isArray(b.manifest)) {
+          throw Errors.validation("manifest must be an object", { correlationId: cid });
         }
         const prior = await repo.get(m[1], { requesterId: me.id }).catch(() => null);
         const saved = await repo.upsert({ worldId: m[1], ownerId: me.id, manifest: b.manifest, state: prior?.state || "draft", expected_version: b.expected_version ?? null });
@@ -1788,8 +1794,25 @@ const server = http.createServer(async (req, res) => {
     m = url.match(/^\/worlds\/([^/]+)\/load$/);
     if (m && method === "GET") {
       const rec = await repo.get(m[1], { requesterId: principal?.id ?? null });
-      const snap = await persistence.load(m[1]);
-      return send(res, 200, { ok: true, world_id: m[1], world_version: rec.version, manifest_hash: rec.manifest_hash, state: rec.state, owner: rec.owner_id, manifest: rec.manifest, runtime_state: snap, correlation_id: cid });
+      // A world that has never been played has no runtime state, and that is not
+      // an error. The runtime registers a "base world" when a world is generated
+      // or entered; a world created through POST /worlds/:id/save has simply
+      // never been through that, so persistence.load threw "base world not
+      // found" and a plain save-then-load — the most basic thing the V2 surface
+      // does — answered 500 with an internal message.
+      //
+      // Only that specific absence is tolerated. Any other failure still raises,
+      // because a runtime snapshot that exists and cannot be read is a real
+      // fault and must not be flattened into "no state".
+      let snap = null;
+      let runtimeUnavailable: string | null = null;
+      try {
+        snap = await persistence.load(m[1]);
+      } catch (e: any) {
+        if (!/base world .* not found/i.test(String(e?.message || e))) throw e;
+        runtimeUnavailable = "this world has no runtime state yet";
+      }
+      return send(res, 200, { ok: true, world_id: m[1], world_version: rec.version, manifest_hash: rec.manifest_hash, state: rec.state, owner: rec.owner_id, manifest: rec.manifest, runtime_state: snap, runtime_note: runtimeUnavailable ?? undefined, correlation_id: cid });
     }
 
     return send(res, 404, { ok: false, error: "not_found", path: url, correlation_id: cid });

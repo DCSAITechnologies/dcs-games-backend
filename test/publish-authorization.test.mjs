@@ -126,15 +126,32 @@ test("PUBLISH GATE: an ordinary save does not silently unpublish a published wor
   assert.equal(after.state, "published", "saving an edit must not revert the world to a draft");
 });
 
-test("PUBLISH GATE: a structurally invalid manifest is refused at the door", async () => {
-  // validateManifest was imported and never called, so a broken world could be
-  // stored and only fail much later, somewhere that could not explain it.
+test("PUBLISH GATE: a V2 manifest still saves — this is the V2 route", async () => {
+  // Validating every manifest against V3 here would reject every legacy client:
+  // a compatibility break dressed up as a fix. V2 worlds are not V3-shaped and
+  // make no claim to be.
+  const fresh = "w2_" + crypto.randomBytes(8).toString("hex");
+  const r = await call(TESTER, "POST", `/worlds/${fresh}/save`, {
+    manifest: { title: "An old world", rooms: [{ id: "r1", name: "Hall" }] },
+  });
+  assert.equal(r.status, 200, (await r.text()).slice(0, 250));
+
+  const back = await (await call(TESTER, "GET", `/worlds/${fresh}/load`)).json();
+  assert.equal(back.ok, true, JSON.stringify(back).slice(0, 250));
+  assert.equal(back.manifest?.title, "An old world", `round-trip lost the manifest: ${JSON.stringify(back).slice(0, 250)}`);
+  assert.equal(back.state, "draft");
+  // It has never been played, so it has no runtime state — said plainly rather
+  // than raised as a fault.
+  assert.equal(back.runtime_state, null);
+  assert.match(back.runtime_note, /no runtime state yet/);
+});
+
+test("PUBLISH GATE: a manifest that is not an object is refused", async () => {
   const fresh = "w3_" + crypto.randomBytes(8).toString("hex");
-  const r = await call(TESTER, "POST", `/worlds/${fresh}/save`, { manifest: { meta: { title: "not a world" } } });
-  const b = await r.json();
-  assert.equal(r.status, 422, JSON.stringify(b).slice(0, 200));
-  assert.match(b.detail, /WorldManifestV3/);
-  assert.ok(Array.isArray(b.meta?.errors) && b.meta.errors.length > 0, "and must say what is wrong with it");
+  for (const manifest of [[], "a string", 42]) {
+    const r = await call(TESTER, "POST", `/worlds/${fresh}/save`, { manifest });
+    assert.equal(r.status, 422, `${JSON.stringify(manifest)} must be refused`);
+  }
 });
 
 test("PUBLISH: publishing still works for the owner, and is what makes a world public", async () => {
