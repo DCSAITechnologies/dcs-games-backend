@@ -523,8 +523,11 @@ const delta = runInTsx(DELTA_PROBE);
 
 // ================================================ the delta actor binding
 
-test("DEFECT, OPEN: a delta can strip another player's ownership by re-placing their object", async () => {
-  // DEFECT, OPEN (found by Lane L, 6 Sep 2026). SEVERITY: HIGH.
+test("CLOSED (was DEFECT, OPEN): a delta can strip another player's ownership by re-placing their object", async () => {
+  // CLOSED. Found by Lane L, 6 Sep 2026; severity when open was HIGH.
+  // The report below is the ORIGINAL finding, kept because it is the reproduction
+  // and the reasoning. The assertions verify the FIX and fail if it regresses —
+  // they do not describe current behaviour as broken. Verified closed 7 Sep 2026.
   //
   // assertActorBound (src/cw5/cw5_persistence.ts:249-259) refuses an op that
   // NAMES another player:
@@ -564,8 +567,11 @@ test("DEFECT, OPEN: a delta can strip another player's ownership by re-placing t
   );
 });
 
-test("DEFECT, OPEN: remove_object is not actor-bound and deletes another player's property outright", async () => {
-  // DEFECT, OPEN (found by Lane L, 6 Sep 2026). SEVERITY: HIGH.
+test("CLOSED (was DEFECT, OPEN): remove_object is not actor-bound and deletes another player's property outright", async () => {
+  // CLOSED. Found by Lane L, 6 Sep 2026; severity when open was HIGH.
+  // The report below is the ORIGINAL finding, kept because it is the reproduction
+  // and the reasoning. The assertions verify the FIX and fail if it regresses —
+  // they do not describe current behaviour as broken. Verified closed 7 Sep 2026.
   //
   // ACTOR_BOUND_FIELDS (src/cw5/cw5_persistence.ts:236-240) lists
   // set_inventory, place_object and move_object. remove_object is absent
@@ -591,8 +597,11 @@ test("DEFECT, OPEN: remove_object is not actor-bound and deletes another player'
   assert.deepEqual(delta.remove_owned.owned, ["victim_house"]);
 });
 
-test("DEFECT, OPEN: a delta can move another player's object, because move_object binds only its own field", async () => {
-  // DEFECT, OPEN (found by Lane L, 6 Sep 2026). SEVERITY: MEDIUM.
+test("CLOSED (was DEFECT, OPEN): a delta can move another player's object, because move_object binds only its own field", async () => {
+  // CLOSED. Found by Lane L, 6 Sep 2026; severity when open was MEDIUM.
+  // The report below is the ORIGINAL finding, kept because it is the reproduction
+  // and the reasoning. The assertions verify the FIX and fail if it regresses —
+  // they do not describe current behaviour as broken. Verified closed 7 Sep 2026.
   // move_object IS in ACTOR_BOUND_FIELDS, for owner_id — but an op that simply
   // omits owner_id passes the check and still mutates the transform of an
   // object owned by someone else. The binding is on the field the op happens to
@@ -604,8 +613,11 @@ test("DEFECT, OPEN: a delta can move another player's object, because move_objec
   );
 });
 
-test("DEFECT, OPEN: an op kind the engine cannot apply is accepted and permanently breaks the world", async () => {
-  // DEFECT, OPEN (found by Lane L, 6 Sep 2026). SEVERITY: MEDIUM (availability,
+test("CLOSED (was DEFECT, OPEN): an op kind the engine cannot apply is accepted and permanently breaks the world", async () => {
+  // CLOSED. Found by Lane L, 6 Sep 2026; severity when open was MEDIUM (availability,.
+  // The report below is the ORIGINAL finding, kept because it is the reproduction
+  // and the reasoning. The assertions verify the FIX and fail if it regresses —
+  // they do not describe current behaviour as broken. Verified closed 7 Sep 2026.
   // unrecoverable).
   //
   // save() validates world_id, seq and the actor binding
@@ -639,8 +651,11 @@ test("DEFECT, OPEN: an op kind the engine cannot apply is accepted and permanent
   assert.equal(delta.ops_string.saved, false, "a delta whose ops is a string is not a list of ops");
 });
 
-test("DEFECT, OPEN: an op kind inherited from Object.prototype crashes the binding check", async () => {
-  // DEFECT, OPEN (found by Lane L, 6 Sep 2026). SEVERITY: LOW (robustness).
+test("CLOSED (was DEFECT, OPEN): an op kind inherited from Object.prototype crashes the binding check", async () => {
+  // CLOSED. Found by Lane L, 6 Sep 2026; severity when open was LOW (robustness).
+  // The report below is the ORIGINAL finding, kept because it is the reproduction
+  // and the reasoning. The assertions verify the FIX and fail if it regresses —
+  // they do not describe current behaviour as broken. Verified closed 7 Sep 2026.
   // ACTOR_BOUND_FIELDS is an object LITERAL, so the lookup
   //     ACTOR_BOUND_FIELDS[op.op] || []
   // (src/cw5/cw5_persistence.ts:252) resolves through the prototype chain:
@@ -723,8 +738,11 @@ const TS_SLICE_SRC = fs.readFileSync(path.join(REPO, "src/cw1/ts-sso-kyc-slice.m
 
 const socialIn = (prefix) => createSocialService(tmpEnv(prefix));
 
-test("DEFECT, OPEN: a party is readable by anyone who has its id, including anonymously", async () => {
-  // DEFECT, OPEN (found by Lane L, 6 Sep 2026). SEVERITY: MEDIUM — another
+test("CLOSED (was DEFECT, OPEN): a party is readable by anyone who has its id, including anonymously", async () => {
+  // CLOSED. Found by Lane L, 6 Sep 2026; severity when open was MEDIUM — another.
+  // The report below is the ORIGINAL finding, kept because it is the reproduction
+  // and the reasoning. The assertions verify the FIX and fail if it regresses —
+  // they do not describe current behaviour as broken. Verified closed 7 Sep 2026.
   // principal's data in the response of an unauthenticated route.
   //
   // server.mts:717:
@@ -752,8 +770,11 @@ test("DEFECT, OPEN: a party is readable by anyone who has its id, including anon
   );
 });
 
-test("DEFECT, OPEN: a team's full membership is readable by anyone who has its id", async () => {
-  // DEFECT, OPEN (found by Lane L, 6 Sep 2026). SEVERITY: MEDIUM.
+test("CLOSED (was DEFECT, OPEN): a team's full membership is readable by anyone who has its id", async () => {
+  // CLOSED. Found by Lane L, 6 Sep 2026; severity when open was MEDIUM.
+  // The report below is the ORIGINAL finding, kept because it is the reproduction
+  // and the reasoning. The assertions verify the FIX and fail if it regresses —
+  // they do not describe current behaviour as broken. Verified closed 7 Sep 2026.
   // server.mts:741 and src/core/social.mjs:545 — the same shape as the party
   // read above. getTeam returns the team name, the owner's principal id and
   // every member row (member_id + role) to a caller who presented no
@@ -769,8 +790,11 @@ test("DEFECT, OPEN: a team's full membership is readable by anyone who has its i
   );
 });
 
-test("DEFECT, OPEN: listVersions hides published versions from everyone but the owner", async () => {
-  // DEFECT, OPEN (found by Lane L, 6 Sep 2026). SEVERITY: MEDIUM — the
+test("CLOSED (was DEFECT, OPEN): listVersions hides published versions from everyone but the owner", async () => {
+  // CLOSED. Found by Lane L, 6 Sep 2026; severity when open was MEDIUM — the.
+  // The report below is the ORIGINAL finding, kept because it is the reproduction
+  // and the reasoning. The assertions verify the FIX and fail if it regresses —
+  // they do not describe current behaviour as broken. Verified closed 7 Sep 2026.
   // version-visibility gate added this sprint is half-applied, and the list and
   // the item disagree about the same version.
   //
@@ -810,8 +834,11 @@ test("DEFECT, OPEN: listVersions hides published versions from everyone but the 
   );
 });
 
-test("DEFECT, OPEN: 403-vs-404 tells an unauthenticated caller which world ids exist", async () => {
-  // DEFECT, OPEN (found by Lane L, 6 Sep 2026). SEVERITY: LOW.
+test("CLOSED (was DEFECT, OPEN): 403-vs-404 tells an unauthenticated caller which world ids exist", async () => {
+  // CLOSED. Found by Lane L, 6 Sep 2026; severity when open was LOW.
+  // The report below is the ORIGINAL finding, kept because it is the reproduction
+  // and the reasoning. The assertions verify the FIX and fail if it regresses —
+  // they do not describe current behaviour as broken. Verified closed 7 Sep 2026.
   // src/core/worldstore.mjs get():
   //     if (!r) throw Errors.notFound(`world ${worldId}`);                    -> 404
   //     ... throw Errors.forbidden("this world is a draft ...")               -> 403
@@ -844,7 +871,10 @@ test("DEFECT, OPEN: 403-vs-404 tells an unauthenticated caller which world ids e
 });
 
 test("DEFECT, CLOSED: the payout-KYC routes are inside the internal-tester prefix gate", async () => {
-  // DEFECT, OPEN (found by Lane L, 6 Sep 2026). SEVERITY: LOW.
+  // CLOSED. Found by Lane L, 6 Sep 2026; severity when open was LOW.
+  // The report below is the ORIGINAL finding, kept because it is the reproduction
+  // and the reasoning. The assertions verify the FIX and fail if it regresses —
+  // they do not describe current behaviour as broken. Verified closed 7 Sep 2026.
   // server.mts:378 gates the trust-and-safety console and payout KYC:
   //     if ((url.startsWith("/ts/") || url.startsWith("/kyc/"))) await mustBeInternalTester(...)
   //     // "T&S console + payout KYC: internal testers only"
@@ -877,8 +907,11 @@ test("DEFECT, CLOSED: the payout-KYC routes are inside the internal-tester prefi
   }
 });
 
-test("DEFECT, OPEN: the CW1 mock server's boot guard fails OPEN when NODE_ENV is unset", async () => {
-  // DEFECT, OPEN (found by Lane L, 6 Sep 2026). SEVERITY: MEDIUM.
+test("CLOSED (was DEFECT, OPEN): the CW1 mock server's boot guard fails OPEN when NODE_ENV is unset", async () => {
+  // CLOSED. Found by Lane L, 6 Sep 2026; severity when open was MEDIUM.
+  // The report below is the ORIGINAL finding, kept because it is the reproduction
+  // and the reasoning. The assertions verify the FIX and fail if it regresses —
+  // they do not describe current behaviour as broken. Verified closed 7 Sep 2026.
   //
   // src/cw1/mock-server.mjs:259-263:
   //     if (NODE_ENV === "production" || (NODE_ENV && NODE_ENV !== "development" && DCS_ALLOW_MOCK_SERVER !== "1"))
