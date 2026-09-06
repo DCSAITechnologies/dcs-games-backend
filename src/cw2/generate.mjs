@@ -5,6 +5,7 @@
 // Zero npm deps.
 
 import crypto from "node:crypto";
+import { Errors } from "../core/errors.mjs";
 
 // --- prompt parser: prompt -> genre + params ---
 const GENRE_KEYS = {
@@ -34,9 +35,14 @@ function titleFromPrompt(prompt) {
 }
 
 // --- seeders (deterministic per prompt+seed) ---
+// Iterates a STRING. It used to iterate whatever it was handed, so a prompt that
+// was not a string reached it raw and threw "seedStr is not iterable" — see the
+// entry check in generateWorld. String() here is belt and braces and changes
+// nothing for a string seed: `for...of` over a string and over String(string)
+// are the same iteration, so every existing world still seeds identically.
 function rng(seedStr) {
   let h = 2166136261;
-  for (const ch of seedStr) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); }
+  for (const ch of String(seedStr)) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); }
   return () => { h ^= h << 13; h ^= h >>> 17; h ^= h << 5; return ((h >>> 0) % 1000) / 1000; };
 }
 function tilegrid(size, r) {
@@ -94,7 +100,42 @@ const PALETTE = {
 };
 
 export function generateWorld(prompt, opts = {}) {
+  // The prompt is untrusted input off an HTTP body, and this function used to
+  // treat it two contradictory ways in the space of three lines: parsePrompt
+  // coerced it with String(), so garbage became a world; rng iterated it raw, so
+  // garbage crashed. Reproduced 7 Sep 2026 against POST /worlds/generate:
+  //
+  //   {"prompt":123}     -> 500 {"error":"server_error",
+  //                              "detail":"seedStr is not iterable"}
+  //   {"prompt":{"a":1}} -> 500, same
+  //   {"prompt":true}    -> 500, same
+  //   {"prompt":null}    -> 200, a real persisted world owned by the caller,
+  //                         titled "Untitled World", from a request that
+  //                         named nothing
+  //   {"prompt":""}      -> 200, same
+  //   {"prompt":"   "}   -> 200, same
+  //
+  // The v3 sibling POST /v3/worlds/generate answers 422 "prompt is required" to
+  // every one of those. Two generation surfaces disagreeing about whether a
+  // prompt is required is the kind of gap that gets found in production, and
+  // the 500 leaked an internal variable name to the caller while doing it.
+  // The wording matches v3's deliberately, so the two surfaces now say the same
+  // thing about the same input.
+  if (typeof prompt !== "string" || !prompt.trim()) {
+    throw Errors.validation("prompt is required: a non-empty string describing the world to generate", {
+      meta: { received_type: prompt === null ? "null" : Array.isArray(prompt) ? "array" : typeof prompt },
+    });
+  }
   const { creator_id = "creator_demo", seed = prompt } = opts;
+  // A seed is what makes a world reproducible, so it may be given explicitly —
+  // but only as something with a stable string form. An object or an array would
+  // seed differently on a caller's next release and quietly change every world
+  // generated from it.
+  if (typeof seed !== "string" && typeof seed !== "number") {
+    throw Errors.validation("seed must be a string or a number", {
+      meta: { received_type: seed === null ? "null" : Array.isArray(seed) ? "array" : typeof seed },
+    });
+  }
   const { genre, size, title } = parsePrompt(prompt);
   const r = rng(seed);
   const pal = PALETTE[genre] || PALETTE.adventure;
