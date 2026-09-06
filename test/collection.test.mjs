@@ -35,7 +35,17 @@ function fakeSupabase({ failRead = false, failWrite = false, failDelete = false,
   const calls = { read: 0, upsert: 0, delete: 0 };
   const wire = [];                        // { method, url, range }
   const down = { read: failRead, write: failWrite, delete: failDelete };
-  const keyOf = (r, pk) => pk.map((k) => String(r[k])).join(" ");
+  // Postgres identifies a row by its key COLUMNS, not by a string built from
+  // them, so two rows differing in any column are two rows. Joining with a
+  // separator (which is what collection.mjs used to do) is not injective, and a
+  // stub that repeated the bug could not reproduce it — the two colliding rows
+  // simply overwrote each other here and never reached the assertion.
+  // With one column there is nothing to join, so the key is just the value and
+  // `rows` stays indexable by it. With SEVERAL there is, and the join has to be
+  // injective or the stub cannot hold the two rows the collision test needs.
+  const keyOf = (r, pk) => (pk.length === 1
+    ? String(r[pk[0]])
+    : JSON.stringify(pk.map((k) => (r[k] === undefined || r[k] === null ? null : String(r[k])))));
   const res = (status, body) => ({
     ok: status >= 200 && status < 300, status,
     json: async () => body,
@@ -44,6 +54,12 @@ function fakeSupabase({ failRead = false, failWrite = false, failDelete = false,
   const sig = (r) => Object.keys(r).sort().join(",");
   return {
     rows, calls, wire, down,
+    /**
+     * Look a row up by its key COLUMNS rather than by the stub's internal key
+     * encoding, so a test asserting "the primary holds this row" says exactly
+     * that and does not quietly depend on how the key is spelled.
+     */
+    find: (want) => [...rows.values()].find((r) => Object.entries(want).every(([k, v]) => String(r[k]) === String(v))) || null,
     resetWire: () => { wire.length = 0; calls.read = 0; calls.upsert = 0; calls.delete = 0; },
     fetchImpl: async (url, opts = {}) => {
       const method = opts.method || "GET";
@@ -148,11 +164,11 @@ test("a composite primary key upserts and deletes correctly", async () => {
   assert.equal(sb.rows.size, 2);
 
   await c.update((r) => r.user_id === "u1" && r.friend_id === "u2", (r) => ({ ...r, status: "accepted" }));
-  assert.equal(sb.rows.get("u1 u2").status, "accepted", "an update must reach the primary");
+  assert.equal(sb.find({ user_id: "u1", friend_id: "u2" }).status, "accepted", "an update must reach the primary");
 
   await c.remove((r) => r.friend_id === "u3");
   assert.equal(sb.rows.size, 1, "a removal must delete from the primary, not just locally");
-  assert.ok(sb.rows.has("u1 u2"));
+  assert.ok(sb.find({ user_id: "u1", friend_id: "u2" }), "and the row that was not removed is still there");
 });
 
 test("a removal is propagated, so a deleted row does not come back on the next read", async () => {
@@ -415,4 +431,121 @@ test("T2/6: a READ outage never replays the shadow, so a row deleted at the prim
   sb.down.read = false;
   assert.deepEqual((await c.all()).map((r) => r.id), ["a"], "and the next healthy read agrees with the primary");
   assert.deepEqual(shadow(dir).map((r) => r.id), ["a"]);
+});
+
+// ===========================================================================
+// LANE C — security, auth and persistence adversarial closure (sections 10/13)
+//
+// Three holes, each written here as the attack FIRST. Every one of them was
+// reproduced against the code as it stood before this lane.
+// ===========================================================================
+
+test("LANE C/1: a PostgREST error body must not reach /health, which is unauthenticated", async (t) => {
+  t.after(quiet());
+  // ATTACK: make one write fail the way a real constraint violation fails.
+  //
+  // PostgREST answers a 4xx with a JSON body naming the CONSTRAINT, the
+  // RELATION, the offending COLUMN and a hint. collection.mjs interpolated that
+  // body verbatim into the AppError detail; optional() copies the detail into
+  // `degraded`; describeCollections() copies `degraded` into /health; and
+  // /health (server.mts:308) answers before any authentication runs.
+  //
+  // So an anonymous caller polling /health during an outage reads the private
+  // schema: table names, column names and constraint names it has no other way
+  // to learn. That is the reconnaissance step for every constraint-shaped
+  // probe that follows.
+  const PG = JSON.stringify({
+    code: "23514",
+    hint: "the internal column dcsgames_blocks.reviewer_ref must reference dcsgames_principals.id",
+    message: 'new row for relation "dcsgames_blocks" violates check constraint "dcsgames_blocks_reviewer_fk"',
+  });
+  const fetchImpl = async (url, opts = {}) => {
+    if ((opts.method || "GET") === "GET") return { ok: true, status: 200, json: async () => [], text: async () => "[]" };
+    return { ok: false, status: 400, json: async () => JSON.parse(PG), text: async () => PG };
+  };
+  const c = createCollection({
+    dir: tmp(), name: "blocks", table: "dcsgames_blocks",
+    primaryKey: ["blocker_id", "blocked_id"], env: env(true), fetchImpl,
+  });
+  await c.insert({ blocker_id: "u1", blocked_id: "u2" });
+
+  const health = JSON.stringify(describeCollections({ blocks: c }));
+  assert.ok(c.degraded, "the failure is still reported — this test must not be satisfied by hiding it");
+  assert.equal(c.kind, "supabase+file");
+  assert.doesNotMatch(health, /dcsgames_blocks_reviewer_fk/, "a constraint name must not be published to anonymous callers");
+  assert.doesNotMatch(health, /reviewer_ref/, "nor an internal column name");
+  assert.doesNotMatch(health, /23514/, "nor the SQLSTATE");
+  // What SHOULD survive: enough for an operator to know something is wrong,
+  // and the correlating status code. Honesty is not what is being removed.
+  assert.match(health, /dcsgames_blocks/, "the collection that is degraded is still named");
+  assert.match(String(c.degraded), /400/, "and the upstream status is still reported");
+});
+
+test("LANE C/2: a deletion the caller was told succeeded must actually be applied at the primary", async (t) => {
+  t.after(quiet());
+  // ATTACK: two DISTINCT rows whose primary-key columns join to the same string.
+  //
+  // rowKey() was `primaryKey.map((k) => String(r[k])).join(" ")`, which is not
+  // injective: any key value containing the separator makes two different rows
+  // share one identity. write() computes the deletion set as
+  //   before.filter((r) => !now.has(rowKey(r)))
+  // so when a SURVIVING row happens to share the removed row's key, the removed
+  // row is never journalled and never deleted remotely. The caller is told the
+  // removal succeeded; the next healthy read pulls the row back from the
+  // primary and rewrites the shadow with it.
+  //
+  // This is the block / consent-revocation / report-deletion path, which this
+  // module's own header says must stay true once it is true: "I deleted it".
+  const dir = tmp();
+  const sb = fakeSupabase();
+  const c = mk(dir, sb, "t", ["scope", "subject"]);
+
+  await c.insert({ scope: "world-42 alice", subject: "bob", note: "row-A" });
+  await c.insert({ scope: "world-42", subject: "alice bob", note: "row-B" });
+  assert.equal(sb.rows.size, 2, "precondition: the primary really holds two distinct rows");
+
+  const removed = await c.remove((r) => r.note === "row-A");
+  assert.equal(removed, 1, "the caller is told one row was removed");
+
+  assert.ok(!c.degraded, "and is told nothing went wrong");
+  assert.equal(sb.rows.size, 1, "so exactly one row may survive AT THE PRIMARY");
+  assert.deepEqual([...sb.rows.values()].map((r) => r.note), ["row-B"], "and it must be the one that was kept");
+
+  // The consequence, stated as its own assertion: a row the primary still holds
+  // is resurrected into the shadow by the next ordinary read.
+  assert.deepEqual((await c.all()).map((r) => r.note), ["row-B"], "a deleted row must not come back");
+  assert.deepEqual(shadow(dir).map((r) => r.note), ["row-B"]);
+});
+
+test("LANE C/3: update() must refuse to write a row its mutator did not return", async () => {
+  // ATTACK: a mutator that falls off the end (an `if` with no `else`, an early
+  // return, a forgotten `return`). update() stored the result unconditionally,
+  // so `undefined` was written into the rows array, JSON.stringify turned it
+  // into `null`, and the row was destroyed — while update() reported success.
+  // Under Supabase that null is then upserted, so the destruction is durable.
+  const c = createCollection({ dir: tmp(), name: "t", table: null, primaryKey: ["id"], env: env(false) });
+  await c.insert({ id: "a", v: 1 });
+  await assert.rejects(
+    () => c.update((r) => r.id === "a", () => undefined),
+    (e) => e.code === "server_error" || e.code === "validation_failed",
+    "a mutator that returns nothing must throw, not silently destroy the row",
+  );
+  assert.deepEqual(await c.all(), [{ id: "a", v: 1 }], "and the row must be intact");
+});
+
+test("LANE C/4: the safe primitive does not lose a concurrent write, and is the one services must use", async () => {
+  // This is the CONTRACT that safety.mjs:230 (unblock) and jobs.mjs:194 (prune)
+  // bypass by doing all()-then-write() outside the lock. remove() and update()
+  // take it, so a concurrent insert survives. Pinned here so the fix to those
+  // two call sites has something to be checked against.
+  const c = createCollection({ dir: tmp(), name: "t", table: null, primaryKey: ["id"], env: env(false) });
+  await c.insert({ id: "keep" });
+  await Promise.all([
+    c.remove((r) => r.id === "never-present"),
+    c.insert({ id: "concurrent-a" }),
+    c.insert({ id: "concurrent-b" }),
+    c.update((r) => r.id === "keep", (r) => ({ ...r, touched: true })),
+  ]);
+  const ids = (await c.all()).map((r) => r.id).sort();
+  assert.deepEqual(ids, ["concurrent-a", "concurrent-b", "keep"], "no concurrent write may be erased");
 });

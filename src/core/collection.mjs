@@ -130,6 +130,35 @@ class PendingJournal {
   }
 }
 
+/**
+ * An upstream failure the CALLER may see, with the upstream's own body kept out of it.
+ *
+ * PostgREST answers a 4xx with a JSON body naming the constraint, the relation,
+ * the offending column and a hint. That body used to be interpolated straight
+ * into the AppError detail — and `optional()` copies a detail into `degraded`,
+ * `describeCollections()` copies `degraded` into /health, and /health answers
+ * before any authentication runs. So an anonymous caller polling /health during
+ * an outage read the private schema: table names, column names and constraint
+ * names available no other way, which is the reconnaissance step for every
+ * constraint-shaped probe after it.
+ *
+ * The body is not discarded — it is the only thing that says WHY the write was
+ * refused, and losing it would trade a disclosure for a blind operator. It goes
+ * to the log, where an operator can read it and a stranger cannot, and the
+ * caller keeps the table, the operation and the status.
+ */
+function upstreamWithoutBody(table, op, r, body) {
+  if (body) {
+    console.warn(JSON.stringify({
+      level: "warn", upstream: "supabase", table, op, status: r.status,
+      detail: String(body).slice(0, 2000),
+      note: "upstream body logged, not returned: it names constraints and columns and /health is unauthenticated",
+      ts: new Date().toISOString(),
+    }));
+  }
+  return Errors.upstream("supabase", `${table} ${op} failed (${r.status})`);
+}
+
 /** Group rows so that every object inside one group carries exactly the same keys. */
 function byShape(rows) {
   const groups = new Map();
@@ -229,7 +258,7 @@ class SupabaseBacking {
         body: JSON.stringify(group),
       });
       requests += 1;
-      if (!r.ok) throw Errors.upstream("supabase", `${this.table} upsert failed (${r.status}): ${await r.text().catch(() => "")}`);
+      if (!r.ok) throw upstreamWithoutBody(this.table, "upsert", r, await r.text().catch(() => ""));
     }
     return { requests };
   }
@@ -260,7 +289,38 @@ export function createCollection({ dir, name, table = null, primaryKey = ["id"],
   /** Durable record of writes the primary has not confirmed. Null when local-only. */
   const journal = remote ? new PendingJournal(dir, name) : null;
 
-  const rowKey = (r) => primaryKey.map((k) => String(r[k])).join(" ");
+  /**
+   * A row's identity, as a string, from its primary-key columns.
+   *
+   * This was `primaryKey.map((k) => String(r[k])).join(" ")`, which is NOT
+   * injective. Any key value containing the separator makes two DISTINCT rows
+   * share one identity, and `undefined`/`null` collapse onto the literal
+   * strings "undefined"/"null". Postgres identifies a row by its key COLUMNS,
+   * so the two backings disagreed about what a row even is.
+   *
+   * What that cost: write() computes the deletion set as
+   *   before.filter((r) => !now.has(rowKey(r)))
+   * so when a SURVIVING row happened to share a removed row's key, the removed
+   * row was never journalled and never deleted at the primary — while the
+   * caller was told the removal succeeded and `degraded` stayed null. The next
+   * healthy read then pulled the row back from the primary and rewrote the
+   * shadow with it. syncToPrimary's `dead` map has the same shape, so two
+   * remote rows sharing a key produced one DELETE and the other survived.
+   *
+   * This is the block / consent-revocation / report-deletion path, and the
+   * header of this file states the rule it broke: "I deleted it" must stay true.
+   *
+   * JSON encoding of the column ARRAY is injective by construction — every `"`
+   * inside a value is escaped, so no value can forge an element boundary — and
+   * an absent column is `null`, which no string can spell. The encoding is
+   * internal and recomputed on every call; nothing persists it, so changing it
+   * cannot strand a journal written by an earlier build (the journal stores the
+   * key COLUMNS, via keyCols, not this string).
+   */
+  const rowKey = (r) => JSON.stringify(primaryKey.map((k) => {
+    const v = r?.[k];
+    return v === undefined || v === null ? null : String(v);
+  }));
   const keyCols = (r) => Object.fromEntries(primaryKey.map((k) => [k, r[k]]));
 
   /**
@@ -436,7 +496,17 @@ export function createCollection({ dir, name, table = null, primaryKey = ["id"],
         const rows = await api.all();
         const i = rows.findIndex(pred);
         if (i < 0) return null;
-        rows[i] = mut(rows[i]);
+        const next = mut(rows[i]);
+        // A mutator that falls off the end — an `if` with no `else`, an early
+        // return, a forgotten `return` — used to have its `undefined` stored
+        // unconditionally. JSON.stringify turns that into `null`, so the row was
+        // DESTROYED while update() reported success, and under Supabase the null
+        // was then upserted, making the destruction durable. A row is an object
+        // or the mutator is wrong; saying so beats writing the damage.
+        if (!next || typeof next !== "object" || Array.isArray(next)) {
+          throw Errors.internal(`${name}: an update mutator returned ${Array.isArray(next) ? "an array" : typeof next}, not a row; refusing to overwrite the row with it`);
+        }
+        rows[i] = next;
         await api.write(rows);
         return rows[i];
       });
