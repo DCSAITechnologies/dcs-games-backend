@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   loadMigrations, validateChain, migrate, assertSchema, currentVersion,
   listTables, proveReproducible, psqlExec, psqlScalar,
@@ -15,6 +16,10 @@ import {
 } from "../src/core/schema.mjs";
 
 const ADMIN = process.env.DCS_PG_ADMIN_DSN || "postgresql://127.0.0.1:5432/postgres";
+// fileURLToPath, not .pathname: this estate lives under a directory with a
+// space in its name, and .pathname hands back "Project%20DCSAI".
+const HERE_DIR = path.dirname(fileURLToPath(import.meta.url));
+const SRC_ROOT = path.resolve(HERE_DIR, "../src");
 
 let pgUp = false;
 try { await psqlScalar(ADMIN, "select 1"); pgUp = true; } catch { pgUp = false; }
@@ -258,4 +263,77 @@ dbTest("B15 GATE: money is dark at the DATABASE level, not only in application c
       /dcsgames_ownership_dark_price/
     );
   } finally { await psqlExec(ADMIN, `drop database if exists ${db};`).catch(() => {}); }
+});
+
+test("A2 GATE: every table the code talks to actually exists in the migration chain", async () => {
+  // Two of the three tables the CW5 Supabase store writes to had never existed
+  // in any migration, and the third was a DIFFERENT table that already meant
+  // something else. Every CW5 write therefore answered 400 or 404 in the only
+  // configuration that uses that store — the deployed one — and nothing
+  // noticed, because every test runs on the file/in-memory store and the boot
+  // assertion only checks tables somebody remembered to list.
+  //
+  // A store that names a table nobody created is a deployment that fails on its
+  // first write. This walks the other way: from the code to the chain.
+  const declared = new Set();
+  for (const f of fs.readdirSync(MIGRATIONS_DIR).filter((n) => n.endsWith(".sql"))) {
+    const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, f), "utf8");
+    for (const m of sql.matchAll(/create table if not exists\s+(?:public\.)?([a-z0-9_]+)/gi)) declared.add(m[1]);
+    // Indexes and constraints share the dcsgames_ prefix and are NOT tables.
+    // Collecting them here is what stops this gate crying wolf about every
+    // CHECK constraint a module happens to name in a comment.
+    for (const m of sql.matchAll(/create (?:unique )?index if not exists\s+([a-z0-9_]+)/gi)) declared.add(m[1]);
+    for (const m of sql.matchAll(/constraint\s+([a-z0-9_]+)/gi)) declared.add(m[1]);
+  }
+  assert.ok(declared.size > 20, `self-check: expected the chain to declare many tables, found ${declared.size}`);
+
+  const referenced = new Map();          // table -> files that name it
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) { walk(full); continue; }
+      if (!/\.(mjs|ts|mts|js)$/.test(e.name)) continue;
+      const body = fs.readFileSync(full, "utf8");
+      const TABLE_USE = /(?:\/rest\/v1\/|["'`\/])(dcsgames_[a-z0-9_]+)(?=["'`?\/])|\b(?:from|into|update|join|table)\s*[:=(\s]\s*["'`]?(dcsgames_[a-z0-9_]+)/gi;
+      for (const m of body.matchAll(TABLE_USE)) {
+        const name = m[1] || m[2];
+        if (!name) continue;
+        if (!referenced.has(name)) referenced.set(name, new Set());
+        referenced.get(name).add(path.relative(SRC_ROOT, full));
+      }
+      for (const m of []) {
+        if (!referenced.has(m[0])) referenced.set(m[0], new Set());
+        referenced.get(m[0]).add(path.relative(SRC_ROOT, full));
+      }
+    }
+  };
+  walk(SRC_ROOT);
+  assert.ok(referenced.size > 5, `self-check: expected the code to name several tables, found ${referenced.size}`);
+
+  // Only names used where a TABLE goes: a PostgREST path, a `from`/`into`/
+  // `update`/`join`, or a createCollection table option. A bare mention in a
+  // comment or an error string is not a claim that the table exists.
+  const ghosts = [...referenced.entries()]
+    .filter(([t]) => !declared.has(t))
+    .map(([t, files]) => `${t} (named in ${[...files].sort().join(", ")})`);
+  // Three that this gate found on the day it was written, recorded by name
+  // rather than waved through. They are the same defect as the CW5 tables —
+  // code talking to something no migration creates — and they are all on
+  // surfaces that are retired, dark or unmounted today, which is why nothing
+  // has failed yet:
+  //   dcsgames_ts_audit       cw1/db.mjs, the T&S slice mounted with an
+  //                           in-memory repo
+  //   dcsgames_payout_kyc     the payout-KYC shell, dark, internal-tester gated
+  //   dcsgames_economy_ledger cw6/economy-router.mjs, whose HTTP routes are
+  //                           already retired with 410
+  //
+  // The list may only SHRINK. A new ghost fails this test, and so does fixing
+  // one of these without deleting it from the list — an allowlist nobody has to
+  // maintain is an allowlist that quietly grows.
+  const KNOWN_GHOSTS = ["dcsgames_ts_audit", "dcsgames_payout_kyc", "dcsgames_economy_ledger"];
+  const names = ghosts.map((g) => g.split(" ")[0]);
+  const unexpected = ghosts.filter((g) => !KNOWN_GHOSTS.includes(g.split(" ")[0]));
+  assert.deepEqual(unexpected, [], "these tables are used by the code and created by no migration");
+  const fixed = KNOWN_GHOSTS.filter((k) => !names.includes(k));
+  assert.deepEqual(fixed, [], "these are no longer ghosts — remove them from KNOWN_GHOSTS so the list keeps shrinking");
 });

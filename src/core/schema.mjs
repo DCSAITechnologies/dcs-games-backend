@@ -22,7 +22,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const MIGRATIONS_DIR = path.resolve(HERE, "../../migrations");
 
 /** The schema version this code requires. Boot fails loudly below it. */
-export const REQUIRED_SCHEMA_VERSION = 8;
+export const REQUIRED_SCHEMA_VERSION = 9;
 
 /** Tables the running service genuinely depends on. Missing one is fatal. */
 export const REQUIRED_TABLES = [
@@ -40,6 +40,12 @@ export const REQUIRED_TABLES = [
   "dcsgames_orgs",
   "dcsgames_subscriptions",
   "dcsgames_subscription_events",
+  // CW5 runtime persistence. Listed so the boot assertion catches their absence:
+  // two of these had never existed in any migration, and nothing noticed because
+  // nothing checked.
+  "dcsgames_cw5_base_worlds",
+  "dcsgames_world_deltas",
+  "dcsgames_world_snapshots",
 ];
 
 export function loadMigrations(dir = MIGRATIONS_DIR) {

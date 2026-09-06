@@ -5,7 +5,10 @@
 // Supabase via its PostgREST HTTP API (no new npm deps; uses global fetch, Node 18+).
 //
 // Tables (see dcsgames_002_persistence.sql):
-//   dcsgames_base_worlds  (world_id PK, base jsonb, created_at)        — immutable base
+//   dcsgames_cw5_base_worlds (world_id PK, base jsonb, created_at)     — immutable base
+//     NOT dcsgames_base_worlds: that is the v3 world store's table and means
+//     something else entirely (manifest + manifest_hash). Two concepts sharing
+//     one name is why every CW5 write 400'd in the deployed configuration.
 //   dcsgames_world_deltas (world_id, seq, session_id, ts, actor_id, ops jsonb,
 //                          PRIMARY KEY (world_id, seq))                — append-only
 //   dcsgames_world_snapshots (world_id PK, as_of_seq, snapshot jsonb, ts) — latest compacted
@@ -59,7 +62,7 @@ export class SupabasePersistenceStore implements PersistenceStore {
   async putBaseWorld(base: BaseWorld): Promise<void> {
     // Insert-only. If the row exists, PostgREST returns 409 on PK conflict → treat as
     // immutability violation, matching InMemory's throw.
-    const res = await this.req('/dcsgames_base_worlds', {
+    const res = await this.req('/dcsgames_cw5_base_worlds', {
       method: 'POST',
       headers: { Prefer: 'return=minimal' },
       body: JSON.stringify({ world_id: base.world_id, base }),
@@ -71,7 +74,7 @@ export class SupabasePersistenceStore implements PersistenceStore {
   }
 
   async getBaseWorld(worldId: string): Promise<BaseWorld | null> {
-    const res = await this.req(`/dcsgames_base_worlds?world_id=eq.${enc(worldId)}&select=base`, { method: 'GET' });
+    const res = await this.req(`/dcsgames_cw5_base_worlds?world_id=eq.${enc(worldId)}&select=base`, { method: 'GET' });
     if (!res.ok) throw new Error(`getBaseWorld failed: ${res.status}`);
     const rows = (await res.json()) as Array<{ base: BaseWorld }>;
     return rows.length ? rows[0].base : null;
