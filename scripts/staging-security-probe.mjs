@@ -10,6 +10,8 @@
 //   SUPABASE_URL=... SUPABASE_ANON_KEY=... node scripts/staging-security-probe.mjs
 // (run under `railway run` so the staging values come from the environment;
 // no secret is ever printed by this script)
+import { REQUIRED_SCHEMA_VERSION } from "../src/core/schema.mjs";
+
 const API = process.env.STAGE_URL || "https://dcs-games-backend-staging.up.railway.app";
 const SUPA = process.env.SUPABASE_URL || "";
 const ANON = process.env.SUPABASE_ANON_KEY || "";
@@ -36,7 +38,12 @@ const TABLES = [
 const health = await (await fetch(API + "/health")).json();
 ok("the deployed service is healthy", health.ok === true);
 ok("payments are dark", health.payments_live === false, String(health.payments_live));
-ok("the schema it asserts is the migrated one", health.schema_assertion?.version === 10, String(health.schema_assertion?.version));
+// Read from the source of truth, not written here. A hardcoded number turns
+// every migration into a false failure in the security probe, which is exactly
+// the noise that teaches people to ignore it.
+ok(`the schema it asserts is the one this code requires (v${REQUIRED_SCHEMA_VERSION})`,
+   health.schema_assertion?.version === REQUIRED_SCHEMA_VERSION,
+   `deployment reports v${health.schema_assertion?.version}`);
 ok("auth is real Supabase JWT verification, not a header", health.auth === "supabase-jwt", String(health.auth));
 ok("the x-user-id impersonation path is gone", health.auth_header_fallback_removed === true);
 ok("CORS is an allowlist, not a wildcard", health.cors?.mode === "allowlist", String(health.cors?.mode));
