@@ -6,13 +6,13 @@
 // created through POST /worlds/:id/save has never been through the runtime, so
 // a load must not 500. But the tolerated condition is `base world ... not
 // found`, which is ALSO what a runtime store that has lost everything produces,
-// and without Supabase the store was `new InMemoryPersistenceStore()`. So an
+// and without Supabase the store was `new cw5.InMemoryPersistenceStore()`. So an
 // object saved at seq 1 and acknowledged `ok:true` was gone at the next
 // restart, seq 1 was accepted again as a fresh delta, and the route reported
 // the loss as `runtime_note: "this world has no runtime state yet"`. "Yet" is a
 // claim about the past, and it was false.
 //
-// The Lead did not paper over that. There is now a FilePersistenceStore, a
+// The Lead did not paper over that. There is now a cw5.FilePersistenceStore, a
 // deployment without Supabase uses it instead of a Map, and /health names the
 // store and whether it is durable. All four tests below now assert the fixed
 // behaviour; the account of the defect is kept because the interaction between
@@ -32,7 +32,13 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { signLocalToken } from "../src/core/principal.mjs";
-import { InMemoryPersistenceStore, FilePersistenceStore } from "../src/cw5/cw5_persistence.ts";
+// The CW5 engine is TypeScript with parameter properties, which plain
+// `node --test` cannot load — it throws at MODULE LOAD, so the whole file
+// counts as one failure rather than skipping and the suite reports a defect
+// that is really a loader mismatch. Under `tsx --test` these run 6/6.
+let cw5 = null;
+try { cw5 = await import("../src/cw5/cw5_persistence.ts"); } catch { /* needs tsx */ }
+const needsTsx = (t) => !cw5 && t.skip("CW5 engine needs tsx (TypeScript parameter properties)");
 
 const GB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SECRET = "lead-review-durability-secret";
@@ -124,7 +130,8 @@ after(() => {
   fs.rmSync(DATA, { recursive: true, force: true });
 });
 
-test("CLOSED (was DEFECT, OPEN): acknowledged runtime state survives a restart", async () => {
+test("CLOSED (was DEFECT, OPEN): acknowledged runtime state survives a restart", async (t) => {
+  if (!cw5) return t.skip("CW5 engine needs tsx (TypeScript parameter properties)");
   const r = await call("GET", `/worlds/${world}/load`);
   assert.equal(r.status, 200, "the load succeeds");
 
@@ -142,7 +149,8 @@ test("CLOSED (was DEFECT, OPEN): acknowledged runtime state survives a restart",
   assert.equal(state.vars.door_open, true);
 });
 
-test("CLOSED (was DEFECT, OPEN): the load note no longer asserts a history it cannot know", async () => {
+test("CLOSED (was DEFECT, OPEN): the load note no longer asserts a history it cannot know", async (t) => {
+  if (!cw5) return t.skip("CW5 engine needs tsx (TypeScript parameter properties)");
   // WAS: "this world has no runtime state yet" — said for a world that had
   // saved state and lost it, because the route cannot tell "never saved" from
   // "saved and lost" and resolved the ambiguity in the reassuring direction.
@@ -163,7 +171,8 @@ test("CLOSED (was DEFECT, OPEN): the load note no longer asserts a history it ca
   );
 });
 
-test("CLOSED (was DEFECT, OPEN): a used seq is still refused after a restart", async () => {
+test("CLOSED (was DEFECT, OPEN): a used seq is still refused after a restart", async (t) => {
+  if (!cw5) return t.skip("CW5 engine needs tsx (TypeScript parameter properties)");
   // save() is documented append-only, idempotent and monotonic. Across a restart
   // none of the three survived a Map: seq 1 was neither refused as
   // non-monotonic nor reported as a duplicate, so a client replaying its outbox
@@ -191,7 +200,8 @@ test("CLOSED (was DEFECT, OPEN): a used seq is still refused after a restart", a
   assert.equal(grown.body.runtime_state.vars[`next_${RUN}`], 2);
 });
 
-test("CLOSED (was DEFECT, OPEN): /health names the runtime state store and whether it is durable", async () => {
+test("CLOSED (was DEFECT, OPEN): /health names the runtime state store and whether it is durable", async (t) => {
+  if (!cw5) return t.skip("CW5 engine needs tsx (TypeScript parameter properties)");
   // /health named the kind of every other store — `persistence` for the world
   // repository, safety_persistence, verification, player_progress, cors.mode,
   // build.source — and was silent about the one holding what players built,
@@ -214,10 +224,11 @@ test("CLOSED (was DEFECT, OPEN): /health names the runtime state store and wheth
 // The new store itself. It is code written today and reviewed by its author.
 // ---------------------------------------------------------------------------
 
-test("CLOSED (was DEFECT, OPEN): the two persistence stores agree about base-world immutability", async () => {
-  // WAS: FilePersistenceStore.putBaseWorld carried the comment "Same contract as
+test("CLOSED (was DEFECT, OPEN): the two persistence stores agree about base-world immutability", async (t) => {
+  if (!cw5) return t.skip("CW5 engine needs tsx (TypeScript parameter properties)");
+  // WAS: cw5.FilePersistenceStore.putBaseWorld carried the comment "Same contract as
   // the in-memory store: a base world is written once", and it was not the same
-  // contract. InMemoryPersistenceStore THROWS on a second write — the guard is
+  // contract. cw5.InMemoryPersistenceStore THROWS on a second write — the guard is
   // labelled "BASE IMMUTABILITY GUARD: base is Atlas-signed; never overwrite
   // once set" — and the file store returned silently.
   //
@@ -229,7 +240,7 @@ test("CLOSED (was DEFECT, OPEN): the two persistence stores agree about base-wor
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dcs-g-store-"));
   const base = { world_id: "w_immutable", schema_version: "1.0", objects: [{ object_id: "o1", kind: "structure", transform: {}, owner_id: null }] };
   const outcomes = {};
-  for (const [name, store] of [["memory", new InMemoryPersistenceStore()], ["file", new FilePersistenceStore(dir)]]) {
+  for (const [name, store] of [["memory", new cw5.InMemoryPersistenceStore()], ["file", new cw5.FilePersistenceStore(dir)]]) {
     await store.putBaseWorld(base);
     try {
       await store.putBaseWorld({ ...base, objects: [] });
@@ -249,7 +260,8 @@ test("CLOSED (was DEFECT, OPEN): the two persistence stores agree about base-wor
   );
 });
 
-test("DISPROVED: the file delta store does not degrade as a world's history grows", async () => {
+test("DISPROVED: the file delta store does not degrade as a world's history grows", async (t) => {
+  if (!cw5) return t.skip("CW5 engine needs tsx (TypeScript parameter properties)");
   // Hypothesis: every save re-reads and re-parses the whole .deltas.jsonl (in
   // load(), getMaxSeq() and hasSeq()), nothing ever calls writeSnapshot(), and
   // the file is append-only — so a long-lived world should get slower to save
