@@ -214,20 +214,18 @@ test("CLOSED (was DEFECT, OPEN): /health names the runtime state store and wheth
 // The new store itself. It is code written today and reviewed by its author.
 // ---------------------------------------------------------------------------
 
-test("DEFECT, OPEN: the two persistence stores disagree about base-world immutability", async () => {
-  // FilePersistenceStore.putBaseWorld carries the comment "Same contract as the
-  // in-memory store: a base world is written once." It is not the same
+test("CLOSED (was DEFECT, OPEN): the two persistence stores agree about base-world immutability", async () => {
+  // WAS: FilePersistenceStore.putBaseWorld carried the comment "Same contract as
+  // the in-memory store: a base world is written once", and it was not the same
   // contract. InMemoryPersistenceStore THROWS on a second write — the guard is
   // labelled "BASE IMMUTABILITY GUARD: base is Atlas-signed; never overwrite
-  // once set" — and the file store returns silently.
+  // once set" — and the file store returned silently.
   //
-  // The data is safe either way; what differs is whether a caller is told. A
-  // second registerBaseWorld is a 500 on a Supabase-less deployment today and a
-  // silent success tomorrow when the file store is in use, so the same bug in a
-  // caller is loud in one environment and invisible in the other — and the
-  // comment tells the next reader they need not check.
-  //
-  // Either behaviour is defensible. They have to be the same one.
+  // The data was safe either way; what differed was whether a caller is told.
+  // The same caller bug was a 500 on one deployment and invisible on another,
+  // and the comment claiming a shared contract told the next reader not to
+  // check. Either behaviour was defensible; they had to be the same one, and
+  // the file store now throws too.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dcs-g-store-"));
   const base = { world_id: "w_immutable", schema_version: "1.0", objects: [{ object_id: "o1", kind: "structure", transform: {}, owner_id: null }] };
   const outcomes = {};

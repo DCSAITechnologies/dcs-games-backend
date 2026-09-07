@@ -1,9 +1,13 @@
 // Lane G — the safety tables against what the safety code actually writes.
 //
-// RECONCILED 7 Sep 2026. Migration 0012 closed the three mismatches this suite
-// found in the moderation flow. It did not close the same disease in the
-// parental-consent flow, and nothing stops a caller writing a value no column
-// allows — both below, both red.
+// RECONCILED 7 Sep 2026, twice. 0012 closed the three mismatches in the
+// moderation flow; 0013 closed the same disease in the parental-consent flow,
+// which only turned up when this suite was generalised to drive EVERY safety
+// write rather than the one that had already failed; and safety.mjs now
+// validates the two caller-supplied values that could reach a checked column.
+// All green. The generalised drive stays, because the method is the point: the
+// next table added to this family will be checked by it without anyone
+// remembering to.
 //
 // 0011 was written after this was reproduced against the Data API:
 //
@@ -28,7 +32,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createSafetyService, MEDIA_KINDS, CONSENT_SOURCES } from "../src/core/safety.mjs";
+import { createSafetyService, MEDIA_KINDS, CONSENT_SOURCES, AGE_METHODS, SUBJECT_TYPES } from "../src/core/safety.mjs";
 import { MOD_ACTIONS, REPORT_STATES } from "../src/cw1/trust-safety.mjs";
 
 const GB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -183,37 +187,45 @@ async function driveParentalConsentFlow() {
   return { requested, decided };
 }
 
-test("DEFECT, OPEN: dcsgames_parental_consent has no requested_by or decided_by column", async () => {
-  // 0012 fixed the moderation flow, which is where the review had looked. The
-  // parental-consent flow has exactly the same disease and neither 0011 nor
-  // 0012 visits it:
+test("CLOSED (was DEFECT, OPEN): the parental-consent flow has columns for what it writes", async () => {
+  // WAS: 0012 fixed the moderation flow, which is where the review had looked.
+  // The parental-consent flow had exactly the same disease and neither 0011 nor
+  // 0012 visited it:
   //
   //   requestParentalConsent() writes `requested_by`  — no such column
   //   decideParentalConsent()  writes `decided_by`    — no such column
   //
-  // Both fail with PGRST204, so no parental consent record has ever reached the
-  // durable store either, and the collection degrades the same way the reports
-  // collection did. These are the records that say a guardian was asked and
-  // what they answered — for a minor. They are also the two fields that make
-  // the row attributable at all, which is why they were added to the code:
+  // Both failed with PGRST204, so no parental consent record had ever reached
+  // the durable store either, and the collection degraded the same way the
+  // reports collection did. These are the records that say a guardian was asked
+  // and what they answered — for a minor. They are also the two fields that
+  // make the row attributable at all, which is why they were added to the code:
   // safety.mjs is explicit that "a row nobody is accountable for cannot be
-  // audited after the fact".
+  // audited after the fact". 0013 adds both.
   const { requested, decided } = await driveParentalConsentFlow();
   const cols = columnsOf("dcsgames_parental_consent");
   const missing = [...new Set([...Object.keys(requested), ...Object.keys(decided)])].filter((k) => !cols.has(k));
   assert.deepEqual(
     missing, [],
     `the parental consent flow writes ${JSON.stringify(missing)} and the table declares none of them. ` +
-    `Declared columns: ${JSON.stringify([...cols])}. This is the third table in the same family and the ` +
-    "same PGRST204; 0012's own header describes the pattern without checking whether it recurs."
+    `Declared columns: ${JSON.stringify([...cols])}.`
   );
+  assert.ok(cols.has("requested_by") && cols.has("decided_by"), "the two 0013 added");
+
+  // And every status the flow can actually reach is storable. `decision` is
+  // constrained to granted/denied/revoked at the service, and the row starts
+  // 'pending'.
+  const statuses = checkValues("dcsgames_parental_consent", "status");
+  for (const st of ["pending", "granted", "denied", "revoked"]) {
+    assert.ok(statuses.includes(st), `status '${st}' is storable`);
+  }
 });
 
-test("DEFECT, OPEN: a caller can write a value into a checked column that no check allows", async () => {
-  // 0011 and 0012 aligned the columns with what the CODE writes. Nothing aligns
-  // them with what a CALLER can make the code write.
+test("CLOSED (was DEFECT, OPEN): a caller cannot write a value the column would refuse", async () => {
+  // WAS: 0011 and 0012 aligned the columns with what the CODE writes. Nothing
+  // aligned them with what a CALLER could make the code write.
   //
-  // Two fields reach a check-constrained column straight from a request body
+  // Two fields reached a check-constrained column straight from a request body
   // without being validated against its vocabulary:
   //
   //   POST /safety/age     {"method": ...}        -> dcsgames_age_assurance.method
@@ -253,4 +265,21 @@ test("DEFECT, OPEN: a caller can write a value into a checked column that no che
     "safety.mjs validates reason against REPORT_REASONS and media_kind against MEDIA_KINDS in exactly " +
     "this way — these two were missed."
   );
+
+  // The enums are now published too, so a client can discover the permitted set
+  // instead of learning it from a rejection.
+  assert.deepEqual([...AGE_METHODS].sort(), [...ageMethods].sort(), "the published age methods ARE the column's");
+  assert.deepEqual([...SUBJECT_TYPES].sort(), [...subjectTypes].sort(), "and the published subject types too");
+
+  // The valid values still go through: a validator that refuses everything
+  // would pass the test above and break the routes.
+  const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), "dcs-g-enum-ok-"));
+  const ok = createSafetyService({ DCS_DATA_DIR: dir2 });
+  for (const method of AGE_METHODS) {
+    await ok.recordAge(`p-${method}`, { dateOfBirth: "1990-01-01", method });
+  }
+  for (const subjectType of SUBJECT_TYPES) {
+    await ok.report("reporter-ok", { subjectType, subjectId: "x", reason: "spam" });
+  }
+  fs.rmSync(dir2, { recursive: true, force: true });
 });

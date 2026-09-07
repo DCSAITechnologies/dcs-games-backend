@@ -342,28 +342,22 @@ test("CLOSED (was DEFECT, OPEN): /me/home reports a page as a page", async () =>
   assert.equal(w.published + w.drafts, w.counted, "the breakdown adds up to what was counted");
 });
 
-test("DEFECT, OPEN: /me/home's play figure is still summed over one page, unlabelled", async () => {
-  // The residue of the same defect. `plays_of_my_worlds` is computed in the same
-  // loop over the same 50 records (server.mts, /me/home), so when
-  // `worlds.complete` is false it is the play count of an arbitrary page — but
-  // it is reported as a bare number beside the counts that now carry their own
-  // provenance. A creator with 200 worlds reads it as their total.
+test("CLOSED (was DEFECT, OPEN): the play figure is named for what it counts", async () => {
+  // WAS: `plays_of_my_worlds`, computed in the same loop over the same 50
+  // records, so when `worlds.complete` is false it was the play count of an
+  // arbitrary page reported as a bare number beside counts that had just been
+  // given their provenance. A creator with 200 worlds read it as their total.
   //
-  // Small, and the same class as the one just closed: a number computed over a
-  // page must say so, or not be reported.
+  // NOW: `plays_of_the_worlds_counted_above` — which needs no note, because the
+  // name is the note.
   const home = await call("OWNER", "GET", "/me/home");
   assert.equal(home.body.worlds.complete, false, "precondition: this caller has more worlds than one page");
-  assert.ok(
-    home.body.plays_of_my_worlds_note !== undefined || typeof home.body.plays_of_my_worlds === "object",
-    `plays_of_my_worlds is ${JSON.stringify(home.body.plays_of_my_worlds)} — a partial sum over ` +
-    `${home.body.worlds.counted} of the caller's worlds, presented as a plain figure. Either qualify it ` +
-    "the way worlds.counted/page_limit/complete are qualified, or compute it over all of them."
+  assert.equal(home.body.plays_of_my_worlds, undefined, "the name that overclaimed is gone, not merely annotated");
+  assert.equal(
+    typeof home.body.plays_of_the_worlds_counted_above, "number",
+    "and the figure is still reported, under a name that says exactly what it is over"
   );
 });
-
-// ===========================================================================
-// 5. Creating a world through the V2 save route.
-// ===========================================================================
 
 test("CLOSED (was DEFECT, OPEN): creating a world through save takes the tester gate", async () => {
   // WAS: both generate routes take mustBeInternalTester; save took mustBe, and

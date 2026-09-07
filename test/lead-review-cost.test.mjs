@@ -11,11 +11,20 @@
 // an anonymous request is set by the number of world records that exist, not by
 // the number that are published.
 //
-// HALF FIXED, 7 Sep 2026. Creating a world through POST /worlds/:id/save now
-// requires an internal tester, so an arbitrary account can no longer do this —
-// that was the cheap half, and the Lead closed it. The mechanism is untouched:
-// the store still reads every record before filtering, so the cost is still set
-// by how many world records exist rather than how many are published.
+// STILL OPEN, 7 Sep 2026, and recorded as open rather than claimed — which is
+// the right call. Two things have been done and neither closes it:
+//
+//   - creating a world through POST /worlds/:id/save now requires an internal
+//     tester, so an arbitrary account can no longer do this. That was the cheap
+//     half.
+//   - FileWorldStore.list() now reads in parallel, 32 at a time. That moved the
+//     CONSTANT and not the complexity: the store still reads every record
+//     before it filters on state, so the cost is still set by how many world
+//     records exist rather than by how many are published.
+//
+// It needs an index — published records in their own namespace, or a state
+// index the listing can consult without opening every file. The Supabase path
+// does not have this shape, because the filter goes on the wire.
 //
 // Who can still do it: the ~dozen internal testers, which during this window is
 // everyone who can create anything at all. It does not take malice — drafts are
@@ -25,17 +34,19 @@
 // They are drafts, so they appear in no public response — the growth is
 // invisible in everything a monitor would look at.
 //
-// Measured on the developer machine this was written on, one account, one loop,
-// re-measured after the fix with an internal tester's token:
+// Measured on the developer machine this was written on, one loop, one token.
+// The third column is after the parallel read landed:
 //
-//     drafts created   /api/public/stats p50   /api/public/worlds p50   /health p50
-//              0                 1.6 ms                   0.8 ms          0.4 ms
-//            500               149.7 ms                 142.1 ms          0.4 ms
-//           2000               542.2 ms                 526.0 ms          0.4 ms
+//   drafts   /api/public/stats (serial)   /api/public/stats (parallel)   /health
+//        0                      1.6 ms                        1.1 ms     0.4 ms
+//      500                    149.7 ms                           —       0.4 ms
+//     1000                    221.0 ms                       74.8 ms     0.4 ms
+//     2000                    542.2 ms                           —       0.4 ms
 //
-// 2,000 records cost 1.4 s to create and are permanent. The landing page's
-// figures then take half a second each, for everyone, for ever. /health does
-// not move, which is how we know this is the world listing and not the machine.
+// Three times faster and still 68x its own baseline for a catalogue nobody can
+// see. 1,000 records cost 724 ms to create and are permanent; the landing
+// page's figures then cost 75 ms each, for everyone, for ever. /health does not
+// move, which is how we know this is the world listing and not the machine.
 //
 // Run: node --import tsx --test test/lead-review-cost.test.mjs
 import test, { before, after } from "node:test";
@@ -120,7 +131,7 @@ async function p50(url, n = 9) {
   return ts.sort((a, b) => a - b)[Math.floor(n / 2)];
 }
 
-test("DEFECT, OPEN (half fixed): draft worlds still price every anonymous public read", async () => {
+test("DEFECT, OPEN (known, measured, tracked): draft worlds price every anonymous public read", async () => {
   const before_ = { stats: await p50("/api/public/stats"), worlds: await p50("/api/public/worlds"), health: await p50("/health") };
 
   const t0 = Date.now();
@@ -150,4 +161,35 @@ test("DEFECT, OPEN (half fixed): draft worlds still price every anonymous public
     "reads — a state index, or published records in their own namespace — or these endpoints should not " +
     "be recomputed from the catalogue on every request."
   );
+});
+
+test("DISPROVED: the parallel read did not break the listing it sped up", async () => {
+  // FileWorldStore.list() was changed to read in batches of 32 while this suite
+  // was red, which is exactly when a correctness bug slips in unnoticed. Three
+  // things could have gone wrong and none did:
+  //
+  //   - unbounded concurrency would open one file descriptor per world in the
+  //     directory on an ANONYMOUS request, and EMFILE would take down every
+  //     other request with it. The batch size is a constant 32.
+  //   - the `seen` dedup depends on canonical records being considered before
+  //     sidecars. The reads are parallel but the results are walked in the
+  //     original order, by index, so collision resolution is unchanged.
+  //   - _card() can repair a stale sidecar, so a parallel list() could have had
+  //     32 concurrent writers. Each file is read once per call and the repair is
+  //     tmp+rename with a random suffix, so no two writers ever share a path.
+  //
+  // Asserted rather than argued: the listing must still answer with exactly the
+  // published worlds, once each, after the flood of drafts above.
+  const cards = JSON.parse((await call(null, "GET", "/api/public/worlds")).text);
+  const ids = cards.worlds.map((w) => w.world_id);
+  assert.equal(ids.length, new Set(ids).size, "no world is listed twice");
+  assert.equal(cards.count, 1, "and the one published world is the only one listed");
+  assert.equal(cards.worlds[0].world_id, world);
+  assert.equal(cards.worlds[0].state, "published");
+
+  // The owner's own listing sees the drafts, so the filter is a filter and not
+  // a read that lost them.
+  const home = await call(FLOOD, "GET", "/me/home");
+  assert.equal(home.status, 200);
+  assert.equal(JSON.parse(home.text).worlds.counted, 50, "the flooding account's own page is full of them");
 });
