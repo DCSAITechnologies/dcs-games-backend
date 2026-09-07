@@ -1,10 +1,41 @@
-# Staging proofs — final run
+# Staging proofs — final
 
-All six suites re-run against deployment `41ff8b0e-57ab-472f-8a41-e38c91f600d2`,
-commit `7564a14c70d173ddc716bb2db41b99c484f70655`, **schema v13**:
+Re-run against the final checkpoint. Deployment ledger in `reports/DEPLOYMENTS.md`.
 
 | Suite | Result |
 | --- | --- |
+| V3 flagship + persistence (schema v13) | **42 / 42** |
+| V2 surface | **20 / 20** |
+| Atlas provenance, verified trustlessly | **16 / 16** |
+| Remote security posture | **35 / 35** |
+| Concurrency under load (36 writers) | **26 / 26** |
+| Frontend to staging, in a real browser | **42 / 42** |
+| Storefront surface, in a real browser | **7 / 7** |
+| Netcode anti-cheat | **186 checks, 0 fail** |
+
+**188 assertions against deployed infrastructure, 0 failures.**
+
+## Cold rebuild from the PRIVATE mirror — 11 / 11 steps
+
+    clone backend             from the private mirror
+    clone frontend
+    npm ci
+    database from migrations  chain linear · 13 recorded · schema v13 · 54 tables
+    test:unit                 1103 / 1103 · 0 skipped
+    test:api                   126 /  126 · 0 skipped
+    test:browser                98 /   98 · 0 skipped
+    test:e2e                    12 /   12 · 0 skipped
+    test:load                    6 /    6 · 0 skipped
+    test:unit:tsx               69 /   69 · 0 skipped
+    total 13m43s · 11/11 steps passed
+
+Nothing is read from the working tree — not the checkout, not its node_modules,
+not its .dcs-data, not its .env. **Zero skips at every stage**, so no suite was
+quietly absent.
+
+---
+
+| --- |
 | V3 flagship + persistence | **42 / 42** |
 | V2 surface | **20 / 20** |
 | Atlas provenance, verified trustlessly | **16 / 16** |

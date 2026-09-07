@@ -30,3 +30,6 @@ live service actually reports the deployment id it just created.
 | 2026-09-07T03:05:34Z | `5d0e1340-f464-496e-a1b2-ee0212f6cb34` | `aaeb133bb217832d4d28063a4f58686e90faec2c` | sprint/2026-09-canonical |
 | 2026-09-07T03:24:02Z | `b49d6067-012b-41f9-a4d6-73a9fedfdc05` | `e14263ba929c4fffa3738c4eaf530170ece62536` | sprint/2026-09-canonical |
 | 2026-09-07T03:59:43Z | `76937649-ce11-4cc3-bcb3-afd9690a6e81` | `9b4bf1bd6b593accdf85d74a408f7b65bb36a147` | sprint/2026-09-canonical |
+| 2026-09-07T04:57:26Z | `ad37605b-bb08-4734-9e6a-74fafaeaa954` | `6cbdcb4361eecc0be9f7766d79820a439b681720` | sprint/2026-09-canonical |
+| 2026-09-07T04:59:43Z | `7067cac8-b63e-4fb8-aaf9-c05a1e0a4379` | `33c7f7a8fe7e8486e42a929fb619cf6cab272a6d` | sprint/2026-09-canonical |
+| 2026-09-07T05:02:06Z | `51ed1875-9a7d-441c-b842-63b3cf431739` | `cfe30d13b685d5933cef37c1e87aaa9293878fce` | sprint/2026-09-canonical |
