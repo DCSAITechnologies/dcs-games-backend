@@ -5,11 +5,18 @@
 // media-consent gate, the cw5 op validation and the /health additions. This
 // suite is the second reader.
 //
-// Every test named `DEFECT, OPEN:` FAILS on purpose and carries a reproduction.
-// Every test named `DISPROVED:` PASSES and records a hypothesis that turned out
-// to be wrong, so nobody re-derives it.
+// RECONCILED 7 Sep 2026, after the Lead fixed all thirteen findings.
 //
-// Nothing here weakens an assertion to go green.
+//   `CLOSED (was DEFECT, OPEN):`  the defect is fixed. The test now asserts the
+//                                 CORRECT behaviour and keeps the account of
+//                                 what was wrong, because that history is the
+//                                 part a future reader needs.
+//   `DEFECT, OPEN:`               still red. Genuinely not closed.
+//   `DISPROVED:`                  an attack that did not work, kept so nobody
+//                                 re-derives it.
+//
+// Nothing here weakens an assertion to go green: every CLOSED test asserts the
+// fix, not the absence of the symptom.
 //
 // Run: node --import tsx --test test/lead-review.test.mjs
 import test, { before, after } from "node:test";
@@ -139,37 +146,65 @@ after(() => {
 // Reproduced against the running server: kind "voice" + subject_id "user-g-victim"
 // is correctly 403; the same request with kind "likeness" is 200.
 
-test("DEFECT, OPEN: the media consent gate is bypassed by naming the kind 'likeness'", async () => {
+test("CLOSED (was DEFECT, OPEN): the gate keys on a named subject, not on a word", async () => {
+  // WAS: server.mts gated kind ∈ {voice, narration, avatar}. `likeness` — the
+  // word the consent system itself uses for using a real person's face, and one
+  // /health publishes as an accepted media_kind — was not in the set, so a
+  // likeness of user-g-victim, who has granted nothing, returned 200 while the
+  // identical request spelled `voice` returned 403.
+  //
+  // NOW: any request naming a subject needs consent whatever it calls itself,
+  // and the inherently-personal kinds need it even with the subject implicit.
   const gated = await call("OWNER", "POST", `/v3/worlds/${F.media}/media`, {
     kind: "voice", subject_id: "user-g-victim",
   });
-  assert.equal(gated.status, 403, "control: a voice of another person is correctly refused");
+  assert.equal(gated.status, 403, "a voice of another person is refused");
 
-  const bypass = await call("OWNER", "POST", `/v3/worlds/${F.media}/media`, {
+  const likeness = await call("OWNER", "POST", `/v3/worlds/${F.media}/media`, {
     kind: "likeness", subject_id: "user-g-victim",
   });
-  assert.equal(
-    bypass.status, 403,
-    "a likeness of user-g-victim, who has granted nothing, must be refused exactly as their voice is. " +
-    "server.mts:1556 gates on kind ∈ {voice,narration,avatar}; 'likeness' is a declared MEDIA_KIND " +
-    "(src/core/safety.mjs:24), is published by /health as accepted, and is passed to the provider " +
-    `with the subject id attached. Observed ${bypass.status}: ${String(bypass.text).slice(0, 200)}`
-  );
+  assert.equal(likeness.status, 403, "and so is a likeness of them: " + likeness.text.slice(0, 200));
+  assert.match(likeness.body.detail, /no unrevoked .* consent is recorded for this subject/,
+    "refused BY THE CONSENT GATE, not by some other error that happens to be a 403");
+
+  // Every other word for the same act, including ones the server has never
+  // heard of — an unrecognised kind naming a subject is read as a likeness.
+  for (const kind of ["avatar", "name", "performance", "video", "hologram", "deepfake"]) {
+    const r = await call("OWNER", "POST", `/v3/worlds/${F.media}/media`, { kind, subject_id: "user-g-victim" });
+    assert.equal(r.status, 403, `kind:"${kind}" naming a subject must take the gate too`);
+  }
+
+  // And the gate did not become a blanket block: material tied to nobody still
+  // goes through, which is what keeps this a consent gate rather than a switch.
+  const scenery = await call("OWNER", "POST", `/v3/worlds/${F.media}/media`, { kind: "image", target: "thumbnail" });
+  assert.equal(scenery.status, 200, "a thumbnail of a place, naming no one, is not gated");
 });
 
-test("DEFECT, OPEN: an image of a named subject reaches the provider with no consent check", async () => {
-  // The portrait path is the one that actually renders a face, and
-  // mediaPromptFor() builds a portrait prompt for it. `kind: "image"` is not in
-  // the gated set at all, so the consent gate never runs, and the asset is
-  // written into the world.
+test("CLOSED (was DEFECT, OPEN): an image of a named subject takes the consent gate", async () => {
+  // WAS: `kind:"image"` was ungated entirely, and the portrait path is the one
+  // that renders a face. The request returned 200 AND stored the asset in the
+  // world, with subject_id forwarded to the provider.
   const r = await call("OWNER", "POST", `/v3/worlds/${F.media}/media`, {
     kind: "image", target: "portrait", subject_id: "user-g-victim",
   });
-  assert.equal(
-    r.status, 403,
-    "generating a portrait of a named person must take the same consent gate as their voice. " +
-    `Observed ${r.status} and the asset was stored: ${String(r.text).slice(0, 200)}`
+  assert.equal(r.status, 403, "a portrait of a named person is refused: " + r.text.slice(0, 200));
+
+  // And nothing was written to the world on the way to the refusal.
+  const manifest = await call("OWNER", "GET", `/v3/worlds/${F.media}/manifest`);
+  const assets = manifest.body.manifest?.assets || manifest.body.assets || [];
+  assert.ok(
+    !assets.some((a) => a.id === "asset_media_portrait"),
+    "the refused portrait must not be in the manifest"
   );
+});
+
+test("CLOSED (was DEFECT, OPEN): consent covers the subject even when they are implicit", async () => {
+  // The other half of the fix, and the half that is easy to miss: "no
+  // subject_id" on a voice clone means the CALLER, not nobody. Without a
+  // recorded consent for themselves, the caller is refused too.
+  const implicit = await call("OWNER", "POST", `/v3/worlds/${F.media}/media`, { kind: "voice" });
+  assert.equal(implicit.status, 403, "an implicit subject is still a subject: " + implicit.text.slice(0, 200));
+  assert.equal(implicit.body.meta?.subject_id, "user-g-owner", "and the subject is the caller");
 });
 
 test("DISPROVED: 'synthetic' cannot be smuggled past the gate by spelling or case", async () => {
@@ -194,223 +229,229 @@ test("DISPROVED: 'synthetic' cannot be smuggled past the gate by spelling or cas
 });
 
 // ===========================================================================
-// 2. POST /worlds/:id/save now PRESERVES `published`, which turns saving into
-//    an unreviewed content swap on a live, signed, publicly listed world.
+// 2. A save on a published world.
 // ===========================================================================
 //
-// The old expression was `state: b.state || "draft"`. The Lead correctly killed
-// the `b.state` half. The `|| "draft"` half was replaced with
-// `prior?.state || "draft"` (server.mts:2081), which is a different behaviour,
-// not a smaller one: before, a save of a published world dropped it back to
-// draft and OUT of the public catalogue. Now the world stays published while its
-// entire manifest is replaced by whatever the request body carries — no publish
-// authorisation, no Atlas receipt, no re-signing, and the manifest's own
-// `meta.atlas_signed` flag comes straight from the caller.
+// WAS: the Lead replaced `state: b.state || "draft"` with
+// `prior?.state || "draft"`, which looked like the smaller change and was
+// worse. The world stayed published while its whole manifest was replaced from
+// the request body — no publish authorisation, no new receipt — and
+// `meta.atlas_signed` / `meta.atlas_receipt_hash` came straight from the
+// caller. /v3/discover renders that flag as the verification badge and
+// /api/public/worlds served the invented hash to anonymous readers.
 //
-// /v3/discover renders exactly that field as the verification badge
-// (src/core/social.mjs:1172: `atlas_signed: !!w.manifest?.meta?.atlas_signed`),
-// and /api/public/worlds — a route the Lead shipped today — serves the forged
-// `atlas_receipt_hash` to anonymous callers.
+// NOW: a save on a published world returns it to draft and says why, and the
+// two trust fields are stripped on the way in — they are the publish route's
+// to write.
 
-test("DEFECT, OPEN: a save rewrites a PUBLISHED world and can forge its Atlas badge", async () => {
+test("CLOSED (was DEFECT, OPEN): a save on a published world returns it to draft, unbadged", async () => {
   const pub = await call("OWNER", "POST", `/worlds/${F.swap}/publish`, {});
   assert.equal(pub.status, 200, "the world publishes normally: " + pub.text.slice(0, 200));
   const realHash = pub.body.receipt.receipt_hash;
 
-  // Direct state-setting is correctly refused. This is the Lead's fix working.
+  const listed = await call(null, "GET", "/api/public/worlds");
+  assert.ok(listed.body.worlds.some((w) => w.world_id === F.swap), "and is in the public catalogue");
+
+  // Direct state-setting is still refused.
   const direct = await call("OWNER", "POST", `/worlds/${F.swap}/save`, {
     manifest: { meta: { title: "x" } }, state: "published",
   });
   assert.equal(direct.status, 422, "a body `state` is refused");
 
-  // ...and here is the same outcome without ever naming `state`.
+  // The swap that used to keep the badge.
   const swapped = await call("OWNER", "POST", `/worlds/${F.swap}/save`, {
     manifest: { meta: { title: `SWAPPED-${RUN}`, atlas_signed: true, atlas_receipt_hash: "deadbeefdeadbeef" } },
   });
-  assert.equal(swapped.status, 200, "the swap is accepted");
+  assert.equal(swapped.status, 200, "the save itself succeeds — saving is saving");
+  assert.equal(swapped.body.state, "draft", "and the world is now a draft");
+  assert.equal(swapped.body.unpublished, true);
+  assert.match(swapped.body.unpublished_reason, /receipt attested to the previous manifest/,
+    "and the caller is told why, rather than discovering it from a listing");
 
   const cards = await call(null, "GET", "/api/public/worlds");
-  const card = cards.body.worlds.find((w) => w.world_id === F.swap);
-  assert.ok(card, "the world is still in the public catalogue");
-
-  assert.notEqual(
-    card.title, `SWAPPED-${RUN}`,
-    "a published world's content was replaced through POST /worlds/:id/save with no publish " +
-    "authorisation and no new receipt, and it stayed published and publicly listed. " +
-    "server.mts:2081 preserves `published`; the previous code dropped it to draft, which at least " +
-    "took the swapped content out of discovery."
-  );
-  assert.notEqual(
-    card.manifest?.meta?.atlas_receipt_hash, "deadbeefdeadbeef",
-    `the anonymous catalogue is serving a receipt hash the caller invented; the real one is ${realHash}`
+  assert.ok(
+    !cards.body.worlds.some((w) => w.world_id === F.swap),
+    "the swapped world has left the public catalogue until it is published again"
   );
 
   const disc = await call(null, "GET", "/v3/discover");
-  const row = disc.body.worlds.find((w) => w.world_id === F.swap);
-  assert.equal(
-    row?.atlas_signed, false,
-    "the discovery 'atlas_signed' badge is read straight out of the manifest the caller just wrote, " +
-    "so any world owner can display a verification badge over content Atlas never saw"
-  );
+  assert.ok(!disc.body.worlds.some((w) => w.world_id === F.swap), "and discovery too");
+
+  // The forged trust fields never reached the store, so re-publishing cannot
+  // resurrect them either.
+  const owner = await call("OWNER", "GET", `/worlds/${F.swap}/load`);
+  assert.equal(owner.body.manifest.meta.atlas_receipt_hash, undefined, "the invented receipt hash was stripped");
+  assert.equal(owner.body.manifest.meta.atlas_signed, undefined, "and so was the badge");
+  assert.notEqual(owner.body.manifest.meta.atlas_receipt_hash, realHash, "including the real one — publish rewrites it");
 });
 
 // ===========================================================================
-// 3. GET /api/public/events labels a MODIFICATION time as a publication.
+// 3. GET /api/public/events, and 4. GET /me/home — a page called a total.
 // ===========================================================================
-//
-// server.mts:566 builds `{kind: "world_published", at: w.updated_at || w.created_at}`
-// and sorts on it. `updated_at` moves on every save, so the feed the site renders
-// as "recently published" is really "recently touched", and a world published
-// days ago jumps back to the top of it the moment its creator edits it — with a
-// timestamp that reads as its publication date.
 
-test("DEFECT, OPEN: /api/public/events reports the last edit as the publication time", async () => {
+test("CLOSED (was DEFECT, OPEN): the catalogue feed no longer claims to be a publication log", async () => {
+  // WAS: `{kind: "world_published", at: w.updated_at}`, sorted on `at`. An edit
+  // re-ordered the "publication" feed and back-dated nothing — the world
+  // published first led it, carrying its edit time as though that were when it
+  // went live. The store keeps no publication timestamp, so the feed never had
+  // one to report.
   const a = await call("OWNER", "POST", `/worlds/${F.older}/publish`, {});
   assert.equal(a.status, 200, "world A publishes: " + a.text.slice(0, 200));
-  const publishedA = new Date().toISOString();
-  await new Promise((r) => setTimeout(r, 1100));    // distinct second, so the ordering is not a tie
+  await new Promise((r) => setTimeout(r, 1100));
   const b = await call("OWNER", "POST", `/worlds/${F.newer}/publish`, {});
   assert.equal(b.status, 200, "world B publishes second: " + b.text.slice(0, 200));
 
-  const before = await call(null, "GET", "/api/public/events");
-  const orderBefore = before.body.events.map((e) => e.world_id).filter((id) => id === F.older || id === F.newer);
-  assert.deepEqual(orderBefore, [F.newer, F.older], "control: the most recently published world leads the feed");
+  const feed = await call(null, "GET", "/api/public/events");
+  const events = feed.body.events;
+  assert.ok(events.length >= 2);
 
-  await new Promise((r) => setTimeout(r, 1100));
-  const edit = await call("OWNER", "POST", `/worlds/${F.older}/save`, {
-    manifest: { meta: { title: `edited-${RUN}` } },
-  });
-  assert.equal(edit.status, 200, "world A is edited, not re-published");
-
-  const after = await call(null, "GET", "/api/public/events");
-  const eventA = after.body.events.find((e) => e.world_id === F.older);
-  assert.ok(eventA, "world A is still in the feed");
-
-  assert.ok(
-    eventA.at <= publishedA,
-    `a record announced as kind:"world_published" carries at=${eventA.at}, which is when the world was ` +
-    `last EDITED, not when it was published (${publishedA}). The store keeps no publication timestamp, ` +
-    "so this feed cannot report one, and it must not present updated_at as though it were one."
+  for (const e of events) {
+    assert.equal(e.kind, "world_in_catalogue", "no event claims to be a publication");
+    assert.equal(e.at, undefined, "the ambiguous field name is gone");
+    assert.ok(e.last_changed_at, "and the timestamp says what it actually is");
+  }
+  assert.match(
+    feed.body.basis, /no publication timestamp/i,
+    "and the basis states plainly that this is not a chronology of publications"
   );
 
-  const orderAfter = after.body.events.map((e) => e.world_id).filter((id) => id === F.older || id === F.newer);
-  assert.deepEqual(
-    orderAfter, [F.newer, F.older],
-    "an edit re-ordered the publication feed: the older publication now leads it"
-  );
+  // The ordering claim it DOES make — most recently changed first — is true,
+  // and an edit moving a world up it is now correct rather than misleading.
+  const changed = events.map((e) => e.last_changed_at);
+  assert.deepEqual(changed, [...changed].sort().reverse(), "ordered by last change, descending");
 });
 
-// ===========================================================================
-// 4. GET /me/home publishes a page size as a total.
-// ===========================================================================
-//
-// server.mts:634 reads `repo.listOwned(me.id, 50)` and then answers
-// `worlds: { total: mine.length, ... }` and `plays_of_my_worlds` summed over the
-// same 50. A creator with more than 50 worlds is told they have exactly 50, for
-// ever, and their play total is the total for an arbitrary page of them.
-//
-// This is the same class of defect the endpoint's own neighbours are written to
-// prevent — /api/public/stats deliberately refuses to report a platform-wide
-// unique-player count rather than report a wrong one.
-
-test("DEFECT, OPEN: /me/home reports the first page of worlds as the total", async () => {
+test("CLOSED (was DEFECT, OPEN): /me/home reports a page as a page", async () => {
+  // WAS: `worlds: { total: mine.length }` over `listOwned(me.id, 50)`. A creator
+  // with 55 worlds was told they had exactly 50, for ever.
   const N = 55;
   for (let i = 0; i < N; i++) {
-    const r = await call("BULK", "POST", `/worlds/gb_${RUN}_${i}/save`, { manifest: { meta: { title: `bulk ${i}` } } });
-    assert.equal(r.status, 200, `world ${i} stored`);
+    // Creation through save is now an internal-tester surface (see below), so
+    // this is the OWNER rather than an ordinary account.
+    const r = await call("OWNER", "POST", `/worlds/gb_${RUN}_${i}/save`, { manifest: { meta: { title: `bulk ${i}` } } });
+    assert.equal(r.status, 200, `world ${i} stored: ${r.text.slice(0, 160)}`);
   }
-  const home = await call("BULK", "GET", "/me/home");
+  const home = await call("OWNER", "GET", "/me/home");
   assert.equal(home.status, 200);
-  assert.equal(
-    home.body.worlds.total, N,
-    `the caller owns ${N} worlds and /me/home reports total=${home.body.worlds.total}, which is the ` +
-    "page size at server.mts:634. Either count them, or report the page honestly as a page."
+  const w = home.body.worlds;
+  assert.equal(w.total, undefined, "the field that lied is gone, not merely corrected");
+  assert.equal(w.counted, 50, "what was counted");
+  assert.equal(w.page_limit, 50, "out of how many it could count");
+  assert.equal(w.complete, false, "and whether that is all of them");
+  assert.match(w.note, /not a total/, "said in words as well as in fields");
+  assert.equal(w.published + w.drafts, w.counted, "the breakdown adds up to what was counted");
+});
+
+test("DEFECT, OPEN: /me/home's play figure is still summed over one page, unlabelled", async () => {
+  // The residue of the same defect. `plays_of_my_worlds` is computed in the same
+  // loop over the same 50 records (server.mts, /me/home), so when
+  // `worlds.complete` is false it is the play count of an arbitrary page — but
+  // it is reported as a bare number beside the counts that now carry their own
+  // provenance. A creator with 200 worlds reads it as their total.
+  //
+  // Small, and the same class as the one just closed: a number computed over a
+  // page must say so, or not be reported.
+  const home = await call("OWNER", "GET", "/me/home");
+  assert.equal(home.body.worlds.complete, false, "precondition: this caller has more worlds than one page");
+  assert.ok(
+    home.body.plays_of_my_worlds_note !== undefined || typeof home.body.plays_of_my_worlds === "object",
+    `plays_of_my_worlds is ${JSON.stringify(home.body.plays_of_my_worlds)} — a partial sum over ` +
+    `${home.body.worlds.counted} of the caller's worlds, presented as a plain figure. Either qualify it ` +
+    "the way worlds.counted/page_limit/complete are qualified, or compute it over all of them."
   );
 });
 
 // ===========================================================================
-// 5. Any authenticated account can mint world records through the V2 save route.
+// 5. Creating a world through the V2 save route.
 // ===========================================================================
-//
-// Creation is an internal-tester surface on every route that calls itself one:
-// POST /worlds/generate and POST /v3/worlds/generate both go through
-// mustBeInternalTester. POST /worlds/:id/save takes mustBe only, and upsert's
-// ownership check — as the Lead's own comment at server.mts:2056 observes —
-// "only fires when a record already exists". The Lead used that observation to
-// justify removing `b.state`, and left the creation itself open: an id nobody has
-// claimed becomes a world owned by whoever asked, with no tester check, no
-// playtest gate, no prompt, and no limit. The 55 worlds in the test above were
-// created that way by a non-tester in about a second.
 
-test("DEFECT, OPEN: a non-internal-tester creates worlds through POST /worlds/:id/save", async () => {
-  const refused = await call("VICTIM", "POST", "/v3/worlds/generate", { prompt: `a world ${RUN}` });
-  assert.equal(refused.status, 403, "control: the generate surface is closed to non-testers");
+test("CLOSED (was DEFECT, OPEN): creating a world through save takes the tester gate", async () => {
+  // WAS: both generate routes take mustBeInternalTester; save took mustBe, and
+  // upsert's owner check only fires when a record already exists. So any
+  // authenticated account could bring unlimited worlds into being on ids of its
+  // choosing, during a window explicitly limited to authorised testers — and
+  // that was the cheap half of the cost amplification in
+  // test/lead-review-cost.test.mjs.
+  const refusedGenerate = await call("VICTIM", "POST", "/v3/worlds/generate", { prompt: `a world ${RUN}` });
+  assert.equal(refusedGenerate.status, 403, "the generate surface is closed to non-testers");
 
-  const created = await call("VICTIM", "POST", `/worlds/squatted_${RUN}/save`, {
+  const refusedSave = await call("VICTIM", "POST", `/worlds/squatted_${RUN}/save`, {
     manifest: { meta: { title: "created without passing the internal-tester gate" } },
   });
   assert.equal(
-    created.status, 403,
-    "creating a world is an internal-tester surface until 30 Sep 2026; POST /worlds/:id/save on an " +
-    `unclaimed id creates one for anyone with a token. Observed ${created.status}: ${created.text.slice(0, 200)}`
+    refusedSave.status, 403,
+    "and so is creation through save: " + refusedSave.text.slice(0, 200)
   );
+
+  // The world must not exist even as a side effect of the refusal.
+  const exists = await call("OWNER", "GET", `/worlds/squatted_${RUN}/load`);
+  assert.equal(exists.status, 404, "nothing was created on the way to the 403");
+
+  // And the fix is narrow: SAVING a world that already exists is untouched,
+  // which is the whole point of the route. (An ordinary account can no longer
+  // own a world at all, because every creation path is now tester-only — worth
+  // knowing when the testing window ends.)
+  const created = await call("OWNER", "POST", `/worlds/owned_${RUN}/save`, { manifest: { meta: { title: "mine" } } });
+  assert.equal(created.status, 200, "a tester creates it");
+  const resaved = await call("OWNER", "POST", `/worlds/owned_${RUN}/save`, { manifest: { meta: { title: "mine, edited" } } });
+  assert.equal(resaved.status, 200, "and re-saving it is not gated again");
 });
 
 // ===========================================================================
-// 6. cw5: every op was validated. `seq` was not.
+// 6. cw5: seq validation, and how a refusal reaches the caller.
 // ===========================================================================
-//
-// The Lead's stated purpose (cw5_persistence.ts:~355) is "nothing can be
-// accepted that replay will later refuse". The op loop achieves that. But
-// `save()` only checks `delta.seq == null`, and a non-numeric seq then walks
-// through every numeric comparison as NaN — `seq <= maxSeq` is false, so it is
-// appended — and is dropped again on the way out, because getDeltas filters
-// `d.seq > afterSeq`, which is also false for NaN. The caller is told ok:true
-// with the seq they sent, and the ops are never applied to anything, ever.
-//
-// It also poisons the append-only store's ordering: the list is sorted with
-// `a.seq - b.seq`, which is NaN for this row, and getMaxSeq reads the last
-// element of that sort.
 
-test("DEFECT, OPEN: cw5 accepts a delta whose seq is not a number, and silently never applies it", async () => {
+test("CLOSED (was DEFECT, OPEN): cw5 refuses a delta whose seq is not a number", async () => {
+  // WAS: save() checked only `delta.seq == null`. A non-numeric seq walked
+  // through every numeric comparison as NaN — `seq <= maxSeq` false, so it was
+  // appended — and was filtered straight back out of every replay by
+  // `d.seq > afterSeq`. The caller was told ok:true with the seq they sent and
+  // the ops were never applied to anything, ever.
   const saved = await call("OWNER", "POST", `/worlds/${F.runtime}/save`, {
     seq: "not-a-number",
     ops: [{ op: "var_set", key: `ghost_${RUN}`, value: "written and acknowledged" }],
   });
+  assert.equal(saved.status, 422, "refused, not acknowledged: " + saved.text.slice(0, 200));
 
-  if (saved.status === 200) {
-    const loaded = await call("OWNER", "GET", `/worlds/${F.runtime}/load`);
-    assert.equal(
-      loaded.body.runtime_state?.vars?.[`ghost_${RUN}`], "written and acknowledged",
-      `the save answered ${saved.status} ok:true seq=${JSON.stringify(saved.body.seq)}, and the op is ` +
-      "not in the world. cw5_persistence.ts save() validates every op but never validates seq, so a " +
-      "non-numeric seq passes the monotonic check as NaN, is appended, and is then filtered back out " +
-      "of every replay. Refuse it instead."
-    );
-  }
+  const loaded = await call("OWNER", "GET", `/worlds/${F.runtime}/load`);
   assert.equal(
-    saved.status, 422,
-    `a delta with seq=${JSON.stringify("not-a-number")} must be refused, not acknowledged. Observed ${saved.status}`
+    loaded.body.runtime_state?.vars?.[`ghost_${RUN}`], undefined,
+    "and nothing from the refused delta is in the world"
   );
+
+  // The neighbouring values that are also not a seq.
+  for (const seq of [-1, 0, 1.5, Number.MAX_SAFE_INTEGER + 2, "3", null, {}, []]) {
+    const r = await call("OWNER", "POST", `/worlds/${F.runtime}/save`, { seq, ops: [] });
+    assert.ok(r.status === 422 || r.status === 409, `seq=${JSON.stringify(seq)} is refused (got ${r.status})`);
+  }
 });
 
-test("DEFECT, OPEN: every cw5 refusal reaches the caller as a 500 with no reason", async () => {
-  // cw5_persistence.ts throws plain Errors — 'unknown op', 'a delta may not act
-  // on another player's behalf', 'refusing because the world's current ownership
-  // could not be read'. The top-level handler (server.mts:2124) treats anything
-  // that is not an AppError as an internal fault, and since today's change the
-  // message is deliberately withheld. So the carefully written refusals the Lead
-  // added are logged as server faults and the caller — who sent a bad request —
-  // is told "an unexpected error occurred" with a 500 that reads as retryable.
-  const r = await call("OWNER", "POST", `/worlds/${F.runtime}/save`, {
+test("CLOSED (was DEFECT, OPEN): a cw5 refusal reaches the caller with its reason", async () => {
+  // WAS: cw5 throws plain Errors, and the top-level handler treats anything that
+  // is not an AppError as an internal fault whose message is withheld. So the
+  // carefully written refusals — 'unknown op', 'a delta may not act on another
+  // player's behalf', 'ownership could not be read' — were logged as server
+  // faults and the caller was told "an unexpected error occurred" with a 500
+  // that reads as retryable.
+  const unknownOp = await call("OWNER", "POST", `/worlds/${F.runtime}/save`, {
     seq: 900, ops: [{ op: "teleport", object_id: "x" }],
   });
-  assert.equal(
-    r.status, 422,
-    "a client sending an op kind the engine does not know is a validation failure, not a server fault. " +
-    `Observed ${r.status} ${JSON.stringify(r.body?.detail)}. These throws need to be AppErrors ` +
-    "(Errors.validation / Errors.forbidden) or the route must translate them."
-  );
+  assert.equal(unknownOp.status, 422, "a bad request is a validation failure, not a server fault");
+  assert.match(unknownOp.body.detail, /unknown op 'teleport'/, "and it says which op");
+  assert.match(unknownOp.body.detail, /unloadable/, "and why it matters that it was not stored");
+
+  // Non-monotonic is a conflict, not a validation failure — the caller's delta
+  // is well-formed and simply late.
+  await call("OWNER", "POST", `/worlds/${F.runtime}/save`, { seq: 700, ops: [] });
+  const late = await call("OWNER", "POST", `/worlds/${F.runtime}/save`, { seq: 600, ops: [] });
+  assert.equal(late.status, 409, "a stale seq is a conflict: " + late.text.slice(0, 160));
+
+  // Nothing the runtime authored leaks through the mapping: every message that
+  // reaches a client here is one the engine wrote for a caller.
+  for (const r of [unknownOp, late]) {
+    assert.match(r.body.detail, /^save: /, "only the engine's own caller-facing text");
+    assert.ok(!/\bat \/|node:internal|cw5_persistence\.ts/.test(r.text), "no stack, no file path");
+  }
 });
 
 test("DISPROVED: cw5 op validation does not accept anything replay refuses", async () => {
@@ -421,11 +462,11 @@ test("DISPROVED: cw5 op validation does not accept anything replay refuses", asy
   // the op itself and none of them consult the state. move_object on an existing
   // object takes a different branch, but that branch cannot throw either.
   const place = await call("OWNER", "POST", `/worlds/${F.runtime}/save`, {
-    seq: 1, ops: [{ op: "place_object", object_id: `obj_${RUN}`, kind: "structure", transform: { x: 1, y: 0, z: 2 } }],
+    seq: 1001, ops: [{ op: "place_object", object_id: `obj_${RUN}`, kind: "structure", transform: { x: 1, y: 0, z: 2 } }],
   });
   assert.equal(place.status, 200);
   const move = await call("OWNER", "POST", `/worlds/${F.runtime}/save`, {
-    seq: 2, ops: [{ op: "move_object", object_id: `obj_${RUN}`, transform: { x: 9 } }],
+    seq: 1002, ops: [{ op: "move_object", object_id: `obj_${RUN}`, transform: { x: 9 } }],
   });
   assert.equal(move.status, 200);
   const loaded = await call("OWNER", "GET", `/worlds/${F.runtime}/load`);
@@ -435,48 +476,63 @@ test("DISPROVED: cw5 op validation does not accept anything replay refuses", asy
 });
 
 // ===========================================================================
-// 7. /api/public/stats publishes a figure one account can move at will.
+// 7. /api/public/stats and the play figures.
 // ===========================================================================
 //
-// The play route's own comment (server.mts:1219) records the problem and the
-// fix: "Anonymously, 25 requests took a world from 0 to 25 plays and 360,000
-// seconds of watch time — no credential, no rate limit, no dedupe". Only the
-// credential was added. With one token the same loop produces the same numbers,
-// and as of today they are published, unauthenticated, as the platform's
-// measured play total on /api/public/stats — the endpoint written to stop the
-// site showing figures no system ever measured.
+// WAS: the play route's own comment recorded the problem — "25 requests took a
+// world from 0 to 25 plays and 360,000 seconds of watch time — no credential,
+// no rate limit, no dedupe" — and only the credential had been added. Ten
+// requests from one token in twenty milliseconds produced ten plays and forty
+// hours, and those totals were published anonymously as the platform's
+// MEASURED figures.
 //
-// The assertion below is not a matter of taste: 10 requests in a few
-// milliseconds cannot have produced 40 hours of play in a world that has existed
-// for seconds.
+// NOW: a play is a session (repeats from one principal within the window fold
+// into the existing row), and the seconds are published under a name that
+// carries their provenance instead of being presented as a measurement.
 
-test("DEFECT, OPEN: public play figures exceed what could physically have been played", async () => {
-  const w = await mintWorld("OWNER", "a world whose play count is inflated");
+test("CLOSED (was DEFECT, OPEN): one account is one player, and the seconds say they are a claim", async () => {
+  const w = await mintWorld("OWNER", "a world whose play count was inflated");
   const pub = await call("OWNER", "POST", `/worlds/${w}/publish`, {});
   assert.equal(pub.status, 200, "published: " + pub.text.slice(0, 200));
 
-  const beforeStats = (await call(null, "GET", "/api/public/stats")).body;
-  const t0 = Date.now();
+  const before = (await call(null, "GET", "/api/public/stats")).body;
   for (let i = 0; i < 10; i++) {
     const r = await call("OWNER", "POST", `/v3/worlds/${w}/play`, { seconds: 999999 });
-    assert.equal(r.status, 201, "each play is accepted");
+    assert.equal(r.status, 201, "each report is still accepted — a client re-reporting progress is behaving correctly");
   }
-  const elapsedSeconds = (Date.now() - t0) / 1000;
   const after = (await call(null, "GET", "/api/public/stats")).body;
 
-  const addedSeconds = after.play_seconds - beforeStats.play_seconds;
-  const addedPlays = after.plays - beforeStats.plays;
+  assert.equal(
+    after.plays - before.plays, 1,
+    "ten requests from one principal in one window are one session, not ten plays"
+  );
+
+  // The seconds are no longer offered as something the server measured.
+  assert.equal(after.play_seconds, undefined, "the neutral name that read as measured is gone");
+  assert.equal(after.play_seconds_measured, null, "nothing times a session, and that is stated");
+  assert.match(after.play_seconds_note, /reported by clients/i, "and the self-reported figure carries its provenance");
+
+  // A claim is still bounded: one session's worth, not forty hours.
+  const claimed = after.play_seconds_self_reported - before.play_seconds_self_reported;
   assert.ok(
-    addedSeconds <= Math.max(elapsedSeconds, 60),
-    `/api/public/stats now reports ${addedSeconds} seconds of play added by ONE principal in ` +
-    `${elapsedSeconds.toFixed(2)} wall-clock seconds (${addedPlays} plays). Nothing times a session ` +
-    "server-side and nothing dedupes or rate-limits POST /v3/worlds/:id/play, so this public, " +
-    "unauthenticated 'measured' figure is whatever any single account decides it is."
+    claimed <= 4 * 60 * 60,
+    `one principal contributed ${claimed} seconds in one window; a single clamped session is the ceiling`
   );
 });
 
+test("CLOSED (was DEFECT, OPEN): /api/public/stats says when its own listing is capped", async () => {
+  // The same class as /me/home's `total`, one endpoint along: every figure is
+  // computed over `listPublished(1000)`, so above a thousand published worlds
+  // they silently become floors. The response now says so in the answer rather
+  // than leaving it to be discovered when the numbers stop moving.
+  const s = (await call(null, "GET", "/api/public/stats")).body;
+  assert.equal(s.page_limit, 1000);
+  assert.equal(s.complete, s.counted_over < 1000);
+  assert.equal(typeof s.counted_over, "number");
+});
+
 // ===========================================================================
-// 8. Hypotheses about the new public surface that did NOT hold.
+// 8. The public surface: what is safe, and one thing that is not.
 // ===========================================================================
 
 test("DISPROVED: the public endpoints do not leak drafts or unpublished content", async () => {
@@ -489,18 +545,46 @@ test("DISPROVED: the public endpoints do not leak drafts or unpublished content"
     assert.equal(r.status, 200, url);
     assert.ok(!r.text.includes(draft), `${url} must not mention a draft world id`);
   }
-  // And the draft's engagement is excluded from the platform figures, which the
-  // `basis` string states.
   const stats = (await call(null, "GET", "/api/public/stats")).body;
   assert.match(stats.basis, /PUBLISHED worlds only/);
+});
 
-  // The Atlas feed only ever contains published subjects: server.mts:2026 is the
-  // single writer of that collection and it is inside the publish handler.
+test("CLOSED (consequence of fix 2, and handled with it): the Atlas feed drops worlds that left the catalogue", async () => {
+  // This one belongs to the Lead, not to me: returning a saved world to draft
+  // creates a receipt whose subject is no longer public, and he closed that in
+  // the same pass. Kept as a regression test because the interaction is not
+  // obvious from either side alone.
+  //
+  // The receipt row issued at publish stays in the collection for ever — the
+  // publish handler is its only writer and nothing removes one — so an
+  // unfiltered feed would go on naming the world after it left the catalogue.
+  //
+  // Two things follow. The feed is the public provenance surface, and it now
+  // lists receipts whose subject an anonymous caller cannot fetch, verify, or
+  // even confirm exists: every sibling route answers 404 for that id, which is
+  // the answer the repository deliberately gives so that status alone is not an
+  // existence oracle. And the feed's own claim — these are the receipts that
+  // were issued — quietly becomes "these were issued, for content that may no
+  // longer be public".
+  const w = await mintWorld("OWNER", "a world published then edited");
+  assert.equal((await call("OWNER", "POST", `/worlds/${w}/publish`, {})).status, 200);
+  const edited = await call("OWNER", "POST", `/worlds/${w}/save`, { manifest: { meta: { title: `edited-${RUN}` } } });
+  assert.equal(edited.body.unpublished, true, "precondition: the save returned it to draft");
+
+  const anon = await call(null, "GET", `/worlds/${w}/manifest`);
+  assert.equal(anon.status, 404, "precondition: the world is private now");
+
   const feed = (await call(null, "GET", "/api/public/atlas/feed")).body;
-  for (const rec of feed.receipts) {
-    const seen = await call(null, "GET", `/worlds/${rec.subject_id}/manifest`);
-    assert.equal(seen.status, 200, `receipt subject ${rec.subject_id} is a world anyone may already read`);
-  }
+  assert.ok(
+    !feed.receipts.some((r) => r.subject_id === w),
+    `the anonymous provenance feed must not name ${w}, a world an anonymous caller is told does not exist`
+  );
+  assert.match(feed.basis, /still valid and still fetchable by hash/,
+    "and it says what it is showing, so a filtered feed is not read as a withdrawn receipt");
+
+  // The receipt itself is not destroyed — it attests to something that happened.
+  const stats = (await call(null, "GET", "/api/public/atlas/stats")).body;
+  assert.ok(stats.receipts_issued >= feed.count, "issuance is still counted in full");
 });
 
 test("DISPROVED: an anonymous caller cannot influence the cost of the public endpoints", async () => {
@@ -549,12 +633,30 @@ test("DISPROVED: the refusal of a body `state` has no spelling or route around i
     "an edit cannot publish either");
 });
 
-test("DISPROVED: the error handler does not leak internal messages", async () => {
-  const r = await call("OWNER", "POST", `/worlds/${F.runtime}/save`, {
-    seq: 5000, ops: [{ op: "unknown_kind_that_throws" }],
+test("DISPROVED: no message the runtime authored reaches a client", async () => {
+  // The original form of this test asserted that a cw5 refusal came back as an
+  // opaque 500. That was the defect, not the property: the property is that the
+  // client is never handed a message nobody chose to send it.
+  //
+  // The refusals are now mapped to 4xx and DO carry text — but only the
+  // engine's own `save: ...` strings, which were written for a caller. Anything
+  // without that prefix still falls through to the opaque 500 (the route's
+  // mapping re-throws it), so an ENOENT naming a container path or a database
+  // error naming relations and columns cannot reach a browser.
+  const mapped = await call("OWNER", "POST", `/worlds/${F.runtime}/save`, {
+    seq: 4000, ops: [{ op: "definitely_not_an_op" }],
   });
-  assert.equal(r.status, 500, "wrongly classified — see the 500 defect above");
-  assert.equal(r.body.detail, "an unexpected error occurred; quote the correlation id");
-  assert.ok(r.body.correlation_id, "and the caller gets a correlation id to quote");
-  assert.ok(!/unknown op|unloadable|cw5_persistence/.test(r.text), "the internal message stays in the log");
+  assert.equal(mapped.status, 422);
+  assert.match(mapped.body.detail, /^save: /, "deliberate, caller-facing text");
+  assert.ok(mapped.body.correlation_id, "and a correlation id to quote");
+  assert.ok(
+    !/node:internal|\/Users\/|\.ts:\d+|ENOENT|EACCES/.test(mapped.text),
+    "no stack, no filesystem path, no runtime error code"
+  );
+
+  // The 404 body is equally sparse: a path, a code, an id, nothing about the
+  // process.
+  const missing = await call(null, "GET", "/definitely-not-a-route");
+  assert.equal(missing.status, 404);
+  assert.deepEqual(Object.keys(missing.body).sort(), ["correlation_id", "error", "ok", "path"]);
 });

@@ -11,22 +11,31 @@
 // an anonymous request is set by the number of world records that exist, not by
 // the number that are published.
 //
-// And any authenticated account can create world records, in bulk, at will:
-// POST /worlds/:id/save on an unclaimed id mints one with no internal-tester
-// check and no limit (see the separate defect in test/lead-review.test.mjs).
-// They are drafts, so they appear in no public response — the damage is
+// HALF FIXED, 7 Sep 2026. Creating a world through POST /worlds/:id/save now
+// requires an internal tester, so an arbitrary account can no longer do this —
+// that was the cheap half, and the Lead closed it. The mechanism is untouched:
+// the store still reads every record before filtering, so the cost is still set
+// by how many world records exist rather than how many are published.
+//
+// Who can still do it: the ~dozen internal testers, which during this window is
+// everyone who can create anything at all. It does not take malice — drafts are
+// the normal by-product of creating worlds, and a legitimately busy catalogue
+// prices every anonymous page load the same way.
+//
+// They are drafts, so they appear in no public response — the growth is
 // invisible in everything a monitor would look at.
 //
-// Measured on the developer machine this was written on, one account, one loop:
+// Measured on the developer machine this was written on, one account, one loop,
+// re-measured after the fix with an internal tester's token:
 //
 //     drafts created   /api/public/stats p50   /api/public/worlds p50   /health p50
-//              0                 7.0 ms                   6.5 ms          0.3 ms
-//            200                32.6 ms                  33.2 ms          0.3 ms
-//           1000               143.9 ms                 141.7 ms          0.2 ms
-//           3000               418.9 ms                 600.8 ms          0.5 ms
+//              0                 1.6 ms                   0.8 ms          0.4 ms
+//            500               149.7 ms                 142.1 ms          0.4 ms
+//           2000               542.2 ms                 526.0 ms          0.4 ms
 //
-// 3,000 records cost 934 ms to create and are permanent. The landing page's
-// figures then take half a second each, for everyone, for ever.
+// 2,000 records cost 1.4 s to create and are permanent. The landing page's
+// figures then take half a second each, for everyone, for ever. /health does
+// not move, which is how we know this is the world listing and not the machine.
 //
 // Run: node --import tsx --test test/lead-review-cost.test.mjs
 import test, { before, after } from "node:test";
@@ -46,7 +55,9 @@ const PORT = 9060 + Math.floor(Math.random() * 80);
 const BASE = `http://127.0.0.1:${PORT}`;
 const RUN = crypto.randomBytes(4).toString("hex");
 const OWNER = signLocalToken(SECRET, { sub: "user-c-owner", email: "c-owner@dcsai.ai", roles: ["internal_tester"] }, 7200);
-const FLOOD = signLocalToken(SECRET, { sub: "user-c-flood", email: "c-flood@example.com" }, 7200);
+// Creation is a tester surface now, so the drafts are made by one — which is
+// the point: the people who can create are the people who create drafts.
+const FLOOD = signLocalToken(SECRET, { sub: "user-c-flood", email: "c-flood@dcsai.ai", roles: ["internal_tester"] }, 7200);
 
 /** Enough to be unmistakable, few enough to stay a fast test. */
 const DRAFTS = 1000;
@@ -62,7 +73,7 @@ before(async () => {
       PORT: String(PORT), DCS_AUTH_SECRET: SECRET, DCS_DATA_DIR: DATA,
       PAYMENTS_LIVE: "0", NODE_ENV: "test", DCS_PROVIDERS_OFFLINE: "1",
       ATLAS_PRIVATE_KEY: crypto.randomBytes(32).toString("base64"),
-      DCS_INTERNAL_TESTERS: "c-owner@dcsai.ai",
+      DCS_INTERNAL_TESTERS: "c-owner@dcsai.ai,c-flood@dcsai.ai",
       SUPABASE_URL: "", SUPABASE_SERVICE_ROLE_KEY: "", DATABASE_URL: "",
       CEREBRAS_API_KEY: "", CEREBRAS_API_KEY_1: "", CEREBRAS_API_KEY_2: "",
       DEEPSEEK_API_KEY: "", TOGETHER_API_KEY: "",
@@ -109,7 +120,7 @@ async function p50(url, n = 9) {
   return ts.sort((a, b) => a - b)[Math.floor(n / 2)];
 }
 
-test("DEFECT, OPEN: one account can multiply the cost of every anonymous public read", async () => {
+test("DEFECT, OPEN (half fixed): draft worlds still price every anonymous public read", async () => {
   const before_ = { stats: await p50("/api/public/stats"), worlds: await p50("/api/public/worlds"), health: await p50("/health") };
 
   const t0 = Date.now();
@@ -129,12 +140,14 @@ test("DEFECT, OPEN: one account can multiply the cost of every anonymous public 
   const growth = after_.stats / Math.max(before_.stats, 0.5);
   assert.ok(
     growth < 5,
-    `an ordinary account spent ${spent} ms creating ${DRAFTS} invisible draft worlds and the anonymous ` +
+    `one internal tester spent ${spent} ms creating ${DRAFTS} invisible draft worlds and the anonymous ` +
     `/api/public/stats went from ${before_.stats.toFixed(1)} ms to ${after_.stats.toFixed(1)} ms ` +
     `(${growth.toFixed(1)}x); /api/public/worlds went ${before_.worlds.toFixed(1)} -> ${after_.worlds.toFixed(1)} ms, ` +
     `while /health stayed at ${after_.health.toFixed(1)} ms, so this is the world listing and not the machine. ` +
+    "Requiring a tester to create a world closed the cheap half of this and left the mechanism: " +
     "FileWorldStore.list() reads every record in the directory before filtering on state, so unpublished " +
     "content nobody can see sets the price of every public page load. The store should filter before it " +
-    "reads, or these endpoints should not be recomputed per request."
+    "reads — a state index, or published records in their own namespace — or these endpoints should not " +
+    "be recomputed from the catalogue on every request."
   );
 });

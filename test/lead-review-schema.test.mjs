@@ -1,5 +1,9 @@
-// Lane G — migrations/0011_reports_escalation.sql is right about the two
-// mismatches it names, and there are three more in the same code path.
+// Lane G — the safety tables against what the safety code actually writes.
+//
+// RECONCILED 7 Sep 2026. Migration 0012 closed the three mismatches this suite
+// found in the moderation flow. It did not close the same disease in the
+// parental-consent flow, and nothing stops a caller writing a value no column
+// allows — both below, both red.
 //
 // 0011 was written after this was reproduced against the Data API:
 //
@@ -80,49 +84,49 @@ async function driveModerationFlow() {
   return rows;
 }
 
-test("DEFECT, OPEN: dcsgames_reports has no 'action' column, and moderating writes one", async () => {
+test("CLOSED (was DEFECT, OPEN): every column a moderated report writes exists", async () => {
+  // WAS: safety.moderate() writes `action` onto dcsgames_reports and there was
+  // no such column after 0011, so the upsert failed with the same PGRST204 that
+  // 0011 was written to end — one write later in the same flow. The reports
+  // collection degraded again and the moderation decision lived only in the
+  // container filesystem that 0011's own header says is lost at the next
+  // deploy. 0012 adds it.
   const { reports } = await driveModerationFlow();
   const cols = columnsOf("dcsgames_reports");
-  const written = Object.keys(reports[0]);
-  const missing = written.filter((k) => !cols.has(k));
-  assert.deepEqual(
-    missing, [],
-    `safety.moderate() (src/core/safety.mjs:319) writes ${JSON.stringify(missing)} and the table has no ` +
-    `such column after 0011, so the upsert fails with the same PGRST204 that 0011 was written to end — ` +
-    "one write later in the same flow. The reports collection then degrades again, and the moderation " +
-    "decision lives only in the container filesystem the migration's own header says is lost at the " +
-    `next deploy. Declared columns: ${JSON.stringify([...cols])}`
-  );
+  const missing = Object.keys(reports[0]).filter((k) => !cols.has(k));
+  assert.deepEqual(missing, [], `columns declared: ${JSON.stringify([...cols])}`);
+  assert.ok(cols.has("action"), "including the one 0012 added");
 });
 
-test("DEFECT, OPEN: dcsgames_moderation_actions has no 'audit' column, and every decision writes one", async () => {
+test("CLOSED (was DEFECT, OPEN): the moderation audit entry has a column to land in", async () => {
+  // WAS: safety.moderate() writes `audit` to dcsgames_moderation_actions, which
+  // 0004 declared without it and 0011 did not touch. The audit entry — the
+  // record of who decided what and when, which is the whole point of a
+  // moderation audit trail — could not reach the durable store.
   const { actions } = await driveModerationFlow();
   const cols = columnsOf("dcsgames_moderation_actions");
-  const written = Object.keys(actions[0]);
-  const missing = written.filter((k) => !cols.has(k));
-  assert.deepEqual(
-    missing, [],
-    `safety.moderate() writes ${JSON.stringify(missing)} to dcsgames_moderation_actions, which 0004 ` +
-    "declares without it and 0011 does not touch. The audit entry — the record of who decided what, " +
-    "which is the whole point of the moderation audit trail — cannot reach the durable store."
-  );
+  const missing = Object.keys(actions[0]).filter((k) => !cols.has(k));
+  assert.deepEqual(missing, [], `columns declared: ${JSON.stringify([...cols])}`);
+  assert.ok(cols.has("audit"));
 });
 
-test("DEFECT, OPEN: two of the four moderation actions violate the moderation_actions check", async () => {
+test("CLOSED (was DEFECT, OPEN): every moderation action the API publishes can be stored", async () => {
+  // WAS: MOD_ACTIONS is [warn, ban, shadow_limit, dismiss] and /health publishes
+  // it as `safety.accepts.moderation_action`, so a moderator could take any of
+  // them — while the column allowed none/warn/hide/unpublish/suspend/ban/
+  // age_restrict/escalate_to_authority. Two of the four failed with 23514: the
+  // identical class of mismatch 0011 fixed for dcsgames_reports.status, in the
+  // table the same function writes on the same request.
   const allowed = checkValues("dcsgames_moderation_actions", "action");
   assert.ok(allowed, "the constraint is declared");
-  const rejected = MOD_ACTIONS.filter((a) => !allowed.includes(a));
-  assert.deepEqual(
-    rejected, [],
-    `MOD_ACTIONS (src/cw1/trust-safety.mjs:8) is ${JSON.stringify(MOD_ACTIONS)}, and /health publishes it ` +
-    "to clients as `safety.accepts.moderation_action`, so a moderator can take these actions and the " +
-    `route accepts them. The column allows ${JSON.stringify(allowed)}, so ${JSON.stringify(rejected)} ` +
-    "fail with 23514 — the identical class of mismatch 0011 fixed for dcsgames_reports.status, in the " +
-    "table the same function writes on the same request."
-  );
+  assert.deepEqual(MOD_ACTIONS.filter((a) => !allowed.includes(a)), [], `column allows ${JSON.stringify(allowed)}`);
+  // Additive, as 0012 claims: nothing the column used to allow was dropped.
+  for (const old of ["none", "warn", "hide", "unpublish", "suspend", "ban", "age_restrict", "escalate_to_authority"]) {
+    assert.ok(allowed.includes(old), `the widened check still allows '${old}'`);
+  }
 });
 
-test("DISPROVED: 0011 does fix the two mismatches it names", async () => {
+test("VERIFIED: 0011 fixes the two mismatches it names", async () => {
   const { reports } = await driveModerationFlow();
   const cols = columnsOf("dcsgames_reports");
   assert.ok(cols.has("escalated"), "the escalated column is added");
@@ -142,17 +146,16 @@ test("DISPROVED: 0011 does fix the two mismatches it names", async () => {
   }
 });
 
-test("DISPROVED: the appeal states are not reachable in this table", async () => {
-  // REPORT_STATES carries appealed / appeal_upheld / appeal_denied, none of which
-  // the widened check allows — but nothing writes them to dcsgames_reports.
-  // safety.moderate() is the only writer and applyModeration only ever produces
-  // 'under_review', 'actioned' or 'dismissed'; the appeal machinery belongs to
-  // the legacy /ts console, whose store /health already documents as no longer
-  // written to. So this is a latent mismatch, not a live one.
+test("CLOSED (was a latent mismatch): every state the state machine can reach is storable", async () => {
+  // WAS: REPORT_STATES carries appealed / appeal_upheld / appeal_denied and the
+  // check allowed none of them. It was latent rather than live — safety.moderate()
+  // is the only writer and applyModeration only produces under_review, actioned
+  // or dismissed; the appeal machinery belongs to the legacy /ts console. It was
+  // recorded so that whoever wired appeals to the live store would widen the
+  // check first. 0012 widened it instead, which is better: the trap is gone
+  // rather than documented.
   const statuses = checkValues("dcsgames_reports", "status");
-  const unreachableButUndeclared = REPORT_STATES.filter((s) => !statuses.includes(s));
-  assert.deepEqual(unreachableButUndeclared, ["appealed", "appeal_upheld", "appeal_denied"]);
-  // Recorded so that whoever wires appeals to the live store widens the check first.
+  assert.deepEqual(REPORT_STATES.filter((s) => !statuses.includes(s)), [], `column allows ${JSON.stringify(statuses)}`);
 });
 
 test("DISPROVED: the media consent vocabulary matches its column", async () => {
@@ -160,4 +163,94 @@ test("DISPROVED: the media consent vocabulary matches its column", async () => {
   assert.deepEqual([...MEDIA_KINDS].sort(), [...kinds].sort(), "every MEDIA_KIND is storable");
   const sources = checkValues("dcsgames_media_consent", "source");
   if (sources) assert.deepEqual([...CONSENT_SOURCES].sort(), [...sources].sort(), "every CONSENT_SOURCE is storable");
+});
+
+// ===========================================================================
+// The same disease, in the flow 0012 did not visit.
+// ===========================================================================
+
+/** Drive the parental-consent flow with the real service; return the row written. */
+async function driveParentalConsentFlow() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dcs-g-consent-"));
+  const safety = createSafetyService({ DCS_DATA_DIR: dir });
+  // A consent can only be requested by the minor it concerns, so the minor asks.
+  await safety.recordAge("minor-1", { dateOfBirth: "2014-01-01", method: "synthetic_test" });
+  const requested = await safety.requestParentalConsent("minor-1", {
+    guardianEmail: "guardian@example.com", scope: ["play"], requestedBy: "minor-1",
+  });
+  const decided = await safety.decideParentalConsent(requested.id, "granted", "moderator-1");
+  fs.rmSync(dir, { recursive: true, force: true });
+  return { requested, decided };
+}
+
+test("DEFECT, OPEN: dcsgames_parental_consent has no requested_by or decided_by column", async () => {
+  // 0012 fixed the moderation flow, which is where the review had looked. The
+  // parental-consent flow has exactly the same disease and neither 0011 nor
+  // 0012 visits it:
+  //
+  //   requestParentalConsent() writes `requested_by`  — no such column
+  //   decideParentalConsent()  writes `decided_by`    — no such column
+  //
+  // Both fail with PGRST204, so no parental consent record has ever reached the
+  // durable store either, and the collection degrades the same way the reports
+  // collection did. These are the records that say a guardian was asked and
+  // what they answered — for a minor. They are also the two fields that make
+  // the row attributable at all, which is why they were added to the code:
+  // safety.mjs is explicit that "a row nobody is accountable for cannot be
+  // audited after the fact".
+  const { requested, decided } = await driveParentalConsentFlow();
+  const cols = columnsOf("dcsgames_parental_consent");
+  const missing = [...new Set([...Object.keys(requested), ...Object.keys(decided)])].filter((k) => !cols.has(k));
+  assert.deepEqual(
+    missing, [],
+    `the parental consent flow writes ${JSON.stringify(missing)} and the table declares none of them. ` +
+    `Declared columns: ${JSON.stringify([...cols])}. This is the third table in the same family and the ` +
+    "same PGRST204; 0012's own header describes the pattern without checking whether it recurs."
+  );
+});
+
+test("DEFECT, OPEN: a caller can write a value into a checked column that no check allows", async () => {
+  // 0011 and 0012 aligned the columns with what the CODE writes. Nothing aligns
+  // them with what a CALLER can make the code write.
+  //
+  // Two fields reach a check-constrained column straight from a request body
+  // without being validated against its vocabulary:
+  //
+  //   POST /safety/age     {"method": ...}        -> dcsgames_age_assurance.method
+  //   POST /safety/report  {"subject_type": ...}  -> dcsgames_reports.subject_type
+  //
+  // Neither enum is published in /health's `safety.accepts` either, so a client
+  // cannot discover the permitted set. And the consequence is not confined to
+  // the bad row: a collection write upserts the whole shadow in one request per
+  // key-shape (src/core/collection.mjs), so ONE poisoned row fails the batch
+  // and every other principal's row in it goes unpersisted — the collection
+  // degrades, /health raises the critical SAFETY_PERSISTENCE_DEGRADED alert,
+  // and age assurance is the gate the entire minor-safety story rests on.
+  //
+  // The service is the right place for the check, because every route that ever
+  // reaches these writers then inherits it — which is the argument the cw5
+  // actor-binding makes for living in the engine rather than the route.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dcs-g-enum-"));
+  const safety = createSafetyService({ DCS_DATA_DIR: dir });
+
+  const ageMethods = checkValues("dcsgames_age_assurance", "method");
+  let ageRefused = false;
+  try { await safety.recordAge("p-enum", { dateOfBirth: "1990-01-01", method: "a-value-no-column-allows" }); }
+  catch { ageRefused = true; }
+
+  const subjectTypes = checkValues("dcsgames_reports", "subject_type");
+  let reportRefused = false;
+  try { await safety.report("reporter-enum", { subjectType: "banana", subjectId: "x", reason: "spam" }); }
+  catch { reportRefused = true; }
+
+  fs.rmSync(dir, { recursive: true, force: true });
+
+  assert.deepEqual(
+    { ageRefused, reportRefused }, { ageRefused: true, reportRefused: true },
+    "an unrecognised value must be refused at the service, before it can poison a durable write. " +
+    `age_assurance.method allows ${JSON.stringify(ageMethods)}; ` +
+    `reports.subject_type allows ${JSON.stringify(subjectTypes)}. ` +
+    "safety.mjs validates reason against REPORT_REASONS and media_kind against MEDIA_KINDS in exactly " +
+    "this way — these two were missed."
+  );
 });

@@ -6,7 +6,9 @@
 // the other directions, and looks at the rest of the preflight.
 //
 // Most of the attacks FAILED — originAllowed() is careful — and those are
-// recorded as `DISPROVED:` so nobody re-derives them. Two things did not hold.
+// recorded as `DISPROVED:` so nobody re-derives them. Two things did not hold,
+// and both are now fixed; they are kept as `CLOSED (was DEFECT, OPEN):` with
+// the account of what was wrong.
 //
 // Run: node --import tsx --test test/lead-review-cors.test.mjs
 import test, { before, after } from "node:test";
@@ -73,28 +75,34 @@ before(async () => {
 });
 after(() => { try { bare.p.kill("SIGKILL"); fs.rmSync(bare.dir, { recursive: true, force: true }); } catch { /* gone */ } });
 
-test("DEFECT, OPEN: an allowlist entry without a scheme matches http as well as https", async () => {
-  // server.mts:222 — `if (e.scheme && o.scheme && e.scheme !== o.scheme) continue;`
-  // The comparison is skipped entirely when EITHER side has no scheme, so a bare
-  // host entry silently allows the plaintext origin of the same name. The
+test("CLOSED (was DEFECT, OPEN): a schemeless allowlist entry means https, not any scheme", async () => {
+  // WAS: `if (e.scheme && o.scheme && e.scheme !== o.scheme) continue;` — the
+  // comparison was skipped entirely when EITHER side had no scheme, so a bare
+  // host entry silently allowed the plaintext origin of the same name. The
   // absence of a scheme in the configuration is not permission to ignore the
-  // scheme in the request; an unspecified scheme should mean https, or the entry
-  // should be refused at boot as unparseable.
+  // scheme in the request.
+  //
+  // NOW: an unspecified scheme means https.
   const https_ = await fetch(bare.base + "/health", { headers: { Origin: "https://games.dcsai.ai" } });
   assert.equal(acao(https_), "https://games.dcsai.ai", "the intended origin is allowed");
 
   const http_ = await fetch(bare.base + "/health", { headers: { Origin: "http://games.dcsai.ai" } });
   assert.equal(
     acao(http_), null,
-    "a plaintext origin was allowed by an entry that names no scheme. A page served over http on that " +
-    "host — which is what a network attacker on the path can serve — may now read this API's responses."
+    "a plaintext origin must not be allowed by an entry that names no scheme: a page served over http " +
+    "on that host is what a network attacker on the path can serve"
   );
 
   const httpPreview = await fetch(bare.base + "/health", { headers: { Origin: "http://abc123.dcs-games.pages.dev" } });
   assert.equal(acao(httpPreview), null, "and the same for the wildcard entry");
+
+  const httpsPreview = await fetch(bare.base + "/health", { headers: { Origin: "https://abc123.dcs-games.pages.dev" } });
+  assert.equal(acao(httpsPreview), "https://abc123.dcs-games.pages.dev", "while the https preview still works");
 });
 
-test("DEFECT, OPEN: the preflight wildcard does not authorise the Authorization header", async () => {
+test("CLOSED (was DEFECT, OPEN): the preflight names Authorization explicitly", async () => {
+  // WAS: `Access-Control-Allow-Headers: *`.
+  //
   // Every authenticated call this API defines carries `Authorization: Bearer`,
   // which is a CORS-unsafe request header, so the browser preflights it. Per the
   // Fetch standard, `Access-Control-Allow-Headers: *` matches any header name
@@ -102,11 +110,20 @@ test("DEFECT, OPEN: the preflight wildcard does not authorise the Authorization 
   // Allow-Headers: "The Authorization header can't be wildcarded and always needs
   // to be listed explicitly.")
   //
-  // So with the allowlist now enforced, an allowlisted browser origin gets its
-  // ACAO echoed and its authenticated requests blocked anyway, at the preflight,
-  // before the response the gate just permitted is ever fetched. Nothing in
-  // test/cors.test.mjs looks at this header, and no test on the estate sends an
-  // Access-Control-Request-Headers at all.
+  // So with the allowlist enforced, an allowlisted browser origin got its ACAO
+  // echoed and its authenticated requests blocked anyway, at the preflight,
+  // before the response the gate had just permitted was ever fetched. Nothing in
+  // test/cors.test.mjs looks at this header, and no other test on the estate
+  // sends an Access-Control-Request-Headers at all.
+  //
+  // NOW: the header names Authorization alongside the wildcard.
+  //
+  // One thing to know about the shape chosen: for a request whose credentials
+  // mode IS "include", the wildcard is matched literally rather than as a
+  // wildcard, so such a request would be allowed exactly the header named here
+  // and nothing else. This API authenticates with a bearer token and never sets
+  // Access-Control-Allow-Credentials, so that case does not arise — but if
+  // cookies are ever adopted, this list has to become explicit.
   const pre = await fetch(strict.base + "/me/home", {
     method: "OPTIONS",
     headers: {
@@ -119,9 +136,20 @@ test("DEFECT, OPEN: the preflight wildcard does not authorise the Authorization 
   assert.match(
     String(acah(pre) || ""), /authorization/i,
     `the preflight answered Access-Control-Allow-Headers: ${JSON.stringify(acah(pre))}. The wildcard does ` +
-    "not cover Authorization, so a browser at https://games.dcsai.ai cannot make a single authenticated " +
-    "request to this API. Echo the requested headers, or list them."
+    "not cover Authorization, so a browser at https://games.dcsai.ai could not make a single " +
+    "authenticated request to this API."
   );
+  // The wildcard is still there, so a client sending its own header — a
+  // correlation id, a content type — is not broken by the fix.
+  assert.match(String(acah(pre)), /\*/, "and everything else is still permitted");
+
+  // The gate still applies to the preflight: a disallowed origin gets no ACAO,
+  // whatever headers it asks for.
+  const bad = await fetch(strict.base + "/me/home", {
+    method: "OPTIONS",
+    headers: { Origin: "https://evil.example", "Access-Control-Request-Method": "GET", "Access-Control-Request-Headers": "authorization" },
+  });
+  assert.equal(acao(bad), null, "a permissive preflight would wave through what the response then refuses");
 });
 
 // ------------------------------------------------------ attacks that failed
