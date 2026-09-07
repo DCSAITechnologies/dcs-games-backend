@@ -807,3 +807,44 @@ nine that remain are decisions, recorded separately in
 `reports/DECISION_GAPS.md` so that "unreached" is never read as "forgotten" —
 most sharply the payout KYC flow, which would ask real people for identity
 documents in service of a payment that cannot happen.
+
+---
+
+## 25. The machine ran out of memory, and why that was a defect
+
+Late in the session the host started killing background tasks for lack of
+memory. The cause was the estate's own test harness: **196 Chrome processes
+holding 8.2 GB**, some orphaned for five hours, plus a test server orphaned for
+six hours on **port 8429** — inside the range two suites pick from.
+
+That second one is not housekeeping. A suite booting on an occupied port finds
+`/health` already answering, from a server with a different secret and a
+different data directory, and proceeds against it. The result looks exactly like
+a real one. It is a plausible contributor to several confusing hangs chased
+earlier in the day.
+
+Two causes:
+
+1. **A cleanup call that did not exist.** `scripts/preview-integration-proof.mjs`
+   called `browser.kill()`; the harness exposes `close()`. The method was
+   missing, the throw was swallowed by the call site's own `catch {}`, and every
+   run leaked a Chrome — a cleanup that silently did nothing, inside a script
+   written to prove things. `kill` is now an alias, because a caller reaching
+   for the wrong name should not be answered with silence.
+2. **`spawn()` children outlive their parent.** A suite that times out or is
+   killed leaves Chrome behind with nothing to reap it. `launchChrome` now
+   buries its child on exit, SIGINT and SIGTERM, and reaps stale ones from
+   earlier runs before starting — matched on the `dcs-chrome-` profile directory
+   the harness itself creates, which no real browser carries, and only when
+   older than two minutes so a parallel run is untouched.
+
+Four tests hold it, including the static one: **no committed caller may reach
+for a method the harness does not expose**, because the runtime half of that
+failure is silent by construction and cannot catch itself.
+
+Verified afterwards: every suite finishes with **zero** harness Chrome processes
+and zero test servers remaining.
+
+The general lesson is the session's recurring one in another costume — a
+cleanup nobody checked, an inventory nobody compared, a CI pin nobody resolved,
+a gate keyed on a list of words. Each looked like it was doing its job.
