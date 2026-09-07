@@ -1,3 +1,51 @@
+> # ⚠ SUPERSEDED — 19 June 2026. DO NOT FOLLOW THE COMMANDS IN THIS FILE.
+>
+> Kept as the historical record of how this service was first stood up. Read for
+> context; do not execute. Reconciled 7 September 2026.
+>
+> **Three instructions in here are actively dangerous now:**
+>
+> 1. **§3 tells you to run `railway up` linked to the games project and then
+>    verify against `https://api.games.dcsai.ai/health`. That is a PRODUCTION
+>    deploy**, written before a staging environment existed. There is now a
+>    `Staging` environment; deploy with `scripts/deploy-staging.sh`, which links
+>    explicitly to the project and environment rather than trusting whatever link
+>    is already in place, and refuses to record a deployment unless the live
+>    service reports the id it just created. Production requires an explicit
+>    authorisation and its own plan:
+>    `DCS_GAMES_PRODUCTION_CUTOVER_PLAN.md`.
+>
+> 2. **§4 gives a migration order — `dcsgames_001_core.sql`,
+>    `dcsgames_002_persistence.sql`, "then seed" — and tells you to run it in the
+>    games project SQL editor. Those files do not exist**, the games project it
+>    means is a **shared** Supabase project carrying other live products, and
+>    "then seed" is the shape of the quarantined forensic seed. The real chain is
+>    `migrations/0001`…`0011`, applied with `node scripts/migrate.mjs up` after
+>    `node scripts/cutover-check.mjs` has cleared the target — and that preflight
+>    refuses both shared projects by name, before any network request, with no
+>    override. **`migrations/0002_seed.sql` must never run**; it is not present in
+>    this repository and `loadMigrations()` refuses any migration that inserts an
+>    `atlas_verified` creator, by content rather than by filename.
+>
+> 3. **§2 lists `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` as variables to
+>    set.** No payment provider is integrated — `psp_integrated` is false, and
+>    `subscribe()` and `acquire()` refuse regardless of any flag. Neither variable
+>    is read anywhere in `server.mts` or `src/`. Do not set them. `PAYMENTS_LIVE`
+>    stays `0`.
+>
+> **What is also simply out of date:** persistence is no longer in-memory
+> (`createWorldRepository()` mirrors a Supabase store onto a file store and the
+> deployed staging service reports `persistence: "supabase+file"`); the directory
+> is `gb`, not `dcs-games-backend-merged`; auth is real Supabase JWT verification;
+> and the netcode figures (`M-P0 27/27, M-P1 29/29`) are superseded by **186
+> checks across twelve suites, 0 failures** at netcode `49f103531b67`.
+>
+> **Current documents:** `DCS_GAMES_RAILWAY_STAGING_SETUP.md` (service),
+> `DCS_GAMES_SUPABASE_CUTOVER_RUNBOOK.md` (database),
+> `DCS_GAMES_PRODUCTION_CUTOVER_PLAN.md` and
+> `DCS_GAMES_PRODUCTION_ROLLBACK_CHECKLIST.md` (production),
+> `reports/STAGING_PROOFS.md` and `reports/DEPLOYMENTS.md` (evidence).
+
 # DCS Games — Backend Deploy Runbook (P0)
 **From "8 repos green locally" → P0 live. 19 Jun 2026.**
 
