@@ -320,8 +320,39 @@ export class PersistenceEngine {
     try {
       const snap: any = await this.load(delta.world_id);
       for (const o of (snap?.snapshot?.objects || snap?.objects || [])) owned.set(String(o.object_id), o.owner_id ?? null);
-    } catch { /* no base world yet: nothing is owned, so nothing can be taken */ }
+    } catch (e: any) {
+      // ONLY "there is no such world yet" means nothing is owned. Every other
+      // failure means ownership could not be DETERMINED, and an empty map then
+      // silently permits every op — the ownership check disappears rather than
+      // refusing.
+      //
+      // That was reachable in two requests: store one malformed op (a var_set
+      // with no key was accepted on the way in), and load() throws on replay
+      // from then on, permanently, for that world. The second request could
+      // then act on anybody's objects.
+      const message = String(e?.message || e);
+      if (!/base world .* not found/i.test(message)) {
+        throw new Error(
+          `save: refusing because the world's current ownership could not be read (${message}). ` +
+          `Acting without it would mean applying ops with the ownership check silently disabled.`
+        );
+      }
+      /* no base world yet: nothing is owned, so nothing can be taken */
+    }
     this.assertActorBound(delta, opts.actorId ?? null, owned);
+
+    // Validate every op BEFORE it is stored. An op that throws on replay bricks
+    // load() for that world forever, and the store is append-only, so there is
+    // no way to take it back out. applyOp against a throwaway state is the same
+    // check replay will perform, which is the point: nothing can be accepted
+    // that replay will later refuse.
+    for (const op of delta.ops || []) {
+      try {
+        applyOp(emptyState(), op as Op);
+      } catch (e: any) {
+        throw new Error(`save: op '${(op as any).op}' is not valid and would make this world unreadable: ${String(e?.message || e)}`);
+      }
+    }
 
     if (await this.store.hasSeq(delta.world_id, delta.seq)) {
       return { ok: true, seq: delta.seq, duplicate: true };
