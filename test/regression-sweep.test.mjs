@@ -837,9 +837,13 @@ test("128 simultaneous first sign-ins create one profile", async () => {
 //    that.
 // =============================================================================
 
-test("DEFECT, OPEN: a party's size limit is bypassed by joining concurrently", async () => {
-  // DEFECT, OPEN (found by this file). src/core/social.mjs:486-509 is
-  // check-then-write:
+test("CLOSED (was DEFECT, OPEN): a party's size limit is bypassed by joining concurrently", async () => {
+  // CLOSED. Verified at source 7 Sep 2026: src/core/social.mjs:623-660 now
+  // takes the capacity decision inside partyMembers.ensure(), with the size
+  // read and the insert in one locked step, exactly as the diagnosis below
+  // asked for. This test is the regression guard; it was red when written.
+  //
+  // WHAT IT WAS. src/core/social.mjs was check-then-write:
   //     const p = await svc.getParty(partyId);        // unlocked read
   //     ...
   //     if (p.size >= p.max_size) throw ...           // decided on that read
@@ -869,9 +873,13 @@ test("DEFECT, OPEN: a party's size limit is bypassed by joining concurrently", a
   );
 });
 
-test("DEFECT, OPEN: an org's seat limit is bypassed by adding members concurrently", async () => {
-  // DEFECT, OPEN (found by this file). The same shape, one capability along:
-  // src/core/social.mjs:668-686
+test("CLOSED (was DEFECT, OPEN): an org's seat limit is bypassed by adding members concurrently", async () => {
+  // CLOSED. Verified at source 7 Sep 2026: src/core/social.mjs:984-990 now
+  // holds a lock on the org AND uses orgMembers.ensure(), because the count
+  // lives in a different collection from the seat figure and one alone is not
+  // enough. This test is the regression guard; it was red when written.
+  //
+  // WHAT IT WAS. The same shape as the party, one capability along:
   //     const o = await svc.getOrg(orgId, meId);      // unlocked read
   //     if (o.seats_remaining <= 0) throw ...         // decided on that read
   //     await orgMembers.insert({...});
@@ -896,9 +904,13 @@ test("DEFECT, OPEN: an org's seat limit is bypassed by adding members concurrent
   );
 });
 
-test("DEFECT, OPEN: concurrent friend requests create many rows for one relationship", async () => {
-  // DEFECT, OPEN (found by this file). src/core/social.mjs:398-415 is
-  // one()-then-insert():
+test("CLOSED (was DEFECT, OPEN): concurrent friend requests create many rows for one relationship", async () => {
+  // CLOSED. Verified at source 7 Sep 2026: src/core/social.mjs:472-504 now
+  // uses friends.ensure() on a SYMMETRIC pair predicate, so a crossing request
+  // finds the row the other side wrote instead of adding a second one. This
+  // test is the regression guard; it was red when written.
+  //
+  // WHAT IT WAS. src/core/social.mjs was one()-then-insert():
   //     const existing = await friends.one(...);      // unlocked read
   //     if (existing) { ... }
   //     return await friends.insert({ user_id: meId, friend_id: otherId, ... });

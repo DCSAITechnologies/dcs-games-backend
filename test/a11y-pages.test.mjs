@@ -30,6 +30,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { serveStatic, launchChrome, Page, findChrome } from "./helpers/browser.mjs";
 import { resolveSite } from "./helpers/site.mjs";
+import { CONTRAST_HELPERS } from "./helpers/a11y-probe.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SITE = resolveSite(HERE);   // throws loudly if the frontend is absent
@@ -133,31 +134,18 @@ after(async () => {
 
 // ------------------------------------------------------------ in-page helpers
 
-// Colour arithmetic straight out of WCAG 2.1, run against the values the
-// browser says it is painting rather than against the values the stylesheet
-// asks for — a token can be overridden, mistyped or shadowed, and only
-// getComputedStyle knows what actually landed.
-const HELPERS = `
-  function _srgb(c){ c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); }
-  function _lum(c){ return 0.2126*_srgb(c[0]) + 0.7152*_srgb(c[1]) + 0.0722*_srgb(c[2]); }
-  function _parse(s){
-    const m = /rgba?\\(([^)]+)\\)/.exec(s || "");
-    if (!m) return [0, 0, 0, 0];
-    const p = m[1].split(/[\\s,\\/]+/).filter(Boolean).map(Number);
-    return [p[0], p[1], p[2], p.length > 3 ? p[3] : 1];
-  }
-  function _over(fg, bg){ const a = fg[3]; return [a*fg[0]+(1-a)*bg[0], a*fg[1]+(1-a)*bg[1], a*fg[2]+(1-a)*bg[2], 1]; }
-  // A document page has nothing rendering behind it, so the chain runs all the
-  // way to the root and finishes on the browser's own white canvas — which is
-  // what a reader would actually see if every layer were transparent.
-  function _bgOf(el){
-    const chain = [];
-    for (let n = el; n && n.nodeType === 1; n = n.parentElement) chain.push(_parse(getComputedStyle(n).backgroundColor));
-    let bg = [255, 255, 255, 1];
-    for (let i = chain.length - 1; i >= 0; i--) if (chain[i][3] > 0) bg = _over(chain[i], bg);
-    return bg;
-  }
-  function _ratio(a, b){ const l1 = _lum(a), l2 = _lum(b); return Math.round(((Math.max(l1,l2)+0.05)/(Math.min(l1,l2)+0.05))*100)/100; }
+// The WCAG colour arithmetic itself lives in test/helpers/a11y-probe.mjs and is
+// prepended here, because test/browser-compat.test.mjs measures the same thing
+// across the other 188 documents and two copies of it is two places for it to
+// drift. Two suites disagreeing about what 4.5:1 means would be worse than one
+// of them not measuring it.
+//
+// What stays here is what only this file needs: the control-edge rule, the
+// per-element text scan and the descriptions its assertions print. All of it
+// still runs against the values the browser says it is PAINTING rather than
+// what the stylesheet asks for — a token can be overridden, mistyped or
+// shadowed, and only getComputedStyle knows what actually landed.
+const HELPERS = CONTRAST_HELPERS + `
   function _visible(el){
     if (!el) return false;
     const cs = getComputedStyle(el);
