@@ -59,7 +59,21 @@ cat > "$STAGE_DIR/build-info.json" <<JSON
 }
 JSON
 
-echo "==> deploying $COMMIT ($BRANCH) to $SERVICE"
+# Railway keys project links by directory, so the fresh export has none. Link it
+# explicitly to the SAME project/environment this checkout is linked to, read
+# from the CLI rather than hardcoded — a hardcoded project id is how a "staging"
+# script eventually deploys somewhere else.
+PROJECT_ID="$(railway status --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{process.stdout.write(JSON.parse(s).id||"")})')"
+ENVIRONMENT="${RAILWAY_ENV_NAME:-Staging}"
+if [ -z "$PROJECT_ID" ]; then echo "REFUSING: could not read the linked project id." >&2; exit 3; fi
+if [ "$ENVIRONMENT" != "Staging" ]; then
+  echo "REFUSING: this script deploys STAGING only, got '$ENVIRONMENT'." >&2
+  exit 3
+fi
+
+echo "==> deploying $COMMIT ($BRANCH) to $SERVICE ($ENVIRONMENT)"
+( cd "$STAGE_DIR" && railway link --project "$PROJECT_ID" --environment "$ENVIRONMENT" --service "$SERVICE" >/dev/null 2>&1 ) \
+  || { echo "REFUSING: could not link the export to project $PROJECT_ID." >&2; exit 3; }
 OUT="$(cd "$STAGE_DIR" && railway up --detach --service "$SERVICE" 2>&1)" || { echo "$OUT" >&2; exit 1; }
 echo "$OUT" | tail -2
 DEPLOY_ID="$(printf '%s' "$OUT" | sed -n 's/.*[?&]id=\([0-9a-f-]\{36\}\).*/\1/p' | head -1)"
