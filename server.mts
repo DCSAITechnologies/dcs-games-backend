@@ -436,6 +436,14 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, {
       ok: true, service: "dcs-games-backend", payments_live: PAYMENTS_LIVE,
       build: BUILD_INFO,
+      // Which PROCESS is answering. A leaked server from an earlier run,
+      // still listening on a port inside a suite's range, answers /health
+      // perfectly well — with a different secret and a different data
+      // directory — and the suite that finds it passes or fails against the
+      // wrong server entirely. Two orphaned processes were found doing exactly
+      // that. A suite can now set DCS_INSTANCE_ID and refuse anything else.
+      instance_id: process.env.DCS_INSTANCE_ID || null,
+      pid: process.pid,
       cors: { mode: CORS_MODE, allowed: ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS : null },
       auth: auth.mode,
       auth_header_fallback_removed: true,      // A1: x-user-id impersonation path deleted 6 Sep 2026
