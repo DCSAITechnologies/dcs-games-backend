@@ -234,3 +234,106 @@ test("the gate FAILS when it cannot reach the service at all", async () => {
   assert.equal(code, 1, out);
   assert.match(out, /^RESULT: FAIL/m, out);
 });
+
+// ============================================ the money-dark monitor itself
+//
+// scripts/monitor-dark.mjs is the thing that would tell somebody money had
+// stopped being dark on a RUNNING server — the question verify-release.mjs
+// cannot answer, because a migration, a manual edit or an import can put a
+// priced row in a table long after a green release gate.
+//
+// Nothing tested it. A monitor that always exits 0 is indistinguishable from a
+// healthy system, and it is worse than no monitor because it converts an
+// outage into a green light — which is the monitor's own stated reason for
+// treating "could not tell" as an alarm. So both obligations, same as the
+// deploy gate above: it must pass a correct server, and it must ALARM when a
+// property it claims to watch is actually violated.
+//
+// The faults are injected by the same reverse proxy, so every byte except the
+// one corrupted field is the real server's answer.
+
+const MONITOR = path.join(GB, "scripts", "monitor-dark.mjs");
+
+/** Run scripts/monitor-dark.mjs against a base URL. Returns { code, out, json }. */
+function runMonitor(base, { json = true } = {}) {
+  return new Promise((resolve) => {
+    const args = [MONITOR, "--base", base, ...(json ? ["--json"] : [])];
+    const p = spawn(process.execPath, args, { cwd: GB, env: { ...process.env } });
+    let out = "";
+    p.stdout.on("data", (d) => { out += d; });
+    p.stderr.on("data", (d) => { out += d; });
+    p.on("close", (code) => {
+      let parsed = null;
+      if (json) { try { parsed = JSON.parse(out); } catch { /* reported as null */ } }
+      resolve({ code, out, json: parsed });
+    });
+  });
+}
+
+/** One injected defect must make the monitor alarm, and name the right check. */
+async function assertMonitorAlarms(fault, expectedCheck) {
+  const p = await faultProxy(fault);
+  try {
+    const { code, json, out } = await runMonitor(p.base);
+    assert.equal(code, 1,
+      `the monitor exited ${code} with "${fault}" injected — it is not watching that property\n${out}`);
+    assert.ok(json, `the monitor produced no JSON to read:\n${out}`);
+    assert.equal(json.dark, false, "a monitor that alarms must not also report dark:true");
+    assert.equal(json.unreachable, false, "this is a reachable server answering wrongly, not an outage");
+    const failed = json.findings.filter((f) => !f.ok).map((f) => f.check);
+    assert.ok(failed.includes(expectedCheck),
+      `"${fault}" was caught, but not by "${expectedCheck}" — it failed: ${JSON.stringify(failed)}`);
+  } finally { await p.close(); }
+}
+
+test("MONITOR: money-dark reports DARK against a correct running server", async () => {
+  const { code, json, out } = await runMonitor(BASE);
+  assert.equal(code, 0, `a correct server was reported as not dark:\n${out}`);
+  assert.equal(json.dark, true, out);
+  assert.equal(json.unreachable, false, out);
+  assert.deepEqual(json.findings.filter((f) => !f.ok), [], out);
+  // If the monitor ever shrinks to one check it would still be green here.
+  assert.ok(json.findings.length >= 5,
+    `the monitor ran only ${json.findings.length} checks; it must cover health, both assert-dark surfaces, plans and the retired route`);
+});
+
+test("MONITOR: it alarms when /health reports payments_live", async () => {
+  await assertMonitorAlarms("payments_live", "the server is reachable and reports its payment state");
+});
+
+test("MONITOR: it alarms when the marketplace stops being dark in the running process", async () => {
+  await assertMonitorAlarms("market_not_dark", "the marketplace is dark in this running process");
+});
+
+test("MONITOR: it alarms when the subscription surface stops being dark", async () => {
+  await assertMonitorAlarms("subs_not_dark", "the subscription surface is dark in this running process");
+});
+
+test("MONITOR: it alarms when a plan becomes purchasable or carries a price", async () => {
+  await assertMonitorAlarms("purchasable", "nothing can be bought");
+});
+
+test("MONITOR: it alarms when the retired revenue route starts answering with figures", async () => {
+  await assertMonitorAlarms("revenue_back", "the retired revenue route has not come back");
+});
+
+test("MONITOR: an unreachable server is an alarm with its own exit code, never an all-clear", async () => {
+  // The distinction the monitor's own header insists on: 1 means NOT DARK and
+  // 2 means COULD NOT TELL. Both are alarms; conflating either with 0 turns an
+  // outage into a green light, and conflating them with each other sends
+  // whoever is paged looking for a transaction that never happened.
+  const dead = await new Promise((resolve) => {
+    const s = http.createServer(() => {});
+    s.listen(0, "127.0.0.1", () => { const port = s.address().port; s.close(() => resolve(port)); });
+  });
+  const { code, json, out } = await runMonitor(`http://127.0.0.1:${dead}`);
+  assert.equal(code, 2, `an unreachable server must exit 2, got ${code}:\n${out}`);
+  assert.equal(json.dark, false, "an unreachable server must never be reported as dark");
+  assert.equal(json.unreachable, true, out);
+
+  // And it must SAY so in the words a human reads, not only in the exit code.
+  const human = await runMonitor(`http://127.0.0.1:${dead}`, { json: false });
+  assert.equal(human.code, 2);
+  assert.match(human.out, /RESULT: UNKNOWN/, human.out);
+  assert.match(human.out, /alarm, not an all-clear/i, human.out);
+});
