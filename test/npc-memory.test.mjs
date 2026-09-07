@@ -191,3 +191,91 @@ test("B5 GATE: a companion service writes where it is told, however it is asked"
     void i;
   }
 });
+
+// ------------------------------------------------ the chronicle keeps everything
+
+test("B7 GATE: concurrent events are all recorded, in order, with no gaps", async () => {
+  // Recording is read-all, append, write-all. Two events landing together — an
+  // expansion and a player event, or two players acting at once — both read the
+  // same array, both numbered themselves `rows.length + 1`, and the second
+  // write replaced the first. Eight concurrent records left ONE row behind.
+  //
+  // Seven things that happened to the world were silently forgotten, by the
+  // store whose entire purpose is that an NPC may only cite what is written
+  // down, and whose `seq` the flagship asserts is contiguous.
+  const mem = createWorldMemory({ DCS_DATA_DIR: fs.mkdtempSync(path.join(os.tmpdir(), "dcs-wm-race-")) });
+  const N = 12;
+  await Promise.all(Array.from({ length: N }, (_, i) =>
+    mem.record("w_race", { kind: "player_event", summary: `event ${i}`, worldVersion: 1 })));
+
+  const rows = await mem.chronology("w_race");
+  assert.equal(rows.length, N, "every event must survive");
+  assert.deepEqual(rows.map((r) => r.seq), Array.from({ length: N }, (_, i) => i + 1), "seq must be contiguous and ordered");
+  assert.equal(new Set(rows.map((r) => r.id)).size, N, "every event keeps its own id");
+  assert.deepEqual(
+    [...new Set(rows.map((r) => r.summary))].sort(),
+    Array.from({ length: N }, (_, i) => `event ${i}`).sort(),
+    "no event may be lost or duplicated",
+  );
+
+  // Two worlds written at once must not interfere with each other either.
+  const mem2 = createWorldMemory({ DCS_DATA_DIR: fs.mkdtempSync(path.join(os.tmpdir(), "dcs-wm-race2-")) });
+  await Promise.all([
+    ...Array.from({ length: 6 }, (_, i) => mem2.record("w_a", { kind: "player_event", summary: `a${i}` })),
+    ...Array.from({ length: 6 }, (_, i) => mem2.record("w_b", { kind: "player_event", summary: `b${i}` })),
+  ]);
+  assert.equal((await mem2.chronology("w_a")).length, 6);
+  assert.equal((await mem2.chronology("w_b")).length, 6);
+});
+
+test("B7 GATE: a fabrication attached to a real event is NOT supported by it", async () => {
+  // `supports()` decides whether a line may be spoken, and it was two substring
+  // tests that both let through the thing this module exists to prevent.
+  //
+  // `claim.includes(summary)` meant a claim CONTAINING a recorded event was
+  // supported, so any invention appended to a real one rode in on its evidence.
+  // `summary.includes(claim)` meant any fragment of a summary was supported, so
+  // the claim "a" was backed by the record.
+  const mem = createWorldMemory({ DCS_DATA_DIR: fs.mkdtempSync(path.join(os.tmpdir(), "dcs-wm-claim-")) });
+  await mem.record("w_claim", { kind: "expanded", summary: "a hospital district was added", worldVersion: 2 });
+
+  // Wording is still free: reordering, punctuation and filler words add no fact.
+  for (const ok of [
+    "a hospital district was added",
+    "the hospital district was added",
+    "hospital district added",
+  ]) assert.equal((await mem.supports("w_claim", ok)).supported, true, `should be supported: ${ok}`);
+
+  for (const [bad, why] of [
+    ["a hospital district was added, and then the king was murdered in it", "an invention riding on a real event"],
+    ["a dragon burned down the docks", "an unrelated invention"],
+    ["a", "a claim that asserts nothing"],
+    ["the", "a claim that asserts nothing"],
+  ]) {
+    const r = await mem.supports("w_claim", bad);
+    assert.equal(r.supported, false, `${why} must not be supported: ${bad}`);
+    assert.ok(r.reason, "a refusal must say why");
+  }
+
+  // And the NPC layer, which is the thing that actually speaks, refuses it too.
+  const npcMemory = createNpcMemory({ worldMemory: mem });
+  const line = await npcMemory.verifyLine("w_claim", "a hospital district was added, and then the king was murdered in it");
+  assert.equal(line.speakable, false);
+  assert.match(line.note, /must not be spoken/);
+});
+
+test("B7: a claim may not be assembled out of two separate events", async () => {
+  // Evidence is one event. A claim stitched from two records can imply a
+  // connection between them that neither one records.
+  const mem = createWorldMemory({ DCS_DATA_DIR: fs.mkdtempSync(path.join(os.tmpdir(), "dcs-wm-two-")) });
+  await mem.record("w_two", { kind: "expanded", summary: "a hospital district was added", worldVersion: 2 });
+  await mem.record("w_two", { kind: "player_event", summary: "a player drained the harbour", worldVersion: 3 });
+
+  assert.equal((await mem.supports("w_two", "a hospital district was added")).supported, true);
+  assert.equal((await mem.supports("w_two", "a player drained the harbour")).supported, true);
+  assert.equal(
+    (await mem.supports("w_two", "a player drained the harbour to build the hospital district")).supported,
+    false,
+    "two real events must not combine into a causal claim neither of them records",
+  );
+});

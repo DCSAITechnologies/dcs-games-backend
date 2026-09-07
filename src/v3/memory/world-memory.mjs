@@ -41,6 +41,35 @@ export const EVENT_KINDS = [
  */
 const VERSIONED_KINDS = new Set(["rolled_back", "rollback"]);
 
+/**
+ * Words that carry no claim of their own.
+ *
+ * A claim made entirely of these says nothing that could be checked against the
+ * record, and must not be reported as supported by it.
+ */
+const STOP_WORDS = new Set([
+  "a", "an", "the", "and", "or", "but", "then", "so", "as", "at", "by", "for", "from", "in", "into",
+  "of", "on", "to", "with", "it", "its", "this", "that", "these", "those", "there", "here",
+  "is", "are", "was", "were", "be", "been", "being", "has", "have", "had", "did", "do", "does",
+  "i", "you", "we", "they", "he", "she", "when", "while", "after", "before", "up", "down", "out",
+]);
+
+const wordsIn = (s) => String(s ?? "").toLowerCase().match(/[a-z0-9]+/g) || [];
+
+/** Every word in a record's VALUES — not its keys, which are plumbing, not fact. */
+function recordWords(row) {
+  const out = new Set(wordsIn(row.summary));
+  const walk = (v) => {
+    if (v === null || v === undefined) return;
+    if (Array.isArray(v)) return v.forEach(walk);
+    if (typeof v === "object") return Object.values(v).forEach(walk);
+    for (const w of wordsIn(v)) out.add(w);
+  };
+  walk(row.detail);
+  for (const v of [row.kind, row.actor_id, row.world_version, row.from_version, row.to_version]) walk(v);
+  return out;
+}
+
 export function createWorldMemory(env = process.env) {
   const dir = path.join(env.DCS_DATA_DIR || path.join(process.cwd(), ".dcs-data"), "world-memory");
   fs.mkdirSync(dir, { recursive: true });
@@ -59,6 +88,32 @@ export function createWorldMemory(env = process.env) {
     const tmp = p + ".tmp-" + crypto.randomBytes(4).toString("hex");
     await fsp.writeFile(tmp, JSON.stringify(rows));
     await fsp.rename(tmp, p);
+  }
+
+  /**
+   * One writer at a time, per world.
+   *
+   * Recording an event is read-all, append, write-all. Two events landing
+   * together — an expansion and a player event, or two players acting at once —
+   * both read the same array, both numbered themselves `rows.length + 1`, and
+   * the second write replaced the first. Eight concurrent records left ONE row
+   * behind: seven things that happened to the world were silently forgotten by
+   * the store whose entire purpose is that an NPC may only cite what is written
+   * down, and the chronicle's append-only, contiguous `seq` was a fiction.
+   *
+   * This serialises writers within this process, which is what the deployment
+   * has: server.mts constructs one instance and the store is a local directory.
+   * It is NOT a cross-process lock and does not pretend to be one — two
+   * instances over one directory would still race, and would need file locking.
+   */
+  const queues = new Map();
+  function serialize(worldId, work) {
+    const prev = queues.get(worldId) || Promise.resolve();
+    // The chain must not break on a rejection, or one bad write would wedge the
+    // world's chronicle for the lifetime of the process.
+    const next = prev.then(work, work);
+    queues.set(worldId, next.then(() => {}, () => {}));
+    return next;
   }
 
   return {
@@ -80,6 +135,7 @@ export function createWorldMemory(env = process.env) {
         }
         if (!actorId) throw Errors.validation(`a '${kind}' event must be attributed to a principal`);
       }
+      return await serialize(worldId, async () => {
       const rows = await readAll(worldId);
       const row = {
         id: crypto.randomUUID(),
@@ -100,6 +156,7 @@ export function createWorldMemory(env = process.env) {
       rows.push(row);
       await writeAll(worldId, rows);
       return row;
+      });
     },
 
     /** The full chronology, oldest first. */
@@ -131,11 +188,34 @@ export function createWorldMemory(env = process.env) {
      */
     async supports(worldId, claim) {
       const rows = await readAll(worldId);
-      const needle = String(claim || "").toLowerCase().trim();
-      if (!needle) return { supported: false, reason: "empty claim" };
-      const hit = rows.find((r) =>
-        r.summary.toLowerCase().includes(needle) ||
-        needle.includes(r.summary.toLowerCase()));
+      if (!String(claim || "").trim()) return { supported: false, reason: "empty claim" };
+
+      // Every word the claim asserts must be in the event it cites.
+      //
+      // This was two substring tests, and both let through the thing the whole
+      // module exists to prevent. `claim.includes(summary)` meant a claim that
+      // CONTAINED a recorded event was supported, so any invention appended to
+      // a real one rode in on it: "a hospital district was added, and then the
+      // king was murdered in it" was reported as supported, with the hospital
+      // event as its evidence. And `summary.includes(claim)` meant any fragment
+      // of a summary was supported, so the claim "a" was backed by the record.
+      //
+      // Word containment closes both. Extra words are exactly what a
+      // fabrication adds, and requiring all of them to appear in the cited
+      // event is what makes "if this returns false, the claim must not be
+      // spoken" mean something. Wording is still free — the claim may reorder,
+      // punctuate and drop filler words — because none of that adds a fact.
+      const asserted = wordsIn(claim).filter((w) => !STOP_WORDS.has(w));
+      if (!asserted.length) {
+        return { supported: false, reason: "the claim asserts nothing that could be checked against the record" };
+      }
+
+      // One event, never several. A claim assembled from two records could
+      // imply a connection between them that neither one records.
+      const hit = rows.find((r) => {
+        const known = recordWords(r);
+        return asserted.every((w) => known.has(w));
+      });
       return hit
         ? { supported: true, evidence: { id: hit.id, seq: hit.seq, summary: hit.summary, occurred_at: hit.occurred_at } }
         : { supported: false, reason: "no recorded event supports this claim" };
