@@ -468,3 +468,56 @@ A disproved hypothesis is a result — it stops the next person re-deriving it.
 | Netcode anti-cheat | 186 checks |
 
 All re-run against the final deployment after the security fixes.
+
+---
+
+## 16. Browser, mobile and accessibility — what is real and what is not
+
+A lane spent the session proving what is true about the frontend rather than
+changing it, which is why its output is a set of red tests that survive the
+handover.
+
+**Now genuinely covered:** all 190 HTML documents navigated at 320 CSS px with
+touch enabled and measured for reflow, 24px targets, `lang`, viewport, zoom
+lock, field labels, skip-link and tab distance, menu naming and contrast. Both
+navigation shells driven with real CDP key events. 44px targets, focus rings,
+forced-colors and reduced-motion on the five V3 pages. Backend honesty across
+200-with-data, 200-empty, 401, 500 and connection-refused, with fixtures that
+record every unstubbed path so drift accuses itself by name. Six deployment
+tests against the live preview — staging resolution proven from the request URLs
+rather than the configuration, CORS proven by a browser performing a real
+cross-origin fetch and being refused for an unlisted origin, and the internal
+gate proven fail-closed anonymously.
+
+**Still unproven, and stated rather than implied:** Chrome only — no Firefox or
+WebKit engine anywhere on this estate. No real device, no real screen reader, no
+VoiceOver or NVDA output. The estate sweep measures each page in its default
+load state, so interactive states outside the five V3 pages are untested.
+Contrast is measured against painted backgrounds, not over images.
+
+**The cheapest large win, measured precisely:** `--dim: #5f6f92` → `#7488b3` in
+`assets/dcsgames.css`. That single token measures 3.90/3.55/3.37/3.18:1 against
+the four surface colours — all below the WCAG 1.4.3 minimum — and **112 of 191
+pages fail on it alone**. `#7488b3` gives 5.53/5.03/4.78/4.51:1.
+
+## 17. A note on how the lanes worked
+
+Three things are worth recording because they changed the outcome.
+
+**Every lane corrected itself in public.** One nearly filed a lost-update defect
+against a repository that was correct, and said so; the cause was its own
+harness counting idempotent no-ops as losses. One attributed a contrast failure
+to the wrong CSS token, corrected it, and re-verified rule by rule rather than
+inferring from a single ratio. One twice judged a healthy test run to be wedged
+and killed it, and recorded that the misreading was its own. None of those
+corrections were necessary to look good; all of them make the report more
+usable.
+
+**A red test was treated as a deliverable.** The accessibility lane's job was to
+find out what is true, and it handed over failing tests that name a page and a
+selector rather than patches. Those tests survive; a message would not have.
+
+**The Lead's own work was reviewed by someone else.** That review found three
+blockers in code written and self-reviewed the same day, including a consent
+gate that could be stepped around by choosing a different word. Everything in
+§14 exists because the reviewing was separated from the writing.
