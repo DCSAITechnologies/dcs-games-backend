@@ -25,12 +25,58 @@ export async function handleTrustSafetySSO(req, res, ctx) {
   const uid = () => (user && user.id) || null;
   const anon = () => !uid();
 
-  // ---- file a report (any signed-in user) ----
-  if (path === "/reports" && m === "POST") {
-    if (anon()) { send(res, 401, { error:"unauthenticated" }); return true; }
-    const b = await body(req);
-    if (!b.target_id) { send(res, 400, { error:"target_id_required" }); return true; }
-    send(res, 200, await repo.createReport(uid(), b.target_id, b.reason)); return true;
+  // ---- file a report — RETIRED. It was a second set of books for moderation. ----
+  //
+  // POST /reports wrote into the CW1 repo, which server.mts:422 constructs as
+  // `{ mode: "memory" }` unconditionally — a process-local map, whatever the
+  // deployment is configured with. src/core/safety.mjs serves the SAME concept
+  // durably at POST /safety/report. Reproduced 7 Sep 2026 against a booted
+  // server, one run, one principal:
+  //
+  //   POST /reports {target_id:"user-b",reason:"harassment"}
+  //     -> 200 {"id":"rpt_1788...","state":"open"}
+  //   POST /safety/report {subject_type:"user",subject_id:"user-b",reason:"harassment"}
+  //     -> 201
+  //   GET  /safety/reports        -> 200, count 1 — only the durable one
+  //   GET  /ts/reports            -> 403 moderator_only
+  //   POST /safety/reports/rpt_1788.../moderate -> 404 "report ... not found"
+  //
+  // So a report filed here reaches NOBODY. The durable queue cannot see it. The
+  // legacy queue below is moderator-only and isModerator can never be true for a
+  // real principal — the memory repo's getUser returns null for any id that is
+  // not one of its three seeded fixtures, and the gateway user object carries no
+  // moderator flag — so nothing in the estate can read these rows, and a restart
+  // erases them. That is the write-only store POST /teams was retired for,
+  // holding moderation reports.
+  //
+  // Two things make it worse than the social duplication was:
+  //
+  //   * it does not validate `reason`. `reason:"lol"` is stored; /safety/report
+  //     refuses it against the enum.
+  //   * `reason:"csam"` is accepted and answered 200 with state "open".
+  //     safety.report() escalates csam, grooming and self_harm immediately —
+  //     state "under_review", severity "critical", and a SAFETY_ESCALATION line
+  //     on stderr saying to route it to the designated safety contact and, where
+  //     applicable, the relevant authority. Filed here, a child-safety report
+  //     produces a 200, a report id, no escalation, no log, no reader, and is
+  //     gone at the next deploy.
+  //
+  // Retired the way the duplicated social routes were: 410 naming the durable
+  // surface, so a client still on this path is told where to file rather than
+  // being handed a receipt for a report nobody will ever see.
+  if (seg[0] === "reports" && m !== "OPTIONS") {
+    const appealing = seg[2] === "appeal";
+    send(res, 410, {
+      ok: false, error: "gone",
+      detail: appealing
+        // Honest about the gap: there is no durable appeal route to point at.
+        // Naming one that does not exist would repeat the mistake that made the
+        // /verify retirement swallow its own replacement.
+        ? "this appealed against reports held in a process-local map that no route could read and a restart erased; that store is retired. There is no durable appeal surface yet — what exists is POST /safety/reports/:id/moderate for a moderator decision and GET /safety/moderation-history for the audit trail"
+        : "this filed moderation reports into a process-local map that the durable moderation queue could not see, no route could read, and a restart erased; it also accepted any reason string and did not escalate csam, grooming or self_harm. Use POST /safety/report, which validates the reason, escalates the critical ones immediately and is readable at GET /safety/reports",
+      superseded_by: appealing ? "/safety/reports/:id/moderate" : "/safety/report",
+    });
+    return true;
   }
 
   // ---- moderator queue ----
@@ -51,15 +97,9 @@ export async function handleTrustSafetySSO(req, res, ctx) {
     send(res, 200, { report:r.report, audit:r.audit }); return true;
   }
 
-  // ---- actioned user appeals ----
-  if (seg[0]==="reports" && seg[1] && seg[2]==="appeal" && m==="POST") {
-    if (anon()) { send(res, 401, { error:"unauthenticated" }); return true; }
-    const report = await repo.getReport(seg[1]); if(!report){ send(res,404,{error:"no_report"}); return true; }
-    if (report.target_id !== uid()) { send(res, 403, { error:"forbidden", reason:"only_the_actioned_user_can_appeal" }); return true; }
-    if (report.state !== "actioned") { send(res, 400, { error:"not_actionable", state:report.state }); return true; }
-    report.state = "appealed"; report.appealed_at = new Date().toISOString();
-    await repo.saveReport(report); send(res, 200, report); return true;
-  }
+  // ---- actioned user appeals — RETIRED with the store it appealed against.
+  // Handled by the guard above, which keys on the whole /reports/* prefix so a
+  // sub-path cannot quietly reach back into the map.
 
   // ---- moderator decides appeal ----
   if (seg[0]==="ts" && seg[1]==="reports" && seg[2] && seg[3]==="appeal" && seg[4]==="decide" && m==="POST") {

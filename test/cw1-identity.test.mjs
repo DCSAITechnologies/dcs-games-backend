@@ -652,3 +652,86 @@ test("a route advertised as both live and retired resolves in favour of live, an
     assert.notEqual(r.status, 410, `${probe} is claimed by both lists and answers as RETIRED, which is the wrong one`);
   }
 });
+
+// ==========================================================================
+// 8. The second set of books for MODERATION reports.
+//
+// POST /reports on the T&S slice wrote into the CW1 repo, which server.mts:422
+// constructs as { mode: "memory" } unconditionally — a process-local map,
+// whatever the deployment is configured with. src/core/safety.mjs serves the
+// same concept durably at POST /safety/report. Reproduced 7 Sep 2026 against
+// this harness, one principal, one run:
+//
+//   POST /reports {target_id:"user-b",reason:"harassment"}
+//     -> 200 {"id":"rpt_1788...","state":"open"}
+//   POST /safety/report {...same complaint...}          -> 201
+//   GET  /safety/reports                                -> 200, count 1
+//                                                          (only the durable one)
+//   GET  /ts/reports                                    -> 403 moderator_only
+//   POST /safety/reports/rpt_1788.../moderate           -> 404 not found
+//   POST /reports {reason:"lol"}                        -> 200, stored
+//   POST /reports {reason:"csam"}                       -> 200, state "open",
+//                                                          NO escalation, NO log
+//
+// A report filed there reached nobody. The durable queue could not see it; the
+// legacy queue is moderator-only and isModerator can never be true for a real
+// principal; a restart erased it. And a CSAM report — which safety.report()
+// escalates to "under_review"/critical with a SAFETY_ESCALATION line naming the
+// relevant authority — produced a 200, a report id, and silence.
+// ==========================================================================
+
+test("A5 GATE: the process-local moderation store is retired and names the durable queue", async () => {
+  const r = await call("POST", "/reports", { target_id: "user-bob", reason: "harassment" });
+  assert.equal(r.status, 410, "a second moderation store must not accept a report");
+  assert.equal(r.body.error, "gone");
+  assert.equal(r.body.superseded_by, "/safety/report");
+  assert.match(r.body.detail, /durable moderation queue could not see/);
+  assert.match(r.body.detail, /did not escalate csam/, "the refusal must name the safety consequence, not just the duplication");
+  assert.ok(!r.body.id, "a refused report must not hand back a report id");
+});
+
+test("A5 GATE: a child-safety report can no longer be filed somewhere that does not escalate it", async () => {
+  // The critical reasons are the whole point. Filed on the legacy surface they
+  // were stored as ordinary "open" rows in a map nobody reads.
+  for (const reason of ["csam", "grooming", "self_harm"]) {
+    const legacy = await call("POST", "/reports", { target_id: "user-bob", reason });
+    assert.equal(legacy.status, 410, `${reason} must not be accepted by the retired surface`);
+  }
+  // The durable surface takes it, escalates it, and says so.
+  const real = await call("POST", "/safety/report", { subject_type: "user", subject_id: "user-bob", reason: "csam" });
+  assert.equal(real.status, 201);
+  assert.equal(real.body.escalated, true, "a CSAM report must be escalated, not queued");
+  assert.equal(real.body.status, "under_review");
+
+  // ...and it is readable, which the legacy one never was.
+  const queue = await call("GET", "/safety/reports");
+  assert.equal(queue.status, 200);
+  assert.ok(queue.body.reports.some((x) => x.id === real.body.report_id),
+    "the durable queue must contain the report that was just filed");
+});
+
+test("the retirement covers every sub-path under /reports, including the appeal", async () => {
+  // The appeal read the same map. It is retired with it, and says plainly that
+  // no durable appeal surface exists yet rather than naming one that does not.
+  const appeal = await call("POST", "/reports/rpt_anything/appeal", {});
+  assert.equal(appeal.status, 410);
+  assert.equal(appeal.body.superseded_by, "/safety/reports/:id/moderate");
+  assert.match(appeal.body.detail, /no durable appeal surface yet/);
+
+  for (const p of ["/reports/x", "/reports/x/y/z", "/api/reports"]) {
+    assert.equal((await call("POST", p, {})).status, 410, `${p} must be covered by the guard`);
+  }
+});
+
+test("retiring /reports did not touch the durable safety surface or the T&S console", async () => {
+  // The control. /safety/* is a different first segment and must be unaffected,
+  // and the moderator console keeps its own refusal rather than inheriting a 410.
+  assert.equal((await call("GET", "/safety/reports")).status, 200);
+  assert.equal((await call("POST", "/safety/report", { subject_type: "world", subject_id: "w1", reason: "spam" })).status, 201);
+  assert.equal((await call("GET", "/safety/moderation-history")).status, 200);
+  // ALICE is an internal tester but not a moderator: the console still refuses
+  // her with 403, which is its own rule and not this retirement.
+  assert.equal((await call("GET", "/ts/reports")).status, 403);
+  // The payout-KYC shell is a dark shell with no duplicate, and stays.
+  assert.equal((await call("GET", "/payout/kyc")).status, 200);
+});
