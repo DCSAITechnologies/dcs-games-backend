@@ -521,3 +521,89 @@ selector rather than patches. Those tests survive; a message would not have.
 blockers in code written and self-reviewed the same day, including a consent
 gate that could be stepped around by choosing a different word. Everything in
 §14 exists because the reviewing was separated from the writing.
+
+---
+
+## 18. NEEDS A FOUNDER DECISION TODAY — the sprint branch is on the PUBLIC repo
+
+This is the most important item in the report and it is not an engineering
+question.
+
+    origin  https://github.com/DCSAITechnologies/dcs-games-backend        PUBLIC
+    bank    .../dcs-games-backend-sprint-sep2026                          PRIVATE
+
+`sprint/2026-09-canonical` exists on **both**. On the public repository it is
+**178 commits ahead of `main`**, and it contains:
+
+- **8 test files that demonstrate vulnerabilities as working reproductions** —
+  `security-regression`, `route-authz`, `supabase-paths`, and the five
+  `lead-review*` files written today
+- **6 commit subjects that name a security defect in their first line**, several
+  of which describe the exact shape of the bypass
+
+The hard-checkpoint decision recorded this as founder item **F1**, and the
+reason given there still holds exactly: these branches carry working
+reproductions of vulnerabilities, **production is running an older build**, and
+so the fixes in this branch do not protect the deployment those reproductions
+describe. Publishing them before the fixes ship is publishing an exploit kit
+against a live service.
+
+I did not create this situation knowingly and I am not going to resolve it
+unilaterally: deleting a branch from a public repository is outward-facing and
+irreversible in the sense that matters — anything already fetched or indexed
+stays fetched. The decision is the founder's.
+
+**What I have done:** pushed everything to the PRIVATE mirror, which was two
+commits behind and is now exactly in sync at `3d0a3d5`. The banking requirement
+is genuinely met independently of whatever is decided about the public copy.
+
+**The options, honestly:**
+
+1. **Delete the branch from the public repo** (`git push origin --delete
+   sprint/2026-09-canonical`). Reduces exposure from here on. Does not unpublish
+   what has already been fetched, and GitHub may retain unreferenced objects.
+   Nothing is lost: the full history is on the private mirror and in the
+   verified rollback bundle.
+2. **Leave it and accelerate the production cutover**, so the fixes reach the
+   deployment the reproductions describe. The plan for that is written and
+   ready.
+3. **Leave it deliberately**, if the founder judges the exposure acceptable —
+   which is a reasonable position for defects that are fixed in the same branch,
+   and an unreasonable one for those still live in production.
+
+I would do (1) and then (2), in that order.
+
+---
+
+## 19. Release label
+
+**`V3_VERTICAL_SLICE_PROVEN`.**
+
+The slice is proven against a deployed service with a real, dedicated Supabase
+project — 42/42 including byte-identical durability across a real process
+restart — rather than against a local process. V2 is proven too, 20/20, which it
+was not this morning. Provenance is verified trustlessly, security posture
+remotely, concurrency under real load.
+
+**Not `CLOSED_BETA_CANDIDATE`**, for four reasons, in order of how hard they are
+to clear:
+
+1. **No real internal tester has used the deployed build.** A founder item now
+   rather than an engineering one — the original blocker was "no deployed
+   build", and that is gone.
+2. **The public-repo exposure in §18 is unresolved.** A closed beta puts real
+   people in front of a service whose live vulnerabilities are published.
+3. **Six tests are red**, all frontend, each naming a real defect with a page
+   and a selector: contrast, reflow at 320px, touch targets, and the discovery
+   scaling shape. Hours of work, not days.
+4. **Coverage gaps that are stated rather than papered over**: Chrome only, no
+   real device, no screen reader, and the studio's 39 pages have had one
+   automated sweep and nothing else.
+
+`RELEASE_CANDIDATE` is not close, and the reason is not engineering: the
+Section A blockers — legal, compliance, commercial — stand in full and were
+never in scope for this session.
+
+The final call is the founder's. I have tried to make the evidence for it
+complete enough that the call can be made from the report rather than from
+trust.
