@@ -18,3 +18,8 @@ live service actually reports the deployment id it just created.
 | 2026-09-07T00:12:43Z | `d8ca0e6e-7eb0-4a15-ad85-cf38ceab7ac4` | `e1ce92ce03b78a5b03b97347621fe11ca8f527d8` | sprint/2026-09-canonical |
 | 2026-09-07T00:14:24Z | `ceae8d4c-b467-4fb8-b474-0faa3bc6f856` | `c9e117429632361246711d6b1f401533d5ef7b25` | sprint/2026-09-canonical |
 | 2026-09-07T00:20:09Z | `bc0d4c28-4280-4570-8171-35c975f42223` | `abbba0ce14d677f94ffba7ecb83fe7d6f911bf91` | sprint/2026-09-canonical |
+| 2026-09-07T00:43:28Z | `6e4b0b4e-9521-43c3-b3f0-a568063ebff1` | `746803144681018f5ff0b9b2e7cce2ee417b96af` | sprint/2026-09-canonical |
+| 2026-09-07T00:50:39Z | `292da002-41bf-4f2d-952f-326fed5f1b1f` | `d5c88a9e8dda3fd11c1bb750c39337e4b1d4750b` | sprint/2026-09-canonical |
+| 2026-09-07T00:52:56Z | `3d4e7d69-0944-4964-9e6b-7abee941fbf4` | `b8225efb5eba7da57439d0de9973a934b32e398b` | sprint/2026-09-canonical |
+| 2026-09-07T00:55:03Z | `2fdf2945-9567-47fc-9755-f06e4fb6831c` | `54ccd17223817ce4d912e235a328229137a34dab` | sprint/2026-09-canonical |
+| 2026-09-07T01:18:53Z | `330d80ab-cad2-41f2-8cac-45825a52ca1f` | `0b477c5f2c80d597991ccfe2d56ceddab236f491` | sprint/2026-09-canonical |
