@@ -183,6 +183,12 @@ jobs:
           # accepted).
           ref: 49f103531b6701b64afe03bf89a4615442e9aef3
           path: netcode
+      # Catch a dead pin before it silently costs a gate. The previous pin was
+      # on no branch at all, so this job could never check out — see the note on
+      # the ref above.
+      - name: Every pinned external ref must exist
+        run: node scripts/verify-ci-pins.mjs
+        working-directory: ${{ github.workspace }}
       - name: Speedhack regression must stay closed
         run: |
           cd netcode
