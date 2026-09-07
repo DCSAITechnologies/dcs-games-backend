@@ -58,17 +58,19 @@ A clone from the backend bundle produced branch `sprint/2026-09-canonical` at
 
 | | count |
 | --- | --- |
-| tests | 1332 |
-| pass | 1324 |
-| **fail** | **4 — all frontend accessibility/touch, see §11** |
-| skipped | 4 |
+| tests | **1392** |
+| pass | **1377** |
+| **fail** | **5 — every one a deliberate red naming an open defect, see §13** |
+| skipped | 10 |
 
-**Zero unintended skips.** All four skips share one conditional cause — the CW5
-engine is TypeScript with parameter properties, which plain `node --test` cannot
-load. Under `tsx --test` those same tests run **27/27, 0 skipped**. The skip is
+**Zero unintended skips.** All ten share one conditional cause — the CW5 engine
+is TypeScript with parameter properties, which plain `node --test` cannot load —
+and all ten run under `tsx --test`: **33 tests, 33 pass, 0 skipped**. The skip is
 conditional on the loader, never on the outcome.
 
----
+The five failures are not incidental. Each was written this session to name a
+defect that is still open, with the page, selector or measurement in the
+assertion message. They are red on purpose and they survive the handover.
 
 ## 4. Staging deployment state
 
