@@ -514,14 +514,36 @@ test("INTEGRATION: every route health advertises actually responds", async () =>
   const h = await (await req("/health")).json();
   const groups = Object.entries(h.routes).filter(([g]) => g !== "retired");
   const missing = [];
+  const advertised = groups.flatMap(([, list]) => list);
+  // The inventory grew from 28 to 65 on 7 Sep 2026, when /health stopped hiding
+  // 37 routes it had always served — the whole V2 world surface among them. A
+  // floor, not an equality: this must catch the surface silently shrinking, not
+  // pin a number that legitimate work moves.
+  assert.ok(advertised.length >= 60,
+    `the advertised surface must not shrink silently, got ${advertised.length} routes`);
 
   for (const [group, entries] of groups) {
     for (const entry of entries) {
       const [method, p] = entry.split(" ");
+      // Every placeholder has to be substituted or the probe measures the
+      // router's handling of a literal ":n" instead of the route. `:n` is a
+      // VERSION NUMBER matched by (\d+): leaving it literal made
+      // GET /v3/worlds/:id/versions/:n — a route that exists — report as drift.
+      // `\b` is what stops `/:n` eating the `:n` inside `/:npc`, and :channel
+      // has to be handled at the end of a path as well as mid-path, because
+      // DELETE /verify/:channel is a real route.
       const concrete = p
-        .replace(":id", generatedId)
-        .replace(":username", "alice")
-        .replace(":channel", "email");
+        .replace("/:id/", `/${generatedId}/`)
+        .replace(/\/:id$/, `/${generatedId}`)
+        .replace("/:username", "/alice")
+        .replace("/:channel/", "/email/")
+        .replace(/\/:channel$/, "/email")
+        .replace(/\/:npc\b/, "/npc_any")
+        .replace(/\/:n\b/, "/1");
+      // Turn "the probe is broken" into a message that says so, instead of a
+      // phantom drift report against a route that is perfectly real.
+      assert.doesNotMatch(concrete, /\/:/,
+        `the drift probe left a placeholder unsubstituted in ${entry}`);
       const r = await req(concrete, {
         method,
         headers: method === "POST" ? json(ALICE) : auth(ALICE),

@@ -144,8 +144,54 @@ async function openWorld(worldId, extra = "") {
   assert.fail(`${worldId} did not finish loading in two attempts: ` + JSON.stringify(lastErrors));
 }
 
-/** Put the player somewhere, let the runtime settle, and read the numbers. */
-async function sampleAt(x, z, { yaw = 0, lodScale = null, settleMs = 1400 } = {}) {
+/**
+ * Wait for the runtime to RENDER n frames since the last resetPerf().
+ *
+ * Everything measured in this file — the adaptive LOD scale, the cull budget,
+ * the per-frame cost — is a per-FRAME quantity produced by a per-frame control
+ * loop. Waiting a fixed number of milliseconds for it therefore measures the
+ * machine and not the loop: 800ms is fifty frames on an idle laptop and eleven
+ * on a loaded one, and the same experiment then asks the controller for four
+ * times as much convergence on one machine as on the other.
+ *
+ * That is not a hypothetical. Reproduced 7 Sep 2026 by running this suite
+ * against twelve busy cores on a fourteen-core machine: the settle test failed
+ * three times out of three with series like [0.442, 0.316, 0.34, 0.352, 0.352,
+ * 0.352] — a controller still finishing its transient, sampled too early — and
+ * passed five times out of five on the same build with the machine idle. The
+ * defect was the clock in the test, not the loop in the product.
+ *
+ * A frame budget makes the experiment identical everywhere. It is not a
+ * weakening: the assertions afterwards are unchanged and now run over a
+ * GUARANTEED number of frames rather than however many happened to arrive.
+ *
+ * Falling short of n frames inside the timeout is itself a real failure — a
+ * runtime that cannot produce 120 frames in 45 seconds is broken, not busy —
+ * so it fails with the rate it actually managed.
+ */
+async function waitFrames(n, { timeoutMs = 45000 } = {}) {
+  const t0 = Date.now();
+  for (;;) {
+    const st = await page.eval("return { samples: window.__rt.stats().samples };");
+    if (st.samples >= n) return st.samples;
+    const spent = Date.now() - t0;
+    if (spent > timeoutMs) {
+      assert.fail(
+        `the runtime rendered ${st.samples} of ${n} frames in ${(spent / 1000).toFixed(1)}s ` +
+        `(${(st.samples / (spent / 1000)).toFixed(1)} fps) — that is a stalled runtime, not a slow one`,
+      );
+    }
+    await new Promise((r) => setTimeout(r, 60));
+  }
+}
+
+/**
+ * Put the player somewhere, let the runtime settle, and read the numbers.
+ *
+ * `frames` is the settle window and is what every caller should use. `settleMs`
+ * remains for the one measurement that is genuinely about wall-clock time.
+ */
+async function sampleAt(x, z, { yaw = 0, lodScale = null, settleMs = null, frames = 80 } = {}) {
   await page.eval(`
     const rt = window.__rt;
     rt.teleport(${x}, ${z});
@@ -154,7 +200,8 @@ async function sampleAt(x, z, { yaw = 0, lodScale = null, settleMs = 1400 } = {}
     rt.resetPerf();
     return true;
   `);
-  await new Promise((r) => setTimeout(r, settleMs));
+  if (settleMs !== null) await new Promise((r) => setTimeout(r, settleMs));
+  else await waitFrames(frames);
   return page.eval("return window.__rt.stats();");
 }
 
@@ -283,9 +330,14 @@ test("PERF: per-frame work is capped — a large world does not stall the main t
 
   // The worst case for the cull pass is a teleport straight into the densest
   // part of the world: every instance in every batch has to be re-evaluated.
-  const st = await sampleAt(131, cz + 15, { settleMs: 2200 });
+  //
+  // Measured over a fixed number of FRAMES rather than a fixed number of
+  // milliseconds. The old 2200ms window produced 20 frames on a loaded machine
+  // and the test failed on "not enough frames to measure" — a statement about
+  // the laptop, not about the product. 60 frames is 60 frames anywhere.
+  const st = await sampleAt(131, cz + 15, { frames: 60 });
 
-  assert.ok(st.samples > 30, `not enough frames to measure, got ${st.samples}`);
+  assert.ok(st.samples >= 60, `not enough frames to measure, got ${st.samples}`);
   assert.ok(st.cull_processed_last_frame <= st.cull_budget * 2,
     `a single frame re-evaluated ${st.cull_processed_last_frame} instances against a budget of ${st.cull_budget}`);
   assert.ok(st.cpu_ms_max < 12,
@@ -754,6 +806,18 @@ test("PERF: the instance budget SETTLES, instead of oscillating around itself", 
   // a second, which no single sample would ever have shown.
   //
   // One sample cannot tell a settled system from a swinging one. This watches.
+  //
+  // Warmed up and sampled by FRAMES. The first version of this test allowed the
+  // controller 800ms of transient and then sampled it every 400ms, which is
+  // fifty frames of settling on an idle machine and eleven on a loaded one. On
+  // 7 Sep 2026, with twelve of fourteen cores busy, it failed three runs out of
+  // three — [0.442, 0.316, 0.34, 0.352, 0.352, 0.352] and
+  // [0.308, 0.441, 0.427, 0.316, 0.325, 0.402] — and passed five out of five
+  // idle. Both series are a controller still inside its transient, not one that
+  // never converges: the wall clock was cutting the experiment short.
+  //
+  // 150 frames of warm-up and 6 samples 30 frames apart is the SAME experiment
+  // on every machine, and is a longer settle than the original on either.
   await openWorld("w_perf_big");
   const cz = (CLUSTER.z0 + CLUSTER.z1) / 2;
   await page.eval(`
@@ -761,12 +825,13 @@ test("PERF: the instance budget SETTLES, instead of oscillating around itself", 
     rt.teleport(131, ${cz + 120}); rt.player.yaw = 0;
     rt.setLodScale(null); rt.resetPerf(); return true;
   `);
+  await waitFrames(150);
 
   const series = [];
-  for (let i = 0; i < 8; i++) {
-    await new Promise((r) => setTimeout(r, 400));
+  for (let i = 0; i < 6; i++) {
+    await waitFrames(150 + 30 * (i + 1));
     const st = await page.eval("return window.__rt.stats();");
-    series.push({ rendered: st.instances_rendered, scale: st.lod_scale, budget: st.instance_budget });
+    series.push({ rendered: st.instances_rendered, scale: st.lod_scale, budget: st.instance_budget, frames: st.samples });
   }
 
   // What distinguishes converging from oscillating is DIRECTION, not stillness:
@@ -774,7 +839,10 @@ test("PERF: the instance budget SETTLES, instead of oscillating around itself", 
   // goes 0.55 -> 1.00 -> 0.63 -> 1.00 has not, however long you watch. So the
   // assertion is that the scale never REVERSES, and that what the player
   // actually sees — the instance count — is constant and inside the budget.
-  const settled = series.slice(2);
+  //
+  // Every sample is asserted: the warm-up is the frame budget above, so there
+  // is nothing left to discard.
+  const settled = series;
   const dirs = [];
   for (let i = 1; i < settled.length; i++) {
     const d = Math.sign(settled[i].scale - settled[i - 1].scale);

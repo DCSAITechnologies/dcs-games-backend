@@ -219,10 +219,17 @@ test("load smoke: concurrent world saves either all land or are refused with a c
   const baseVersion = Number(before.body.world_version);
   const manifest = before.body.manifest;
 
+  // No `state` in the body. A save can no longer set a world's state at all —
+  // it was an authorization bypass that produced published, discoverable worlds
+  // while walking past the internal-tester check, ownership, the playtest gate
+  // and the Atlas signing key — and the server now answers 422 to a save that
+  // tries. This test is about concurrent writes and version conflicts; the
+  // state field was never what it measured, and while it was there all four
+  // saves came back 422 and the concurrency was never exercised at all.
   const results = await Promise.all(Array.from({ length: SAVE_BURST }, (_, i) =>
     call(`/worlds/${worldId}/save`, {
       method: "POST", token: TESTER,
-      body: { manifest: { ...manifest, meta: { ...manifest.meta, title: `smoke concurrent edit ${i}` } }, state: "published" },
+      body: { manifest: { ...manifest, meta: { ...manifest.meta, title: `smoke concurrent edit ${i}` } } },
     }).then((r) => r.status)));
 
   const accepted = results.filter((s) => s === 200).length;
@@ -239,6 +246,16 @@ test("load smoke: concurrent world saves either all land or are refused with a c
     `${accepted} saves returned 200 but the world advanced only ${advanced} version(s) — ` +
     "WorldRepository.upsert derives version from a value it read before the write, and " +
     "POST /worlds/:id/save defaults expected_version to null so nothing forces optimistic concurrency");
+
+  // And the refusal that made this test 422 is itself worth holding down: if
+  // POST /save ever accepts `state` again, the bypass is back and the burst
+  // above would silently start publishing worlds instead of saving them.
+  const withState = await call(`/worlds/${worldId}/save`, {
+    method: "POST", token: TESTER,
+    body: { manifest, state: "published" },
+  });
+  assert.equal(withState.status, 422,
+    "a save that carries `state` must be refused outright, not applied — it is the publish gate's only lock");
 
   // A version the caller was told was saved must be retrievable for a rollback.
   const versions = await call(`/v3/worlds/${worldId}/versions`, { token: TESTER });
