@@ -49,7 +49,7 @@ const BANKED = {
     name: "backend",
     url: "https://github.com/DCSAITechnologies/dcs-games-backend-sprint-sep2026.git",
     branch: "sprint/2026-09-canonical",
-    sha: "e00c7cdf07e9c23c0a930422dbfd61b4422626fa",
+    sha: "acc6acd4a9b2803c000a2a18d0379c07169728a7",
     // Relative to the temp root. The browser suites resolve the frontend as
     // path.resolve(<repo>/test, "../../../dcs-games-LIVE") — i.e. two levels
     // ABOVE the backend repo root — so the backend has to sit one directory
@@ -60,7 +60,7 @@ const BANKED = {
     name: "frontend",
     url: "https://github.com/DCSAITechnologies/dcs-games-frontend.git",
     branch: "main",
-    sha: "1e2df15ad48be0bb6acb28cfb1316fe320d39a28",
+    sha: "2c32d0a2d18ea477ddcb52e198957314dc30fa89",
     // The suites hard-code this directory NAME. It is not configurable.
     into: "dcs-games-LIVE",
   },
@@ -267,12 +267,26 @@ async function main() {
     // there for the legitimate case of re-verifying an older checkpoint on
     // purpose, and has to be asked for.
     if (branchHead && branchHead !== spec.sha && !process.argv.includes("--allow-stale")) {
-      return {
-        ok: false,
-        error: `the banked ${spec.name} SHA is superseded: pinned ${spec.sha.slice(0, 12)}, branch ${spec.branch} is now at ${branchHead.slice(0, 12)}.\n` +
-               `A cold rebuild of a commit nobody is running does not prove today's estate rebuilds.\n` +
-               `Update BANKED.${spec.name}.sha in scripts/reproduce.mjs to ${branchHead}, or pass --allow-stale to verify the older checkpoint deliberately.`,
-      };
+      // How far behind, not merely "behind".
+      //
+      // A pin can never equal the branch head at the moment it is written: the
+      // commit that updates the pin is itself a commit, so the pin is one
+      // behind the instant it lands. Refusing on any difference would make the
+      // guard unsatisfiable and it would be turned off, which is worse than not
+      // having it. What it must catch is the case that actually happened — a
+      // pin sixty commits behind, passing 11/11, describing code nobody runs.
+      const behind = Number((await run("git", ["rev-list", "--count", `${spec.sha}..${branchHead}`], { cwd: dest })).out.trim() || "0");
+      const reachable = (await run("git", ["merge-base", "--is-ancestor", spec.sha, branchHead], { cwd: dest })).code === 0;
+      const TOLERANCE = 3;
+      if (!reachable || behind > TOLERANCE) {
+        return {
+          ok: false,
+          error: `the banked ${spec.name} SHA is superseded: pinned ${spec.sha.slice(0, 12)}, branch ${spec.branch} is now at ${branchHead.slice(0, 12)}` +
+                 (reachable ? ` (${behind} commits ahead of the pin).` : `, and the pin is not even an ancestor of it.`) + `\n` +
+                 `A cold rebuild of a commit nobody is running does not prove today's estate rebuilds.\n` +
+                 `Update BANKED.${spec.name}.sha in scripts/reproduce.mjs to ${branchHead}, or pass --allow-stale to verify the older checkpoint deliberately.`,
+        };
+      }
     }
     return { note: `${at.slice(0, 12)} · ${files} tracked files · branch head ${branchHead === spec.sha ? "is the banked SHA" : "moved to " + branchHead.slice(0, 12)}` };
   };
