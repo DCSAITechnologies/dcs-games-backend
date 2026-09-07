@@ -1,10 +1,10 @@
 # Route-to-UI coverage
 
 Backend: https://dcs-games-backend-staging.up.railway.app
-Build:   e14263ba929c (deployment b49d6067-012b-41f9-a4d6-73a9fedfdc05)
+Build:   33c7f7a8fe7e (deployment 7067cac8-b63e-4fb8-aaf9-c05a1e0a4379)
 Site:    /Users/NEWUSER/Desktop/Project DCSAI/dcs-games-LIVE
 
-105 live routes, 15 retired, 58 distinct paths requested by the UI.
+106 live routes, 15 retired, 59 distinct paths requested by the UI.
 
 ## Dead buttons — the UI calls a path the backend genuinely does not serve (0)
 
@@ -16,14 +16,11 @@ None.
 None.
 
 
-## Unreached capability — a live route no page ever calls (10)
+## Unreached capability — a live route no page ever calls (9)
 
 ### identity (2)
 - `POST /auth/login`
 - `POST /auth/signup`
-
-### marketplace (1)
-- `POST /v3/marketplace/storefronts`
 
 ### subscriptions (2)
 - `POST /v3/subscriptions/grant`
@@ -38,7 +35,7 @@ None.
 - `GET /payout/kyc`
 - `POST /payout/kyc/start`
 
-## Reached (95)
+## Reached (97)
 
 - `POST /worlds/generate` <- create-v3.html, play.html
 - `GET /worlds/mine` <- create-v3.html, play.html, player-achievements.html (+5)
@@ -106,6 +103,8 @@ None.
 - `DELETE /social/teams/:id/members` <- social-v3.html
 - `GET /v3/marketplace` <- profile-v3.html
 - `GET /v3/marketplace/split` <- profile-v3.html, studio/pages/editors/revenue-payouts.html, studio/pages/revenue.html
+- `GET /v3/marketplace/storefronts` <- profile-v3.html
+- `POST /v3/marketplace/storefronts` <- profile-v3.html
 - `POST /v3/marketplace/listings` <- profile-v3.html
 - `DELETE /v3/marketplace/listings/:id` <- profile-v3.html
 - `POST /v3/marketplace/listings/:id/acquire` <- profile-v3.html
