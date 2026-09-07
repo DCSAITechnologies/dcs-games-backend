@@ -485,3 +485,41 @@ test("PERF: the creator dashboard reads the activity tables once, not once per w
   // Generous, and only there to catch an order-of-magnitude regression.
   assert.ok(took < 8000, `the dashboard took ${took}ms for ${b.worlds.length} worlds`);
 });
+
+test("MARKETPLACE: a storefront can be created AND read back", async () => {
+  // createStorefront had a route and storefrontsFor did not, so a caller could
+  // make a storefront and never see it again. A create whose result cannot be
+  // read back is not a feature, and it is why the UI had nothing to render.
+  assert.equal((await call(null, "GET", "/v3/marketplace/storefronts")).status, 401);
+
+  const before = await (await call(TESTER, "GET", "/v3/marketplace/storefronts")).json();
+  assert.equal(before.ok, true);
+  assert.equal(before.count, 0, "a new principal owns no storefronts");
+
+  const made = await call(TESTER, "POST", "/v3/marketplace/storefronts", { name: "Saltgate Works", description: "hand-cut stone" });
+  const mb = await made.json();
+  assert.equal(made.status, 201, JSON.stringify(mb).slice(0, 200));
+  assert.ok(mb.storefront?.id);
+
+  const after = await (await call(TESTER, "GET", "/v3/marketplace/storefronts")).json();
+  assert.equal(after.count, 1);
+  assert.equal(after.storefronts[0].id, mb.storefront.id, "the id the SERVER assigned comes back");
+  assert.equal(after.storefronts[0].name, "Saltgate Works");
+
+  // And it is the caller's own, not everyone's.
+  const others = await (await call(PLAIN, "GET", "/v3/marketplace/storefronts")).json();
+  assert.equal(others.count, 0, "one principal's storefront must not appear in another's list");
+});
+
+test("MARKETPLACE: the storefront read says the marketplace is dark", async () => {
+  const b = await (await call(TESTER, "GET", "/v3/marketplace/storefronts")).json();
+  assert.equal(b.payments_live, false);
+  assert.match(b.note, /dark/i, "a creator naming a storefront must not be left thinking they can sell from it");
+});
+
+test("MARKETPLACE GATE: a storefront needs a real name", async () => {
+  for (const name of ["", " ", "x", null, undefined]) {
+    const r = await call(TESTER, "POST", "/v3/marketplace/storefronts", { name });
+    assert.equal(r.status, 422, `name ${JSON.stringify(name)} must be refused`);
+  }
+});

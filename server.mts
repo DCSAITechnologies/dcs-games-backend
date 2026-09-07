@@ -504,7 +504,7 @@ const server = http.createServer(async (req, res) => {
         discovery: ["GET /v3/discover", "GET /api/public/worlds", "GET /api/public/stats", "GET /api/public/events", "GET /api/public/market", "GET /api/public/atlas/feed", "GET /api/public/atlas/stats", "POST /v3/worlds/:id/play", "POST /v3/worlds/:id/rate", "GET /v3/worlds/:id/stats"],
         identity: ["POST /auth/signup", "POST /auth/login", "GET /me/home", "GET /me/profile", "GET /me/achievements", "GET /me/streak", "GET /me/dashboard", "GET /profiles/:username", "GET /verify/status", "POST /verify/:channel/start", "POST /verify/:channel/confirm"],
         social: ["GET /social/friends", "POST /social/friends/accept", "GET /social/parties", "GET /social/teams", "POST /social/studios", "GET /social/orgs", "GET /social/orgs/:id", "POST /social/orgs/:id/members", "DELETE /social/orgs/:id/members", "POST /social/orgs/:id/seats", "GET /social/parties/:id", "POST /social/parties/:id/join", "POST /social/parties/:id/leave", "GET /social/studios/:id", "POST /social/studios/:id/members", "POST /social/studios/:id/split", "GET /social/teams/:id", "POST /social/teams/:id/members", "DELETE /social/teams/:id/members"],
-        marketplace: ["GET /v3/marketplace", "GET /v3/marketplace/split", "POST /v3/marketplace/storefronts", "POST /v3/marketplace/listings", "DELETE /v3/marketplace/listings/:id", "POST /v3/marketplace/listings/:id/acquire", "GET /v3/marketplace/owned", "GET /v3/marketplace/ledger", "GET /v3/marketplace/assert-dark"],
+        marketplace: ["GET /v3/marketplace", "GET /v3/marketplace/split", "GET /v3/marketplace/storefronts", "POST /v3/marketplace/storefronts", "POST /v3/marketplace/listings", "DELETE /v3/marketplace/listings/:id", "POST /v3/marketplace/listings/:id/acquire", "GET /v3/marketplace/owned", "GET /v3/marketplace/ledger", "GET /v3/marketplace/assert-dark"],
         subscriptions: ["GET /v3/subscriptions/plans", "POST /v3/subscriptions/subscribe", "POST /v3/subscriptions/grant", "POST /v3/subscriptions/revoke", "GET /v3/subscriptions/grants", "GET /v3/subscriptions/assert-dark", "GET /me/subscription", "GET /me/entitlements"],
         safety: ["GET /safety/age", "GET /safety/blocks", "POST /safety/consent/parental", "POST /safety/report", "GET /safety/reports", "POST /safety/block", "GET /safety/consent/media", "GET /safety/moderation-history", "POST /safety/reports/:id/moderate"],
         jobs: ["GET /v3/jobs", "GET /v3/jobs/:id"],
@@ -1005,6 +1005,21 @@ const server = http.createServer(async (req, res) => {
     if (url === "/v3/marketplace" && method === "GET") {
       const q = new URLSearchParams((req.url || "").split("?")[1] || "");
       return send(res, 200, { ok: true, ...(await market.browse({ kind: q.get("kind"), sellerId: q.get("seller") })) });
+    }
+    // The read that makes the create usable.
+    //
+    // createStorefront had a route and storefrontsFor did not, so a caller could
+    // make a storefront and never see it again — a write-only surface, which is
+    // why the UI had nothing to render and the capability sat unwired. A create
+    // whose result cannot be read back is not a feature.
+    if (url === "/v3/marketplace/storefronts" && method === "GET") {
+      const me = await mustBe(req, cid);
+      const mine = await market.storefrontsFor(me.id);
+      return send(res, 200, {
+        ok: true, count: mine.length, storefronts: mine,
+        payments_live: PAYMENTS_LIVE,
+        note: PAYMENTS_LIVE ? undefined : "the marketplace is dark: a storefront can be created and named, and nothing can be sold from it",
+      });
     }
     if (url === "/v3/marketplace/storefronts" && method === "POST") {
       const me = await mustBeInternalTester(req, cid);
