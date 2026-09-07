@@ -46,6 +46,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { serveStatic, launchChrome, Page, findChrome } from "./helpers/browser.mjs";
 import { resolveSite } from "./helpers/site.mjs";
+import { CONTRAST_HELPERS, belowContrastMinimum } from "./helpers/a11y-probe.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SITE = resolveSite(HERE);   // throws loudly if the frontend is absent
@@ -1051,7 +1052,7 @@ const ESTATE = (() => {
 const NARROW = { width: 320, height: 720, deviceScaleFactor: 2, mobile: true };
 
 /** Everything measured on one page, in one visit. */
-const ESTATE_PROBE = `
+const ESTATE_PROBE = CONTRAST_HELPERS + `
   function vis(el) {
     var cs = getComputedStyle(el);
     if (cs.display === "none" || cs.visibility === "hidden") return false;
@@ -1160,6 +1161,13 @@ const ESTATE_PROBE = `
       }
     }
   }
+
+  // WCAG 1.4.3, measured on the same visit. Reading the estate is the whole
+  // point of it, and only two of its 190 documents had ever had their contrast
+  // measured. Text is scanned at the DESKTOP width the pages were designed at,
+  // reasserted below, because a 320px reflow can wrap a heading into a
+  // different colour context and the question here is the colour, not the wrap.
+  R.contrast = _scanContrast();
 
   var bs = document.querySelectorAll('.pd-burger, #mBurger, #pdBurger, [class*="burger"]');
   for (var q = 0; q < bs.length; q++) {
@@ -1306,4 +1314,122 @@ test("ESTATE MOBILE: every page declares a language and a viewport a phone can u
   const locked = rows.filter((r) => r.viewportMeta && /user-scalable\s*=\s*no|maximum-scale\s*=\s*(1(\.0+)?)\b/.test(r.viewportMeta));
   assert.deepEqual(locked.map((r) => `${r.page}: ${r.viewportMeta}`), [],
     "a page may not disable pinch zoom (WCAG 1.4.4) — scope touch-action to the surface that needs it instead");
+});
+
+// A menu button that carries aria-expanded is not the same as a menu that
+// OPENS. The estate has exactly two shells — assets/site-chrome.js behind the
+// 145 marketing pages and assets/player-chrome.js behind the dashboard — so one
+// page of each is the whole of it, and driving them with real key events is the
+// only way to know a keyboard user can get past the burger to the navigation
+// it hides.
+async function key(k, vk) {
+  // CDP's `code` is the physical key NAME, a string — passing the virtual key
+  // number there is rejected outright ("string value expected"). Enter also has
+  // to carry its text, or Chrome delivers a raw key event that activates
+  // nothing.
+  const base = { key: k, code: k, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk };
+  await page.send("Input.dispatchKeyEvent", { type: "keyDown", ...base, ...(k === "Enter" ? { text: "\r" } : {}) });
+  await page.send("Input.dispatchKeyEvent", { type: "keyUp", ...base });
+  await new Promise((r) => setTimeout(r, 70));
+}
+
+test("ESTATE MENU: the mobile menu opens from the keyboard, and the navigation it hides is reachable", opts, async () => {
+  // One page per shell. Which page is arbitrary — the markup comes from the
+  // shell, not the document — so each is chosen for being representative of the
+  // ~60 pages behind it and for mounting the shell it is here to exercise.
+  const shells = [
+    { page: "/games-explore.html", burger: "#mBurger", nav: "#mnav a" },        // assets/site-chrome.js
+    { page: "/player-friends.html", burger: "#pdBurger", nav: ".pd-side a" },   // assets/player-chrome.js
+  ];
+  const problems = [];
+  await page.send("Emulation.setDeviceMetricsOverride", NARROW);
+  await page.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 5 });
+  try {
+    for (const s of shells) {
+      await page.goto(site.url + s.page, { waitMs: 900 });
+      const before = await page.eval(`
+        var b = document.querySelector(${JSON.stringify(s.burger)});
+        if (!b) return { missing: true };
+        // A menu that is merely moved off screen — display kept, transform
+        // applied — leaves every link inside it in the tab order. A keyboard
+        // user then tabs into a menu they cannot see and cannot tell they are
+        // in. So the question is not "is it visible" but "can it take focus
+        // while it is off screen", which is the failure a sighted keyboard user
+        // actually experiences.
+        var offscreenFocusable = [];
+        var links = Array.prototype.slice.call(document.querySelectorAll(${JSON.stringify(s.nav)}));
+        for (var i = 0; i < links.length; i++) {
+          var el = links[i], cs = getComputedStyle(el);
+          if (cs.display === "none" || cs.visibility === "hidden") continue;
+          el.focus();
+          if (document.activeElement !== el) continue;
+          var r = el.getBoundingClientRect();
+          var inView = r.right > 0 && r.left < innerWidth && r.bottom > 0 && r.top < innerHeight;
+          if (!inView) offscreenFocusable.push((el.innerText || "").trim().slice(0, 20) + " at x=" + Math.round(r.left));
+        }
+        b.focus();
+        return { missing: false, focused: document.activeElement === b, expanded: b.getAttribute("aria-expanded"),
+                 offscreenFocusable: offscreenFocusable.slice(0, 4), offscreenCount: offscreenFocusable.length };
+      `);
+      if (before.missing) { problems.push(`${s.page}: no ${s.burger} at a 320px viewport, so there is no menu to open`); continue; }
+      if (!before.focused) { problems.push(`${s.page}: ${s.burger} could not take keyboard focus`); continue; }
+      if (before.expanded !== "false") problems.push(`${s.page}: a closed menu reports aria-expanded=${JSON.stringify(before.expanded)}`);
+      if (before.offscreenCount) {
+        problems.push(`${s.page}: ${before.offscreenCount} links in the SHUT menu still take focus while off screen (${before.offscreenFocusable.join(", ")}) — a keyboard user tabs into a menu nobody can see`);
+      }
+
+      await key("Enter", 13);
+      await new Promise((r) => setTimeout(r, 400));
+      const after = await page.eval(`
+        var b = document.querySelector(${JSON.stringify(s.burger)});
+        var links = Array.prototype.filter.call(document.querySelectorAll(${JSON.stringify(s.nav)}), function (el) {
+          var r = el.getBoundingClientRect();
+          return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== "hidden";
+        });
+        var first = links[0];
+        if (first) first.focus();
+        return {
+          expanded: b.getAttribute("aria-expanded"),
+          visibleLinks: links.length,
+          firstReachable: !!(first && document.activeElement === first),
+          firstText: first ? (first.innerText || "").trim().slice(0, 24) : null,
+          firstInView: first ? (function () { var r = first.getBoundingClientRect(); return r.right > 0 && r.left < innerWidth && r.bottom > 0 && r.top < innerHeight; })() : false,
+        };
+      `);
+      if (after.expanded !== "true") problems.push(`${s.page}: pressing Enter on the menu button left aria-expanded=${JSON.stringify(after.expanded)}, so nothing announced that it opened`);
+      if (after.visibleLinks < 3) problems.push(`${s.page}: the menu opened but exposes only ${after.visibleLinks} navigation links`);
+      if (!after.firstReachable) problems.push(`${s.page}: the first link in the opened menu (${JSON.stringify(after.firstText)}) cannot take focus`);
+      if (!after.firstInView) problems.push(`${s.page}: the first link in the opened menu is laid out off screen at 320px`);
+    }
+  } finally {
+    await page.send("Emulation.setTouchEmulationEnabled", { enabled: false }).catch(() => {});
+    await page.send("Emulation.clearDeviceMetricsOverride").catch(() => {});
+  }
+  assert.deepEqual(problems, [], "the navigation behind the burger is not operable from a keyboard");
+});
+
+test("ESTATE CONTRAST: every word the frontend paints clears the WCAG minimum for its own size", opts, async () => {
+  // WCAG 1.4.3 (AA): 4.5:1, or 3:1 for large text — 24px, or 18.66px bold. The
+  // threshold is a function of the text's own size and weight, so it is
+  // computed per piece of text rather than applied as one number, and every
+  // colour comes from getComputedStyle rather than from the stylesheet's
+  // intent: a token can be overridden, mistyped or shadowed by a media query,
+  // and only the computed value knows which of those happened.
+  //
+  // Two of the estate's 190 documents had ever had this measured.
+  const rows = await estateSweep();
+  const scanned = rows.reduce((n, r) => n + (r.contrast ? r.contrast.length : 0), 0);
+  assert.ok(scanned > 2000,
+    `expected the estate's text to be measured, scanned only ${scanned} pieces across ${rows.length} pages`);
+
+  const bad = [];
+  for (const r of rows) {
+    const fails = belowContrastMinimum(r.contrast || []);
+    if (fails.length) bad.push({ page: r.page, worst: fails[0], n: fails.length });
+  }
+  assert.deepEqual(
+    bad.map((b) => `${b.page}: ${b.n} unreadable, worst is ${b.worst}`),
+    [],
+    `text below the WCAG 1.4.3 minimum against what is painted behind it, on ${bad.length} of ${rows.length} pages:${report(bad, (b) => `  ${b.page} (${b.n})`)}`,
+  );
 });
