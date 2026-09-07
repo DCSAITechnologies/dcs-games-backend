@@ -9,7 +9,7 @@ import { generateVia, setAdapter } from "./src/cw2/adapter.mjs";              //
 import { makeHybridAdapter } from "./src/cw2/hybrid-enrich.mjs";              // CW2 v3.0: Cerebras hybrid enrich (seeder geometry + AI flavor, fail-safe)
 import { makeCerebrasClient } from "./src/cw2/cerebras-client.mjs";          // CW2: Cerebras inference client (OpenAI-compatible, key from env)
 import { toRuntimeWorld, toBaseWorldRow } from "./src/cw2/runtime-schema.mjs"; // CW2 fix: full C1 runtime schema -> renders with ZERO runtime patches
-import { PersistenceEngine, InMemoryPersistenceStore } from "./src/cw5/cw5_persistence.ts";
+import { PersistenceEngine, InMemoryPersistenceStore, FilePersistenceStore } from "./src/cw5/cw5_persistence.ts";
 import { SupabasePersistenceStore } from "./src/cw5/cw5_supabase_store.ts";
 import { createIdentityStore, handleIdentity, retiredSocialRoutes } from "./src/cw1/identity-slice.mjs";
 import { handleTrustSafetySSO } from "./src/cw1/ts-sso-kyc-slice.mjs"; // CW1 v3.0: T&S console + payout-KYC, reconciled to gateway auth
@@ -64,15 +64,21 @@ console.log("CW2 generation adapter:", GEN_MODE);
 
 const _store = HAS_SUPA
   ? new SupabasePersistenceStore({ url: SUPA, serviceRoleKey: KEY })
-  : new InMemoryPersistenceStore();
+  // Durable on disk rather than a Map. Without this, every deployment without
+  // Supabase — every local run, every CI run, and any deploy that loses its
+  // variables — lost acknowledged runtime state at restart and then accepted an
+  // already-used seq again, so the suites asserting append-only, monotonic and
+  // idempotent behaviour were asserting it against a store that could not keep
+  // it.
+  : new FilePersistenceStore(path.join(process.env.DCS_DATA_DIR || path.join(process.cwd(), ".dcs-data"), "runtime"));
 // Named, because the difference matters and nothing said it. Without Supabase
 // the runtime delta store is a Map: an object saved and acknowledged ok:true is
 // gone at the next restart, seq 1 is then accepted again as a fresh delta, and
 // the engine's append-only, monotonic and idempotent guarantees are only as
 // durable as the store beneath them. /health described the kind of every other
 // store and was silent about this one.
-const RUNTIME_STORE_KIND = HAS_SUPA ? "supabase" : "memory";
-const RUNTIME_STORE_DURABLE = HAS_SUPA;
+const RUNTIME_STORE_KIND = HAS_SUPA ? "supabase" : "file";
+const RUNTIME_STORE_DURABLE = true;   // both branches survive a restart
 const persistence = new PersistenceEngine(_store);
 const idb = createIdentityStore();
 const atlas = makeAtlasRoutes({ worlds: [], events: [], receipts: [], verifiedWorldIds: [] }); // CW7 read surface; world truth now comes from the durable repository
@@ -438,8 +444,7 @@ const server = http.createServer(async (req, res) => {
       runtime_state_store: {
         kind: RUNTIME_STORE_KIND,
         durable: RUNTIME_STORE_DURABLE,
-        note: RUNTIME_STORE_DURABLE ? undefined
-          : "runtime deltas are held in memory only: they do not survive a restart, and a seq already accepted will be accepted again afterwards",
+        note: undefined,
       },
       schema_assertion: SCHEMA_STATE,
       generation: GEN_MODE,
@@ -2261,9 +2266,7 @@ const server = http.createServer(async (req, res) => {
         // cannot support. With an in-memory store the same absence means
         // "saved, acknowledged, and lost at the last restart", and a load that
         // cannot tell those apart must not assert the innocent one.
-        runtimeUnavailable = RUNTIME_STORE_DURABLE
-          ? "no runtime state has been recorded for this world"
-          : "no runtime state is present. This deployment holds runtime deltas IN MEMORY, so this may mean none was ever saved, or that it was lost at the last restart — these are indistinguishable here.";
+        runtimeUnavailable = "no runtime state has been recorded for this world";
       }
       return send(res, 200, { ok: true, world_id: m[1], world_version: rec.version, manifest_hash: rec.manifest_hash, state: rec.state, owner: rec.owner_id, manifest: rec.manifest, runtime_state: snap, runtime_note: runtimeUnavailable ?? undefined, correlation_id: cid });
     }

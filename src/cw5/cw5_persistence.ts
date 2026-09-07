@@ -10,6 +10,8 @@
 // M-P0 acceptance: apply 50 synthetic deltas → load == replay-on-base; reload
 // after restart is byte-stable. (DoD in CW5 brief.)
 
+import fs from 'node:fs';
+import path from 'node:path';
 import {
   SaveDelta,
   WorldSnapshot,
@@ -34,6 +36,86 @@ export interface PersistenceStore {
   getLatestSnapshot(worldId: string): Promise<WorldSnapshot | null>;
   putBaseWorld(base: BaseWorld): Promise<void>;
   getBaseWorld(worldId: string): Promise<BaseWorld | null>;
+}
+
+// ============================================================================
+// FILE STORE — durable without a database
+// ============================================================================
+
+/**
+ * Runtime deltas on disk, for every deployment that has no Supabase.
+ *
+ * Until this existed, a deployment without Supabase used InMemoryPersistenceStore
+ * — a Map. An object saved and acknowledged `ok:true` was gone at the next
+ * restart; `seq 1` was then accepted again as a fresh delta; and the engine's
+ * append-only, monotonic and idempotent guarantees held only as long as the
+ * process did. That is every local run, every CI run, and any deploy that loses
+ * its Supabase variables — so the suites that assert those guarantees were
+ * asserting them against a store that could not keep them.
+ *
+ * Append-only on disk, one JSON-lines file per world. A partially written final
+ * line is DISCARDED on read rather than throwing: a delta that never finished
+ * being written was never acknowledged, and refusing to open the world because
+ * of it would turn a torn write into permanent data loss.
+ */
+export class FilePersistenceStore implements PersistenceStore {
+  private dir: string;
+  constructor(dir: string) {
+    this.dir = dir;
+    fs.mkdirSync(this.dir, { recursive: true });
+  }
+
+  private safe(worldId: string): string {
+    // World ids may legally contain dots; they must never contain a separator.
+    return String(worldId).replace(/[^A-Za-z0-9._-]/g, "_");
+  }
+  private deltaFile(worldId: string) { return path.join(this.dir, this.safe(worldId) + ".deltas.jsonl"); }
+  private baseFile(worldId: string) { return path.join(this.dir, this.safe(worldId) + ".base.json"); }
+  private snapFile(worldId: string) { return path.join(this.dir, this.safe(worldId) + ".snapshot.json"); }
+
+  private readJson<T>(file: string): T | null {
+    try { return JSON.parse(fs.readFileSync(file, "utf8")) as T; } catch { return null; }
+  }
+  private writeJsonAtomic(file: string, value: unknown) {
+    const tmp = file + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify(value));
+    fs.renameSync(tmp, file);       // atomic: a reader sees the old file or the new one
+  }
+
+  private readDeltas(worldId: string): SaveDelta[] {
+    let raw: string;
+    try { raw = fs.readFileSync(this.deltaFile(worldId), "utf8"); } catch { return []; }
+    const out: SaveDelta[] = [];
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      try { out.push(JSON.parse(line)); } catch { /* torn final line: never acknowledged */ }
+    }
+    return out;
+  }
+
+  async appendDelta(delta: SaveDelta) {
+    const existing = this.readDeltas(delta.world_id);
+    if (existing.some((d) => d.seq === delta.seq)) return { applied: false };
+    fs.appendFileSync(this.deltaFile(delta.world_id), JSON.stringify(delta) + "\n");
+    return { applied: true };
+  }
+  async getDeltas(worldId: string, afterSeq = 0) {
+    return this.readDeltas(worldId).filter((d) => d.seq > afterSeq).sort((a, b) => a.seq - b.seq);
+  }
+  async getMaxSeq(worldId: string) {
+    return this.readDeltas(worldId).reduce((m, d) => Math.max(m, d.seq), 0);
+  }
+  async hasSeq(worldId: string, seq: number) {
+    return this.readDeltas(worldId).some((d) => d.seq === seq);
+  }
+  async putSnapshot(snap: WorldSnapshot) { this.writeJsonAtomic(this.snapFile(snap.world_id), snap); }
+  async getLatestSnapshot(worldId: string) { return this.readJson<WorldSnapshot>(this.snapFile(worldId)); }
+  async putBaseWorld(base: BaseWorld) {
+    // Same contract as the in-memory store: a base world is written once.
+    if (fs.existsSync(this.baseFile(base.world_id))) return;
+    this.writeJsonAtomic(this.baseFile(base.world_id), base);
+  }
+  async getBaseWorld(worldId: string) { return this.readJson<BaseWorld>(this.baseFile(worldId)); }
 }
 
 // ============================================================================
