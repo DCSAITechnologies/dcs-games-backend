@@ -47,19 +47,85 @@ Return JSON only.`;
  * Validate an image the caller supplied. Rejects anything oversized or of an
  * unexpected type before a byte is sent anywhere.
  */
+/**
+ * The first bytes of each type we accept.
+ *
+ * A data URL's declared type is a claim by whoever sent it, and this is the only
+ * thing in the request that is not. It is a cheap check, not a decoder: it says
+ * the payload begins the way that format begins, which is enough to stop a
+ * document or an executable being handed to a vision provider as a picture.
+ */
+const MAGIC = {
+  "image/png": [[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]],
+  "image/jpeg": [[0xff, 0xd8, 0xff]],
+  "image/gif": [[0x47, 0x49, 0x46, 0x38, 0x37, 0x61], [0x47, 0x49, 0x46, 0x38, 0x39, 0x61]],
+  // RIFF....WEBP — bytes 4..7 are the length, so they are not part of the match.
+  "image/webp": [[0x52, 0x49, 0x46, 0x46]],
+};
+
+function looksLike(mime, head) {
+  const sigs = MAGIC[mime];
+  if (!sigs) return false;
+  const ok = sigs.some((sig) => sig.every((b, i) => head[i] === b));
+  if (mime !== "image/webp") return ok;
+  return ok && head.length >= 12 && String.fromCharCode(...head.slice(8, 12)) === "WEBP";
+}
+
+/**
+ * Validate an image the caller supplied. Rejects anything oversized or of an
+ * unexpected type before a byte is sent anywhere.
+ *
+ * The caller's `mime` and `bytes` are TREATED AS CLAIMS, and a claim may only
+ * make this check stricter — never weaker. They used to override the payload
+ * outright: `(mime || m[1])` meant a caller could label anything as a PNG, and
+ * server.mts takes that label straight from the request body (`b.image_mime`),
+ * so `data:application/pdf;base64,...` declared as `image/png` passed and was
+ * forwarded to a vision provider. `bytes ?? computed` was the same hole on the
+ * size limit: a declared `bytes: 10` accepted a 40MB payload.
+ *
+ * An image is only ever what it actually is.
+ */
 export function validateImage({ dataUrl = null, mime = null, bytes = null } = {}) {
   if (!dataUrl) throw Errors.validation("an image data URL is required");
   const m = /^data:([a-z/+.-]+);base64,([A-Za-z0-9+/=]+)$/i.exec(String(dataUrl));
   if (!m) throw Errors.validation("the image must be a base64 data URL");
-  const detected = (mime || m[1]).toLowerCase();
-  if (!ALLOWED_MIME.includes(detected)) {
-    throw Errors.validation(`image type '${detected}' is not accepted`, { meta: { allowed: ALLOWED_MIME } });
+
+  const declared = m[1].toLowerCase();
+  // A caller who disagrees with the payload about what it is does not get to
+  // decide. Refused rather than silently resolved: one of the two is wrong, and
+  // guessing which is exactly how the override became a bypass.
+  if (mime && String(mime).toLowerCase() !== declared) {
+    throw Errors.validation(
+      `the image says it is '${declared}' but was sent as '${String(mime).toLowerCase()}'`,
+      { meta: { declared, claimed: String(mime).toLowerCase() } },
+    );
   }
-  const size = bytes ?? Math.floor(m[2].length * 0.75);
+  if (!ALLOWED_MIME.includes(declared)) {
+    throw Errors.validation(`image type '${declared}' is not accepted`, { meta: { allowed: ALLOWED_MIME } });
+  }
+
+  // The payload's own size, never the caller's word for it. A declaration may
+  // raise the figure — a caller who knows the decoded size is larger is telling
+  // us something useful — but never lower it.
+  const computed = Math.floor(m[2].length * 0.75);
+  const declaredSize = Number(bytes);
+  const size = Number.isFinite(declaredSize) && declaredSize > computed ? declaredSize : computed;
   if (size > MAX_IMAGE_BYTES) {
     throw Errors.validation(`the image is ${(size / 1048576).toFixed(1)}MB; the limit is ${MAX_IMAGE_BYTES / 1048576}MB`);
   }
-  return { mime: detected, bytes: size };
+
+  // And the bytes must begin the way that format begins.
+  let head;
+  try { head = Buffer.from(m[2].slice(0, 32), "base64"); }
+  catch { throw Errors.validation("the image payload is not readable base64"); }
+  if (!looksLike(declared, head)) {
+    throw Errors.validation(
+      `the payload does not begin like a ${declared.replace("image/", "").toUpperCase()} image`,
+      { meta: { declared } },
+    );
+  }
+
+  return { mime: declared, bytes: size };
 }
 
 function keyed(env, ...names) {

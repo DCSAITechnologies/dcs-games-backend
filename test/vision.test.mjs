@@ -12,7 +12,13 @@ import { Lane, STATUS } from "../src/v3/providers/contract.mjs";
 import { validateManifest } from "../src/v3/manifest/schema.mjs";
 
 const OFFLINE = { DCS_PROVIDERS_OFFLINE: "1" };
-const png = (n = 400) => "data:image/png;base64," + Buffer.from("x".repeat(n)).toString("base64");
+// A payload that actually BEGINS like a PNG. The old fixture was a run of "x",
+// which is not a PNG in any sense; validateImage now checks the first bytes
+// against the format the data URL claims, because that claim is the only part
+// of the request that is not attacker-controlled.
+const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const png = (n = 400) =>
+  "data:image/png;base64," + Buffer.concat([PNG_MAGIC, Buffer.from("x".repeat(Math.max(0, n - PNG_MAGIC.length)))]).toString("base64");
 
 const goodReading = {
   kind: "photo", setting: "a stone harbour at dusk", style: "wet black stone, low amber light",
@@ -166,4 +172,62 @@ test("9.1: a vision failure degrades to no conditioning rather than failing the 
   const out = await router.assemble({ prompt: "A port town", worldId: "w_mm6", creatorId: "u1", image: { dataUrl: png() } });
   assert.equal(out.validation.ok, true, "a broken vision provider must not cost you the world");
   assert.equal(out.conditioning.conditioned, false);
+});
+
+// ------------------------------------- a caller's claim cannot weaken the check
+
+test("9.1 GATE: a caller cannot relabel a payload into an accepted image type", () => {
+  // `const detected = (mime || m[1])` let the caller's label REPLACE the data
+  // URL's own, and server.mts takes that label straight from the request body
+  // (`image: { dataUrl: b.image_data_url, mime: b.image_mime }`). So a PDF —
+  // or anything else — declared as `image/png` passed validation and was
+  // forwarded to a vision provider.
+  const pdf = "data:application/pdf;base64," + Buffer.from("%PDF-1.4 not an image at all").toString("base64");
+  assert.throws(
+    () => validateImage({ dataUrl: pdf, mime: "image/png" }),
+    (e) => { assert.equal(e.httpStatus, 422); assert.match(e.detail, /says it is 'application\/pdf'/); return true; },
+    "a payload must not be admitted on the strength of the label the sender put on it",
+  );
+
+  // Agreeing is fine; only disagreeing is refused.
+  assert.deepEqual(validateImage({ dataUrl: png(64), mime: "image/png" }).mime, "image/png");
+  assert.throws(() => validateImage({ dataUrl: png(64), mime: "image/webp" }), (e) => /says it is 'image\/png'/.test(e.detail));
+});
+
+test("9.1 GATE: a declared size may raise the figure but never lower it", () => {
+  // `bytes ?? computed` meant a caller-declared size REPLACED the payload's, so
+  // `bytes: 10` admitted a payload of any size at all. The limit exists to stop
+  // us forwarding something enormous to a provider; a sender must not be able
+  // to switch it off by saying a smaller number.
+  const huge = "data:image/png;base64," + Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.alloc(8 * 1024 * 1024, 0x41),
+  ]).toString("base64");
+
+  assert.throws(() => validateImage({ dataUrl: huge }), (e) => /the limit is/.test(e.detail));
+  assert.throws(
+    () => validateImage({ dataUrl: huge, bytes: 10 }),
+    (e) => /the limit is/.test(e.detail),
+    "an undersized declaration must not admit an oversized payload",
+  );
+  // Raising it is still honoured, because that can only make the check stricter.
+  assert.throws(() => validateImage({ dataUrl: png(64), bytes: 20 * 1024 * 1024 }), (e) => /the limit is/.test(e.detail));
+});
+
+test("9.1 GATE: a payload must begin like the format it claims to be", () => {
+  // The declared type is a claim too. This is a cheap check rather than a
+  // decoder — it says the bytes start the way that format starts, which is what
+  // stops a document being handed to a vision provider as a picture.
+  const notAPng = "data:image/png;base64," + Buffer.from("%PDF-1.4 pretending").toString("base64");
+  assert.throws(() => validateImage({ dataUrl: notAPng }), (e) => /does not begin like a PNG/.test(e.detail));
+
+  // Each accepted type is recognised by its own signature.
+  const b64 = (bytes) => Buffer.concat([Buffer.from(bytes), Buffer.alloc(64, 0x41)]).toString("base64");
+  assert.equal(validateImage({ dataUrl: "data:image/jpeg;base64," + b64([0xff, 0xd8, 0xff]) }).mime, "image/jpeg");
+  assert.equal(validateImage({ dataUrl: "data:image/gif;base64," + b64([0x47, 0x49, 0x46, 0x38, 0x39, 0x61]) }).mime, "image/gif");
+  const webp = Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4, 0), Buffer.from("WEBP"), Buffer.alloc(64, 0x41)]);
+  assert.equal(validateImage({ dataUrl: "data:image/webp;base64," + webp.toString("base64") }).mime, "image/webp");
+  // RIFF that is not WEBP is not a WEBP.
+  const riffNotWebp = Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4, 0), Buffer.from("WAVE"), Buffer.alloc(64, 0x41)]);
+  assert.throws(() => validateImage({ dataUrl: "data:image/webp;base64," + riffNotWebp.toString("base64") }), (e) => /does not begin like a WEBP/.test(e.detail));
 });
