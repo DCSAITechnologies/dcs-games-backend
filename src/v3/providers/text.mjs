@@ -101,21 +101,65 @@ Hard rules:
 - Vary positions. Do not lay everything out on a grid or at the origin.
 Return JSON only.`;
 
+/**
+ * The boundary where a model's answer becomes this system's data.
+ *
+ * Exported because it IS the boundary: everything downstream trusts whatever
+ * comes out of here, so it is worth testing directly rather than only through a
+ * live HTTP call.
+ *
+ * This checked that `zones` and `structures` were ARRAYS and nothing about
+ * what was in them. Every lane downstream then reads the elements —
+ * `classifyLocally` reads `z.name`, `generateTerrainLocally` reads `z.bounds`
+ * and `s.position`, `behaviorsLocally` reads `n.position` — so a model
+ * answering `"zones": ["downtown","harbour"]` with strings instead of
+ * objects, or slipping one null into a list, took the whole generation down
+ * with a 500 from inside a lane's own fallback. Five ordinary model slips,
+ * five 500s, and the deterministic fallback that exists to prevent exactly
+ * that could not run because the bad data reached it too.
+ *
+ * Unusable rows are DROPPED rather than repaired: a zone that is the string
+ * "downtown" carries no bounds and inventing them would be making up the
+ * world. If too little survives to be a world, this returns null and the lane
+ * falls through to the local architect — a plainer world, which is the
+ * outcome the fallback exists to provide.
+ */
+export function parseArchitectPlan(t) {
+  const j = parseJsonLoose(t);
+  if (!j || !Array.isArray(j.zones) || !Array.isArray(j.structures)) return null;
+
+  const rows = (v) => (Array.isArray(v) ? v : []).filter(
+    (x) => x !== null && typeof x === "object" && !Array.isArray(x) && typeof x.id === "string" && x.id !== "",
+  );
+  const bounded = (z) => Array.isArray(z.bounds) && z.bounds.length === 4
+    && z.bounds.every((n) => typeof n === "number" && Number.isFinite(n))
+    && z.bounds[2] > z.bounds[0] && z.bounds[3] > z.bounds[1];
+
+  const plan = { ...j };
+  plan.zones = rows(j.zones).filter(bounded);
+  plan.structures = rows(j.structures);
+  plan.npcs = rows(j.npcs);
+  plan.items = rows(j.items);
+  plan.quests = rows(j.quests);
+  const dim = (v, d) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : d);
+  plan.size = { w: dim(j.size?.w, 260), h: dim(j.size?.h, 260) };
+
+  // A world needs somewhere to be and something to be there. Below that, the
+  // deterministic architect does a better job than a salvage of this would.
+  if (!plan.zones.length || !plan.structures.length) return null;
+  return plan;
+}
+
 export function architectAdapters(env = process.env) {
   const build = (req) =>
     `Design a world for this prompt: "${req.prompt}"\n` +
     (req.style ? `Requested style: ${req.style}\n` : "") +
     (req.constraints ? `Constraints: ${JSON.stringify(req.constraints)}\n` : "") +
     `Seed: ${req.seed ?? 0}. Make the layout specific to this prompt, not generic.`;
-  const parse = (t) => {
-    const j = parseJsonLoose(t);
-    if (!j || !Array.isArray(j.zones) || !Array.isArray(j.structures)) return null;
-    return j;
-  };
   return [
-    makeChatAdapter({ vendor: "deepseek", model: "deepseek-v4-pro", lane: LANES.WORLD_ARCHITECT, rank: 10, system: ARCHITECT_SYSTEM, build, parse, temperature: 0.8, maxTokens: 8000, env }),
-    makeChatAdapter({ vendor: "together", model: "zai-org/GLM-5.3", lane: LANES.WORLD_ARCHITECT, rank: 20, system: ARCHITECT_SYSTEM, build, parse, temperature: 0.8, maxTokens: 8000, env }),
-    makeChatAdapter({ vendor: "cerebras", model: "gpt-oss-120b", lane: LANES.WORLD_ARCHITECT, rank: 30, system: ARCHITECT_SYSTEM, build, parse, temperature: 0.8, maxTokens: 6000, env }),
+    makeChatAdapter({ vendor: "deepseek", model: "deepseek-v4-pro", lane: LANES.WORLD_ARCHITECT, rank: 10, system: ARCHITECT_SYSTEM, build, parse: parseArchitectPlan, temperature: 0.8, maxTokens: 8000, env }),
+    makeChatAdapter({ vendor: "together", model: "zai-org/GLM-5.3", lane: LANES.WORLD_ARCHITECT, rank: 20, system: ARCHITECT_SYSTEM, build, parse: parseArchitectPlan, temperature: 0.8, maxTokens: 8000, env }),
+    makeChatAdapter({ vendor: "cerebras", model: "gpt-oss-120b", lane: LANES.WORLD_ARCHITECT, rank: 30, system: ARCHITECT_SYSTEM, build, parse: parseArchitectPlan, temperature: 0.8, maxTokens: 6000, env }),
     {
       name: "local:procedural-architect",
       lane: LANES.WORLD_ARCHITECT,

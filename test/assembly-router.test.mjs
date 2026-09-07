@@ -13,7 +13,7 @@ import { planWorldLocally, archetypeFor, rng } from "../src/v3/providers/local-p
 import { generateTerrainLocally } from "../src/v3/providers/spatial.mjs";
 import { resolveArchetype, buildAsset, ARCHETYPE_LIBRARY } from "../src/v3/providers/asset3d.mjs";
 import { mediaAdapters } from "../src/v3/providers/media.mjs";
-import { gameplayAdapters } from "../src/v3/providers/text.mjs";
+import { gameplayAdapters, parseArchitectPlan } from "../src/v3/providers/text.mjs";
 import { generateWorld } from "../src/cw2/generate.mjs";
 
 const OFFLINE = { DCS_PROVIDERS_OFFLINE: "1" };
@@ -377,4 +377,111 @@ test("B1 GATE: the deterministic gameplay fallback cannot be made to throw", asy
       assert.ok(out.behaviors.some((b) => b.id === i.behavior_ref), `${label}: an interaction triggering a behaviour it did not make`);
     }
   }
+});
+
+test("B1 GATE: a model's answer is checked row by row, not just array by array", () => {
+  // The boundary where a model's answer becomes this system's data checked that
+  // `zones` and `structures` were ARRAYS and nothing about what was in them.
+  // Every lane downstream reads the elements — classifyLocally reads `z.name`,
+  // generateTerrainLocally reads `z.bounds` and `s.position`, behaviorsLocally
+  // reads `n.position` — so five ordinary model slips produced five 500s, each
+  // thrown from inside a lane's own deterministic fallback, which could not save
+  // the request because the bad data had reached it too.
+  const j = (o) => JSON.stringify(o);
+  const goodZone = { id: "z", name: "Z", bounds: [0, 0, 120, 120] };
+
+  // Too little survives to be a world: fall through to the local architect.
+  for (const [label, text] of Object.entries({
+    "zones are strings": j({ title: "T", zones: ["downtown", "harbour"], structures: [{ id: "s" }] }),
+    "every structure is null": j({ title: "T", zones: [goodZone], structures: [null] }),
+    "a zone with no bounds": j({ title: "T", zones: [{ id: "z" }], structures: [{ id: "s" }] }),
+    "a zone whose bounds are inside out": j({ title: "T", zones: [{ id: "z", bounds: [10, 10, 0, 0] }], structures: [{ id: "s" }] }),
+    "bounds that are not numbers": j({ title: "T", zones: [{ id: "z", bounds: [0, 0, "wide", null] }], structures: [{ id: "s" }] }),
+    "a zone with no id": j({ title: "T", zones: [{ bounds: [0, 0, 64, 64] }], structures: [{ id: "s" }] }),
+    "not JSON at all": "sorry, I cannot do that",
+  })) {
+    assert.equal(parseArchitectPlan(text), null, `${label}: should fall through to the deterministic architect`);
+  }
+
+  // Enough survives: keep the good rows, drop the rest, coerce the size.
+  const salvaged = parseArchitectPlan(j({
+    title: "T", size: { w: "large", h: null },
+    zones: [null, goodZone, "harbour"],
+    structures: [{ id: "s" }, null, 7],
+    npcs: "lots of them",
+    items: [{ id: "i" }, {}],
+  }));
+  assert.ok(salvaged, "a plan with one good zone and one good structure is a plan");
+  assert.deepEqual(salvaged.zones.map((z) => z.id), ["z"]);
+  assert.deepEqual(salvaged.structures.map((s) => s.id), ["s"]);
+  assert.deepEqual(salvaged.npcs, [], "a collection that is not a list becomes an empty one");
+  assert.deepEqual(salvaged.items.map((i) => i.id), ["i"], "a row with no id is not an entity");
+  assert.deepEqual(salvaged.size, { w: 260, h: 260 }, "a size that is not a size falls back to the default");
+
+  // A good plan passes through unchanged, so this is a gate and not a rewrite.
+  const good = parseArchitectPlan(j({ title: "T", size: { w: 300, h: 200 }, zones: [goodZone], structures: [{ id: "s" }], npcs: [{ id: "n" }] }));
+  assert.deepEqual(good.zones, [goodZone]);
+  assert.deepEqual(good.size, { w: 300, h: 200 });
+  assert.deepEqual(good.npcs.map((n) => n.id), ["n"]);
+});
+
+test("B1 GATE: the deterministic terrain generator cannot be handed a size it chokes on", () => {
+  // `Math.round("large")` is NaN and `Math.max(64, NaN)` is NaN, which reached
+  // `new Array(NaN)` as a RangeError — thrown by the one adapter in the spatial
+  // lane that has nothing behind it.
+  for (const size of [{ w: "large", h: null }, { w: NaN, h: Infinity }, { w: 0, h: 0 }, { w: -400, h: -400 }, undefined, null]) {
+    const out = generateTerrainLocally({ seed: 1, size, zones: [{ id: "z", bounds: [0, 0, 64, 64] }], roads: [], structures: [] });
+    assert.ok(out.terrain?.size?.w > 0 && out.terrain?.size?.h > 0, `size ${JSON.stringify(size)} produced ${JSON.stringify(out.terrain?.size)}`);
+    assert.ok(Array.isArray(out.terrain.data) && out.terrain.data.length, "there must be real ground");
+    assert.doesNotMatch(JSON.stringify(out.terrain.size), /null|NaN/);
+  }
+  // A real size is still honoured.
+  const real = generateTerrainLocally({ seed: 1, size: { w: 300, h: 200 }, zones: [], roads: [], structures: [] });
+  assert.deepEqual(real.terrain.size, { w: 300, h: 200 });
+});
+
+test("B1 GATE: a repeated id from a provider becomes one entity, not an invalid world", async () => {
+  // Assets, behaviours and quests already dropped a repeat. Zones, structures,
+  // NPCs, items, interactions and quest steps did not, and a model repeating an
+  // id is an ordinary slip. The result was a manifest the schema rejects for
+  // `duplicate zone id` — and duplicate-id findings come from the schema, which
+  // carries no `fix`, so nothing downstream could repair it and the generation
+  // failed outright with an error naming a file the creator never wrote.
+  const repeated = (n) => Array.from({ length: n }, () => ({
+    id: "same", name: "Same", bounds: [0, 0, 80, 80],
+    archetype: "hall", position: { x: 10, y: 0, z: 10 }, kind: "prop",
+  }));
+  const plan = {
+    title: "T", size: { w: 200, h: 200 },
+    zones: repeated(4), structures: repeated(4), npcs: repeated(4), items: repeated(4),
+    quests: [{ id: "q", title: "Q", steps: [{ id: "s1", kind: "talk", target: "same" }, { id: "s1", kind: "talk", target: "same" }] }],
+  };
+
+  const r = router();
+  r.lanes[LANES.WORLD_ARCHITECT].adapters = [
+    {
+      name: "repeats-itself", lane: LANES.WORLD_ARCHITECT, rank: -1, isFallback: false, model: null,
+      async status() { return STATUS.AVAILABLE; },
+      async invoke() { return structuredClone(plan); },
+    },
+    ...r.lanes[LANES.WORLD_ARCHITECT].adapters,
+  ];
+
+  const m = (await r.assemble({ prompt: "a port town", worldId: "w_dup", creatorId: "u1", seed: 1 })).manifest;
+  const v = validateManifest(m);
+  assert.ok(v.ok, `the router must not compose an invalid manifest: ${JSON.stringify(v.errors.slice(0, 3))}`);
+
+  for (const c of ["zones", "assets", "structures", "npcs", "items", "quests", "behaviors", "interactions"]) {
+    const ids = (m[c] || []).map((x) => x.id);
+    assert.equal(new Set(ids).size, ids.length, `${c} carries a duplicate id: ${ids.join(", ")}`);
+  }
+  for (const q of m.quests) {
+    const stepIds = (q.steps || []).map((s) => s.id);
+    assert.equal(new Set(stepIds).size, stepIds.length, `quest ${q.id} carries a duplicate step id`);
+  }
+
+  // The FIRST of each repeated id is the one that survives — the rule the
+  // collections that already deduped were using.
+  assert.equal(m.zones.filter((z) => z.id === "same").length, 1);
+  assert.equal(m.structures.filter((s) => s.id === "same").length, 1);
 });

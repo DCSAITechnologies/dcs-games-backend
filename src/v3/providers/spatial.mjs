@@ -64,7 +64,14 @@ function valueNoise2D(seed) {
  * navigation graph. Everything is deterministic in `seed`.
  */
 export function generateTerrainLocally(req = {}) {
-  const size = { w: Math.max(64, Math.round(req.size?.w || 260)), h: Math.max(64, Math.round(req.size?.h || 260)) };
+  // Belt and braces at the fallback itself. `Math.round("large")` is NaN and
+  // `Math.max(64, NaN)` is NaN, which reached `new Array(NaN)` as a RangeError —
+  // thrown by the one adapter in this lane that has nothing behind it.
+  const dim = (v, d) => {
+    const n = Math.round(Number(v));
+    return Number.isFinite(n) && n > 0 ? Math.max(64, n) : d;
+  };
+  const size = { w: dim(req.size?.w, 260), h: dim(req.size?.h, 260) };
   const seed = req.seed ?? hashString(JSON.stringify(size));
   const noise = valueNoise2D(seed);
 

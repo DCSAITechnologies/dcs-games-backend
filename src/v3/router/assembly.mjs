@@ -221,8 +221,18 @@ function compose({ req, plan, meta, spatial, assets, gameplay, seed, provenance 
 
   // ---- zones ---------------------------------------------------------------
   const zoneById = new Map();
+  // First entity of each id wins, throughout.
+  //
+  // Assets, behaviours and quests already dropped a repeat; zones, structures,
+  // NPCs, items, interactions and quest steps did not, and a model repeating an
+  // id is an ordinary slip. The result was a manifest the schema rejects for
+  // `duplicate zone id` — and duplicate-id findings come from the schema, which
+  // carries no `fix`, so nothing downstream could repair it and the generation
+  // simply failed. Between an ambiguous pair there is no better rule than the
+  // first, which is what the collections that already deduped were doing.
   m.zones = (plan.zones || []).map((z, i) => {
     const id = slug(z.id || z.name, `zone_${i}`);
+    if (zoneById.has(id)) return null;
     const b = Array.isArray(z.bounds) && z.bounds.length === 4 ? z.bounds.map((n) => num(n)) : [0, 0, size.w, size.h];
     const bounds = [
       clamp(Math.min(b[0], b[2]), 0, size.w - 2),
@@ -239,7 +249,7 @@ function compose({ req, plan, meta, spatial, assets, gameplay, seed, provenance 
     };
     zoneById.set(id, zone);
     return zone;
-  });
+  }).filter(Boolean);
   if (!m.zones.length) {
     const zone = { id: "zone_main", name: "Main", kind: "district", bounds: [0, 0, size.w, size.h], parent_zone: null, tags: [], ambience: null, density: 0.5 };
     m.zones = [zone];
@@ -269,6 +279,7 @@ function compose({ req, plan, meta, spatial, assets, gameplay, seed, provenance 
   m.structures = (plan.structures || []).map((s, i) => {
     const zone = pickZone(s.zone, i);
     const id = slug(s.id, `struct_${i}`);
+    if (structById.has(id)) return null;
     const fp = s.footprint || { w: 8, d: 8, h: 6 };
     const ref = assetFor(s.archetype, "building");
     const st = {
@@ -287,13 +298,14 @@ function compose({ req, plan, meta, spatial, assets, gameplay, seed, provenance 
     };
     structById.set(id, st);
     return st;
-  }).filter((s) => s.asset_ref);
+  }).filter((s) => s && s.asset_ref);
 
   // ---- npcs ----------------------------------------------------------------
   const npcById = new Map();
   m.npcs = (plan.npcs || []).map((n, i) => {
     const zone = pickZone(n.zone, i);
     const id = slug(n.id, `npc_${i}`);
+    if (npcById.has(id)) return null;
     const npc = {
       id, name: n.name || id, role: n.role || null, zone: zone.id,
       spawn: inZone(n.position || n.spawn, zone),
@@ -304,16 +316,17 @@ function compose({ req, plan, meta, spatial, assets, gameplay, seed, provenance 
     };
     npcById.set(id, npc);
     return npc;
-  }).filter((n) => n.asset_ref);
+  }).filter((n) => n && n.asset_ref);
 
   // ---- items ---------------------------------------------------------------
   const itemById = new Map();
   m.items = (plan.items || []).map((it, i) => {
     const id = slug(it.id, `item_${i}`);
+    if (itemById.has(id)) return null;
     const item = { id, name: it.name || id, kind: it.kind || "misc", asset_ref: assetFor(it.kind, "prop"), stackable: false, effects: [] };
     itemById.set(id, item);
     return item;
-  }).filter((it) => it.asset_ref);
+  }).filter((it) => it && it.asset_ref);
 
   const resolves = (ref) => {
     const r = slug(ref, "");
@@ -329,12 +342,16 @@ function compose({ req, plan, meta, spatial, assets, gameplay, seed, provenance 
     return { id, kind: BEHAVIOR_KIND(b.kind), spec: b.spec || null, script: null, inputs: b.inputs || null, outputs: b.outputs || null };
   }).filter(Boolean);
 
+  const interactionIds = new Set();
   m.interactions = (gameplay.interactions || []).map((x, i) => {
     const target = resolves(x.target_ref);
     const beh = slug(x.behavior_ref, "");
     // Drop rather than repair: a dangling interaction is a real gap and B4 must see it.
     if (!target || !behaviorIds.has(beh)) return null;
-    return { id: slug(x.id, `interaction_${i}`), trigger: TRIGGER(x.trigger), target_ref: target, behavior_ref: beh, params: x.params || null };
+    const id = slug(x.id, `interaction_${i}`);
+    if (interactionIds.has(id)) return null;
+    interactionIds.add(id);
+    return { id, trigger: TRIGGER(x.trigger), target_ref: target, behavior_ref: beh, params: x.params || null };
   }).filter(Boolean);
 
   // Attach behaviours to their NPCs so the runtime does not have to search.
@@ -349,10 +366,13 @@ function compose({ req, plan, meta, spatial, assets, gameplay, seed, provenance 
     const id = slug(q.id, `quest_${i}`);
     if (questIds.has(id)) return null;
     questIds.add(id);
+    const stepIds = new Set();
     const steps = (q.steps || []).map((st, j) => {
-      const target = resolves(st.target);
-      return { id: slug(st.id, `step_${j}`), kind: STEP_KIND(st.kind), target, description: st.description || null };
-    });
+      const sid = slug(st.id, `step_${j}`);
+      if (stepIds.has(sid)) return null;
+      stepIds.add(sid);
+      return { id: sid, kind: STEP_KIND(st.kind), target: resolves(st.target), description: st.description || null };
+    }).filter(Boolean);
     return {
       id, title: q.title || `Quest ${i + 1}`,
       giver_npc: npcById.has(slug(q.giver_npc, "")) ? slug(q.giver_npc, "") : null,
