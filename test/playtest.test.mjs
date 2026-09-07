@@ -1067,11 +1067,14 @@ test("B4 GATE: a repair never deletes an entity a player is recorded as holding"
     { id: "quest_not_completable", severity: "blocker", where: doneQuest, fix: "drop_quest" },
   ];
 
-  // Without live state the repair is exactly as destructive as it always was —
-  // the guard is opt-in, not a silent change of behaviour.
+  // Without live state, only what the manifest can say for itself is protected.
+  // The structure carries `owner_id`, so it survives on that evidence alone
+  // (see the property test below). A completed quest carries no owner field —
+  // "I finished this" lives in the player's record, not the world's — so
+  // nothing but live state can protect it, and that is the gap this closes.
   const blind = repair(structuredClone(m), findings);
-  assert.equal(blind.manifest.structures.some((s) => s.id === owned.id), false);
-  assert.equal(blind.manifest.quests.some((q) => q.id === doneQuest), false);
+  assert.ok(blind.manifest.structures.some((s) => s.id === owned.id), "owner_id alone must protect the structure");
+  assert.equal(blind.manifest.quests.some((q) => q.id === doneQuest), false, "nothing in the manifest records that a quest was completed");
 
   // With it, neither is touched, and the refusal says why.
   const guarded = repair(structuredClone(m), findings, { liveState });
@@ -1420,4 +1423,46 @@ test("B4 GATE: a PASS means the world is genuinely playable, on every damage the
     }
   }
   assert.deepEqual(lies, [], `the gate passed worlds that are not playable:\n  ${lies.join("\n  ")}`);
+});
+
+test("B4 GATE: a repair never deletes a player's property, with or without live state", async () => {
+  // The live-state guard needs a caller to supply live state, and the generate
+  // path has none to give. `owner_id` is written INTO the manifest on every
+  // ownable collection — the generator writes null and only a real transfer
+  // writes a principal — so a structure with an owner is a player's property on
+  // the evidence of the world alone. That makes this the guard that holds on
+  // every path today rather than only where a caller remembers to arm it.
+  const base = await goodWorld("Property Probe", "w_property");
+
+  const owned = structuredClone(base);
+  owned.structures[0].owner_id = "player_42";
+  const ownedId = owned.structures[0].id;
+  owned.assets = owned.assets.filter((a) => a.id !== owned.structures[0].asset_ref);
+
+  const r = repair(owned, [{ id: "missing_asset", severity: "blocker", where: ownedId, fix: "drop_or_substitute" }]);
+  assert.ok(r.manifest.structures.some((s) => s.id === ownedId), "a player's building was deleted to clear a finding");
+  assert.match(r.skipped.find((x) => x.where === ownedId)?.why || "", /belongs to a player/);
+
+  // The guard must be about ownership, not about refusing to repair: an
+  // unowned structure with the same defect is still removed.
+  const free = structuredClone(base);
+  const freeId = free.structures[0].id;
+  free.assets = free.assets.filter((a) => a.id !== free.structures[0].asset_ref);
+  const r2 = repair(free, [{ id: "missing_asset", severity: "blocker", where: freeId, fix: "drop_or_substitute" }]);
+  assert.ok(!r2.manifest.structures.some((s) => s.id === freeId), "an unowned broken structure must still be dropped");
+
+  // It covers every collection that can carry an owner.
+  for (const [collection, mutate] of [
+    ["npcs", (m) => { m.npcs[0].owner_id = "player_9"; return m.npcs[0].id; }],
+    ["items", (m) => { m.items[0].owner_id = "player_9"; return m.items[0].id; }],
+    ["behaviors", (m) => { m.behaviors[0].owner_id = "player_9"; return m.behaviors[0].id; }],
+  ]) {
+    const m = structuredClone(base);
+    const id = mutate(m);
+    const out = repair(m, [
+      { id: "missing_asset", severity: "blocker", where: id, fix: "drop_or_substitute" },
+      { id: "orphan_behavior", severity: "minor", where: id, fix: "wire_or_drop" },
+    ]);
+    assert.ok((out.manifest[collection] || []).some((e) => e.id === id), `a player's ${collection} entry was deleted`);
+  }
 });

@@ -280,7 +280,27 @@ export function repair(manifest, findings, { liveState = null } = {}) {
   const applied = [];
   const skipped = [];
   const held = heldIds(liveState);
-  const heldNote = (id) => `'${id}' is held by a player (owned, carried, completed or remembered); a repair may not delete it`;
+
+  /**
+   * An entity carrying an owner is owned, and the manifest says so itself.
+   *
+   * The live-state guard above needs a caller to supply live state, and the
+   * generate path has none to give. But `owner_id` is written INTO the manifest
+   * on every ownable collection — the generator writes null and only a real
+   * transfer writes a principal — so a structure with an owner is a player's
+   * property on the evidence of the world alone, with nothing to pass in.
+   *
+   * This is the guard that works on every path today rather than only where a
+   * caller remembers to arm it.
+   */
+  const owned = new Set(
+    ["structures", "items", "npcs", "behaviors"]
+      .flatMap((c) => (m[c] || []).filter((e) => e?.owner_id != null).map((e) => e.id)),
+  );
+  const protectedFrom = (id) => (held.has(id) ? "held" : owned.has(id) ? "owned" : null);
+  const heldNote = (id) => (protectedFrom(id) === "owned"
+    ? `'${id}' belongs to a player (owner_id is set); a repair may not delete someone's property to clear a finding`
+    : `'${id}' is held by a player (owned, carried, completed or remembered); a repair may not delete it`);
 
   const byId = (arr, id) => (arr || []).find((x) => x.id === id);
 
@@ -523,7 +543,7 @@ export function repair(manifest, findings, { liveState = null } = {}) {
         // patched with an invented target. A world with fewer real quests beats
         // a world with a quest that lies.
         const qid = String(f.where).split(".")[0];
-        if (held.has(qid)) { skipped.push({ ...f, why: heldNote(qid) }); break; }
+        if (protectedFrom(qid)) { skipped.push({ ...f, why: heldNote(qid) }); break; }
         const before = m.quests.length;
         m.quests = m.quests.filter((q) => q.id !== qid);
         if (m.quests.length < before) applied.push({ fix: "drop_quest", target: qid, note: "removed rather than fabricating a target" });
@@ -532,7 +552,7 @@ export function repair(manifest, findings, { liveState = null } = {}) {
       }
       case "drop_or_substitute": {
         const id = f.where;
-        if (held.has(id)) { skipped.push({ ...f, why: heldNote(id) }); break; }
+        if (protectedFrom(id)) { skipped.push({ ...f, why: heldNote(id) }); break; }
         const beforeS = m.structures.length, beforeN = m.npcs.length;
         m.structures = m.structures.filter((s) => s.id !== id);
         m.npcs = m.npcs.filter((n) => n.id !== id);
@@ -541,7 +561,7 @@ export function repair(manifest, findings, { liveState = null } = {}) {
         break;
       }
       case "wire_or_drop": {
-        if (held.has(f.where)) { skipped.push({ ...f, why: heldNote(f.where) }); break; }
+        if (protectedFrom(f.where)) { skipped.push({ ...f, why: heldNote(f.where) }); break; }
         // Two findings share this fix and they mean different things, so only
         // one of them can go stale.
         //
@@ -923,7 +943,7 @@ export function repair(manifest, findings, { liveState = null } = {}) {
     if (q.giver_npc && !npcIds.has(q.giver_npc)) q.giver_npc = null;
     // A quest a player has finished stays, even with nothing left to do in it:
     // deleting it would erase their record of having done it.
-    if (!q.steps.length && !held.has(q.id)) { droppedQuests.push(q.id); return false; }
+    if (!q.steps.length && !protectedFrom(q.id)) { droppedQuests.push(q.id); return false; }
     return true;
   });
   if (prunedSteps) applied.push({ fix: "prune_dangling_quest_steps", removed: prunedSteps });
