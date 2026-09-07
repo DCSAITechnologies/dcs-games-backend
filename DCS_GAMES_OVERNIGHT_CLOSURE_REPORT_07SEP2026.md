@@ -607,3 +607,45 @@ never in scope for this session.
 The final call is the founder's. I have tried to make the evidence for it
 complete enough that the call can be made from the report rather than from
 trust.
+
+---
+
+## 20. Cold rebuild from what is banked
+
+`scripts/reproduce.mjs` clones the banked SHAs into a fresh temporary tree,
+installs as a new machine would, builds the database from the migration chain
+into a scratch database it creates and drops, and runs every suite package.json
+declares. It reads nothing from this working tree — not the checkout, not its
+node_modules, not its .dcs-data, not its .env. A green run is only meaningful if
+none of this machine's accumulated state could have contributed to it.
+
+**9 of 11 steps passed, in 13m48s.**
+
+| step | result |
+| --- | --- |
+| preflight | PASS |
+| clone backend | PASS |
+| clone frontend | PASS |
+| npm install | PASS |
+| database from migrations | PASS — chain linear, 13 recorded, schema v13, 54 tables |
+| test:unit | PASS — 1008 / 1008, 0 skipped |
+| test:api | PASS — 126 / 126, 0 skipped |
+| test:browser | **FAIL — 98 tests, 92 pass, 6 fail** |
+| test:e2e | PASS — 12 / 12 |
+| test:load | **FAIL — 6 tests, 5 pass, 1 fail** |
+| test:unit:tsx | PASS — 24 / 24 |
+
+The two failures are the deliberate reds already described in §13: the frontend
+accessibility set and the discovery scaling shape. **Every other suite passes
+from a clean clone on a scratch database**, which is the claim this step exists
+to make.
+
+This run also found something worth recording. The first two attempts failed at
+`clone backend` with *"banked SHA not reachable"* — because the reproduction
+clones from the PRIVATE mirror while the session's commits had been going to
+`origin`, and **the mirror was two commits behind**. The banking requirement was
+not actually met at that moment, and nothing else would have told us: every
+push reported success, both remotes existed, and the branch name matched on
+both. The cold rebuild is the only thing in the estate that reads from the
+banked copy rather than the working one, which is precisely why it is worth
+running. Both remotes are now in sync.
