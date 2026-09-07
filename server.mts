@@ -775,8 +775,39 @@ const server = http.createServer(async (req, res) => {
 
     if (url === "/worlds/mine" && method === "GET") {
       const me = await mustBe(req, cid);                       // A1: 401 when unauthenticated
-      const rows = await supaGet("dcsgames_base_worlds?owner_id=eq." + encodeURIComponent(me.id) + "&select=*&limit=50");
-      return send(res, 200, { ok: true, count: rows.length, worlds: rows, owner: me.id });
+      // ORDERED, and honest about the page.
+      //
+      // This asked PostgREST for fifty rows with no `order`, so the database
+      // returned them in whatever order it liked — in practice oldest first —
+      // and the fiftieth world silently pushed the NEWEST one off the end. The
+      // creator's own list stopped containing the world they had just made,
+      // which is the one thing that list exists to do. It passed all day
+      // because the account had fewer than fifty worlds; it broke the moment it
+      // crossed the page size, with no code change.
+      // Through the REPOSITORY, which is the store this deployment actually
+      // uses, and which sorts newest-first.
+      //
+      // It went straight to PostgREST with `limit=50` and no `order`, which was
+      // two defects at once. The database returned rows in whatever order it
+      // liked — in practice oldest first — so the fiftieth world silently
+      // pushed the NEWEST one off the end, and the creator's own list stopped
+      // containing the world they had just made. It passed all day because the
+      // account had fewer than fifty worlds and broke the moment it crossed the
+      // page size, with no code change to point at.
+      //
+      // And on any deployment without Supabase the query returned NOTHING, so a
+      // creator was shown an empty list while their worlds sat on disk. Every
+      // other world read goes through the repository; this one did not.
+      const PAGE = 50;
+      const rows = await repo.listOwned(me.id, PAGE);
+      return send(res, 200, {
+        ok: true, count: rows.length, worlds: rows, owner: me.id,
+        // `count` is a page size, not a total, and saying so is the difference
+        // between a listing and a claim about how many worlds someone owns.
+        page_limit: PAGE,
+        complete: rows.length < PAGE,
+        note: rows.length >= PAGE ? "the most recent " + PAGE + " worlds, newest first — not a total" : undefined,
+      });
     }
     if (url === "/me/revenue" && method === "GET") {
       // RETIRED. This answered 200 with hard-coded zeros and a 70/30 split that

@@ -523,3 +523,32 @@ test("MARKETPLACE GATE: a storefront needs a real name", async () => {
     assert.equal(r.status, 422, `name ${JSON.stringify(name)} must be refused`);
   }
 });
+
+test("LISTING GATE: the creator's own list is newest-first and contains what they just made", async () => {
+  // /worlds/mine asked PostgREST for fifty rows with no `order`, so the newest
+  // world was pushed off the end once the account crossed the page size. The
+  // creator's own list stopped containing the world they had just created,
+  // which is the one thing it exists to do — and no code change was involved,
+  // so nothing pointed at it.
+  const made = [];
+  for (let i = 0; i < 3; i++) {
+    const { worldId } = await validManifest();
+    made.push(worldId);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+
+  const b = await (await call(TESTER, "GET", "/worlds/mine")).json();
+  assert.equal(b.ok, true);
+  const ids = (b.worlds || []).map((w) => w.world_id);
+  assert.ok(ids.includes(made[made.length - 1]), "the world just created must be in the creator's own list");
+
+  // Newest first, so a page boundary drops the OLDEST rather than the newest.
+  const stamps = (b.worlds || []).map((w) => String(w.updated_at || ""));
+  for (let i = 1; i < stamps.length; i++) {
+    assert.ok(stamps[i - 1] >= stamps[i], `not ordered newest-first at row ${i}: ${stamps[i - 1]} then ${stamps[i]}`);
+  }
+
+  // And `count` is a page size, not a claim about how many worlds are owned.
+  assert.equal(typeof b.page_limit, "number");
+  assert.equal(b.complete, b.worlds.length < b.page_limit);
+});
