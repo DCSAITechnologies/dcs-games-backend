@@ -406,8 +406,8 @@ const server = http.createServer(async (req, res) => {
         // it out of the inventory made it look retired when it is not.
         world_v2: ["POST /worlds/generate", "GET /worlds/mine", "GET /worlds/:id/manifest", "POST /worlds/:id/save", "GET /worlds/:id/load", "POST /worlds/:id/publish"],
         world: ["POST /v3/worlds/generate", "POST /v3/worlds/generate/async", "GET /v3/worlds/:id/manifest", "POST /v3/worlds/:id/playtest", "POST /v3/worlds/:id/expand", "POST /v3/worlds/:id/edit", "POST /v3/worlds/:id/stitch", "POST /v3/worlds/:id/fork", "GET /v3/worlds/:id/versions", "POST /v3/worlds/:id/rollback", "GET /v3/worlds/:id/diff", "GET /v3/worlds/:id/memory", "POST /v3/worlds/:id/companion", "POST /v3/worlds/:id/media", "GET /v3/worlds/:id/attribution", "GET /v3/worlds/:id/parts", "POST /v3/worlds/:id/quests/generate", "POST /v3/worlds/:id/stitch/preview", "GET /v3/worlds/:id/versions/:n", "GET /v3/worlds/:id/npcs/:npc/memory"],
-        discovery: ["GET /v3/discover", "GET /api/public/worlds", "POST /v3/worlds/:id/play", "POST /v3/worlds/:id/rate", "GET /v3/worlds/:id/stats"],
-        identity: ["POST /auth/signup", "POST /auth/login", "GET /me/profile", "GET /me/achievements", "GET /me/streak", "GET /me/dashboard", "GET /profiles/:username", "GET /verify/status", "POST /verify/:channel/start", "POST /verify/:channel/confirm"],
+        discovery: ["GET /v3/discover", "GET /api/public/worlds", "GET /api/public/stats", "POST /v3/worlds/:id/play", "POST /v3/worlds/:id/rate", "GET /v3/worlds/:id/stats"],
+        identity: ["POST /auth/signup", "POST /auth/login", "GET /me/home", "GET /me/profile", "GET /me/achievements", "GET /me/streak", "GET /me/dashboard", "GET /profiles/:username", "GET /verify/status", "POST /verify/:channel/start", "POST /verify/:channel/confirm"],
         social: ["GET /social/friends", "POST /social/friends/accept", "GET /social/parties", "GET /social/teams", "POST /social/studios", "GET /social/orgs", "GET /social/orgs/:id", "POST /social/orgs/:id/members", "DELETE /social/orgs/:id/members", "POST /social/orgs/:id/seats", "GET /social/parties/:id", "POST /social/parties/:id/join", "POST /social/parties/:id/leave", "GET /social/studios/:id", "POST /social/studios/:id/members", "POST /social/studios/:id/split", "GET /social/teams/:id", "POST /social/teams/:id/members", "DELETE /social/teams/:id/members"],
         marketplace: ["GET /v3/marketplace", "GET /v3/marketplace/split", "POST /v3/marketplace/storefronts", "POST /v3/marketplace/listings", "DELETE /v3/marketplace/listings/:id", "POST /v3/marketplace/listings/:id/acquire", "GET /v3/marketplace/owned", "GET /v3/marketplace/ledger", "GET /v3/marketplace/assert-dark"],
         subscriptions: ["GET /v3/subscriptions/plans", "POST /v3/subscriptions/subscribe", "POST /v3/subscriptions/grant", "POST /v3/subscriptions/revoke", "GET /v3/subscriptions/grants", "GET /v3/subscriptions/assert-dark", "GET /me/subscription", "GET /me/entitlements"],
@@ -455,6 +455,77 @@ const server = http.createServer(async (req, res) => {
       const worlds = await repo.listPublished(50);
       return send(res, 200, { ok: true, count: worlds.length, worlds, source: repo.kind });
     }
+    // Public platform figures, MEASURED.
+    //
+    // The site called /api/public/stats and nothing served it, so every page
+    // showing a platform number fell back to the bundled SEED sample set. That
+    // is the exact failure assets/dcs-truth.js was written to prevent after a
+    // forensic audit found the site asserting $1.5M paid to creators, 842,000
+    // items sold and 12.4M players — figures no system had ever measured.
+    //
+    // Every number here is counted from the store at request time. There is no
+    // branch that estimates, projects or rounds up, and a platform with nothing
+    // on it answers zero rather than something encouraging. `measured_at` and
+    // `source` are included so a caller can tell a real count from a cache.
+    if (url === "/api/public/stats" && method === "GET") {
+      const published = await repo.listPublished(1000);
+      const statsFor = await social._statsIndex();
+      let plays = 0, seconds = 0, rated = 0;
+      const creators = new Set<string>();
+      for (const w of published) {
+        if (w.owner_id) creators.add(String(w.owner_id));
+        const st: any = statsFor(w.world_id);
+        plays += st.plays || 0;
+        seconds += st.total_seconds || 0;
+        rated += st.rating_count || 0;
+      }
+      return send(res, 200, {
+        ok: true,
+        published_worlds: published.length,
+        creators_with_a_published_world: creators.size,
+        plays,
+        play_seconds: seconds,
+        ratings: rated,
+        // Deliberately ABSENT: a platform-wide unique player count. The stats
+        // index exposes unique players per world, and summing that across
+        // worlds counts anyone who played two of them twice. A number labelled
+        // "unique players" that is not unique is exactly the kind of figure the
+        // truth layer exists to keep off this site, and no number is better
+        // than a wrong one.
+        unique_players: null,
+        unique_players_note: "not counted platform-wide; summing per-world uniques would double-count anyone who played more than one world",
+        // Said plainly: these are counts of what exists, not projections, and
+        // the listing they are counted over is capped.
+        basis: "counted from the world store and measured play/rating records at request time",
+        counted_over: Math.min(published.length, 1000),
+        measured_at: new Date().toISOString(),
+        source: repo.kind,
+      });
+    }
+
+    // The signed-in landing page, from the caller's own real records.
+    // Reached as /api/me/home too: server.mts:375 rewrites /api/* to /* for
+    // everything except /api/public/*, so this is the one canonical path.
+    if (url === "/me/home" && method === "GET") {
+      const me = await mustBe(req, cid);
+      const [mine, profile] = await Promise.all([
+        repo.listOwned(me.id, 50),
+        social.me(me).catch(() => null),
+      ]);
+      const statsFor = await social._statsIndex();
+      let plays = 0;
+      for (const w of mine) plays += (statsFor(w.world_id) as any)?.plays || 0;
+      return send(res, 200, {
+        ok: true,
+        principal_id: me.id,
+        profile,
+        worlds: { total: mine.length, published: mine.filter((w: any) => w.state === "published").length, drafts: mine.filter((w: any) => w.state !== "published").length },
+        plays_of_my_worlds: plays,
+        recent: mine.slice(0, 8).map((w: any) => ({ world_id: w.world_id, title: w.title, state: w.state, version: w.version, updated_at: w.updated_at })),
+        measured_at: new Date().toISOString(),
+      });
+    }
+
     if (url === "/worlds/mine" && method === "GET") {
       const me = await mustBe(req, cid);                       // A1: 401 when unauthenticated
       const rows = await supaGet("dcsgames_base_worlds?owner_id=eq." + encodeURIComponent(me.id) + "&select=*&limit=50");

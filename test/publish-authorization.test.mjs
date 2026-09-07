@@ -236,3 +236,74 @@ test("CONSENT: a parental consent request is attributed to the caller, not a bod
   });
   assert.equal(other.status, 403, "there is no verified guardian relationship to authorise that");
 });
+
+// ---------------------------------------- measured platform figures
+
+test("TRUTH GATE: platform stats are counted, and an empty platform says zero", async () => {
+  // The site called /api/public/stats and nothing served it, so every page
+  // showing a platform number fell back to the bundled SEED sample set. That is
+  // the exact failure assets/dcs-truth.js was written to prevent, after a
+  // forensic audit found the site asserting $1.5M paid to creators, 842,000
+  // items sold and 12.4M players — figures no system had ever measured.
+  const r = await call(null, "GET", "/api/public/stats");
+  const b = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(b).slice(0, 200));
+
+  for (const k of ["published_worlds", "creators_with_a_published_world", "plays", "play_seconds", "ratings"]) {
+    assert.equal(typeof b[k], "number", `${k} must be a real count`);
+    assert.ok(b[k] >= 0);
+  }
+  assert.ok(b.measured_at, "and must say when it was counted");
+  assert.match(b.basis, /counted from/, "and on what basis");
+});
+
+test("TRUTH GATE: no platform-wide unique player count is invented", async () => {
+  // The stats index exposes unique players PER WORLD. Summing that across
+  // worlds counts anyone who played two of them twice, and a number labelled
+  // "unique players" that is not unique is exactly what the truth layer exists
+  // to keep off this site. No number beats a wrong one.
+  const b = await (await call(null, "GET", "/api/public/stats")).json();
+  assert.equal(b.unique_players, null);
+  assert.match(b.unique_players_note, /double-count/);
+});
+
+test("TRUTH GATE: the figures move only when something real happens", async () => {
+  const before = await (await call(null, "GET", "/api/public/stats")).json();
+  const { worldId } = await validManifest();
+
+  const stillDraft = await (await call(null, "GET", "/api/public/stats")).json();
+  assert.equal(stillDraft.published_worlds, before.published_worlds,
+    "generating a draft must not move a PUBLISHED count");
+
+  assert.equal((await call(TESTER, "POST", `/worlds/${worldId}/publish`, {})).status, 200);
+  const after = await (await call(null, "GET", "/api/public/stats")).json();
+  assert.equal(after.published_worlds, before.published_worlds + 1, "publishing moves it by exactly one");
+
+  const beforePlays = after.plays;
+  assert.ok([200, 201].includes((await call(TESTER, "POST", `/v3/worlds/${worldId}/play`, {})).status));
+  const played = await (await call(null, "GET", "/api/public/stats")).json();
+  assert.equal(played.plays, beforePlays + 1, "a play is one play");
+});
+
+test("HOME: the signed-in landing data is the caller's own, and needs a caller", async () => {
+  assert.equal((await call(null, "GET", "/me/home")).status, 401);
+
+  const { worldId } = await validManifest();
+  const b = await (await call(TESTER, "GET", "/me/home")).json();
+  assert.equal(b.ok, true);
+  assert.equal(b.principal_id, "u-tester");
+  assert.ok(b.worlds.total >= 1);
+  assert.ok(b.recent.some((w) => w.world_id === worldId), "and lists the world just made");
+
+  // Another principal sees their own, not this one's.
+  const other = await (await call(PLAIN, "GET", "/me/home")).json();
+  assert.equal(other.principal_id, "u-plain");
+  assert.ok(!other.recent.some((w) => w.world_id === worldId), "one caller's worlds must not appear in another's home");
+});
+
+test("HOME: reachable at /api/me/home too, which is what the site calls", async () => {
+  const a = await call(TESTER, "GET", "/me/home");
+  const b = await call(TESTER, "GET", "/api/me/home");
+  assert.equal(a.status, 200);
+  assert.equal(b.status, 200, "the /api prefix is rewritten, so both must work");
+});
