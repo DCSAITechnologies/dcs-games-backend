@@ -256,6 +256,24 @@ async function main() {
     if (at !== spec.sha) return { ok: false, error: `checkout landed on ${at}, not the banked ${spec.sha}` };
     const branchHead = (await run("git", ["rev-parse", "origin/" + spec.branch], { cwd: dest })).out.trim();
     const files = (await run("git", ["ls-files"], { cwd: dest })).out.trim().split("\n").length;
+
+    // A green run against a SUPERSEDED commit is the most misleading result
+    // this script can produce: it says "the estate rebuilds" while describing
+    // code nobody is running any more. It happened — the pins sat at a commit
+    // 60-odd commits behind, the run passed 11/11, and the only trace was the
+    // words "branch head moved to" inside a PASS line.
+    //
+    // Now it fails, and says which SHA to update the pin to. --allow-stale is
+    // there for the legitimate case of re-verifying an older checkpoint on
+    // purpose, and has to be asked for.
+    if (branchHead && branchHead !== spec.sha && !process.argv.includes("--allow-stale")) {
+      return {
+        ok: false,
+        error: `the banked ${spec.name} SHA is superseded: pinned ${spec.sha.slice(0, 12)}, branch ${spec.branch} is now at ${branchHead.slice(0, 12)}.\n` +
+               `A cold rebuild of a commit nobody is running does not prove today's estate rebuilds.\n` +
+               `Update BANKED.${spec.name}.sha in scripts/reproduce.mjs to ${branchHead}, or pass --allow-stale to verify the older checkpoint deliberately.`,
+      };
+    }
     return { note: `${at.slice(0, 12)} · ${files} tracked files · branch head ${branchHead === spec.sha ? "is the banked SHA" : "moved to " + branchHead.slice(0, 12)}` };
   };
 

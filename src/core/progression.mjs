@@ -145,10 +145,28 @@ export function createProgressionService({ social, worldMemory } = {}) {
      * world has no activity rather than filling the space.
      */
     async creatorDashboard(principalId, ownedWorlds = []) {
+      // One pass over plays and ratings, then one lookup per world.
+      //
+      // This used to call social.worldStats() inside the loop, and worldStats
+      // scans the WHOLE plays collection and the WHOLE ratings collection every
+      // time — so the cost was worlds x (all plays + all ratings), sequentially,
+      // with a round trip each. Measured against staging it took 6.4 seconds
+      // while /me/home took 2.0 and /me/profile 0.8, and two pages sat on a
+      // placeholder for the duration.
+      //
+      // _statsIndex reads both collections ONCE and returns a lookup. The
+      // timelines are fetched together rather than one after another, because
+      // they do not depend on each other and waiting for each in turn is the
+      // same latency paid N times.
+      const statsFor = await social._statsIndex();
+      const timelines = worldMemory
+        ? await Promise.all(ownedWorlds.map((w) => worldMemory.timeline(w.world_id).catch(() => [])))
+        : ownedWorlds.map(() => []);
+
       const worlds = [];
-      for (const w of ownedWorlds) {
-        const stats = await social.worldStats(w.world_id);
-        const history = worldMemory ? await worldMemory.timeline(w.world_id) : [];
+      for (const [i, w] of ownedWorlds.entries()) {
+        const stats = statsFor(w.world_id);
+        const history = timelines[i];
         worlds.push({
           world_id: w.world_id,
           title: w.title,

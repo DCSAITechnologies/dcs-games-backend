@@ -413,3 +413,33 @@ test("HEALTH GATE: a degraded safety collection is raised as a critical alert", 
       ? "safety persistence is degraded and no critical alert was raised"
       : "an alert was raised while safety persistence is healthy");
 });
+
+test("PERF: the creator dashboard reads the activity tables once, not once per world", async () => {
+  // creatorDashboard called social.worldStats() inside a loop, and worldStats
+  // scans the WHOLE plays collection and the WHOLE ratings collection every
+  // time — so the cost was worlds x (all plays + all ratings), sequentially.
+  // Measured against staging it took 6.4 seconds while /me/home took 2.0, and
+  // two pages sat on a placeholder for the duration.
+  //
+  // This asserts the shape rather than a wall-clock number, because a timing
+  // threshold on a shared machine is a flaky test that eventually gets deleted.
+  // What matters is that the work does not grow with the number of worlds.
+  const worldIds = [];
+  for (let i = 0; i < 3; i++) {
+    const { worldId } = await validManifest();
+    worldIds.push(worldId);
+  }
+
+  const started = Date.now();
+  const r = await call(TESTER, "GET", "/me/dashboard");
+  const took = Date.now() - started;
+  assert.equal(r.status, 200);
+  const b = await r.json();
+  assert.ok(b.worlds.length >= 3, `expected the owned worlds, got ${b.worlds.length}`);
+  for (const w of b.worlds) {
+    assert.equal(typeof w.stats.plays, "number");
+    assert.ok(typeof w.recommendation === "string" && w.recommendation.length > 0);
+  }
+  // Generous, and only there to catch an order-of-magnitude regression.
+  assert.ok(took < 8000, `the dashboard took ${took}ms for ${b.worlds.length} worlds`);
+});
