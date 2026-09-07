@@ -23,6 +23,25 @@ export const ESCALATE_IMMEDIATELY = new Set(["csam", "grooming", "self_harm"]);
 export const CONSENT_SOURCES = ["founder", "staff", "synthetic", "licensed", "explicit_consent"];
 export const MEDIA_KINDS = ["voice", "likeness", "avatar", "name", "performance"];
 
+/**
+ * Values the DATABASE constrains, validated here rather than at the route.
+ *
+ * `method` and `subject_type` reached check-constrained columns straight from a
+ * request body. `reason` and `media_kind` were already validated in exactly the
+ * way these two were missed — the difference was not a decision, it was an
+ * oversight, and the cost is out of all proportion to it: a collection write
+ * upserts the whole shadow for a key-shape, so ONE row the database refuses
+ * fails the batch and every OTHER principal's row in it goes unpersisted. One
+ * caller sending a nonsense method degrades a safety collection for everyone and
+ * lights the critical alert.
+ *
+ * It belongs in the service and not the route for the same reason cw5's
+ * actor-binding lives in the engine: there is more than one way in, and the
+ * guarantee should not depend on which one a caller used.
+ */
+export const AGE_METHODS = ["self_declared", "parental_attested", "document_verified", "synthetic_test"];
+export const SUBJECT_TYPES = ["user", "world", "asset", "message", "npc", "comment"];
+
 /** Derive an age tier from a date of birth. The raw DOB never leaves this module. */
 export function ageTierFor(dob, now = new Date()) {
   const d = dob instanceof Date ? dob : new Date(dob);
@@ -118,6 +137,9 @@ export function createSafetyService(env = process.env) {
      * removes the only legitimate reason a user had to re-declare upward.
      */
     async recordAge(principalId, { dateOfBirth, method = "self_declared" }) {
+      if (!AGE_METHODS.includes(method)) {
+        throw Errors.validation(`method must be one of: ${AGE_METHODS.join(", ")}`);
+      }
       if (!principalId) throw Errors.validation("principal is required");
       const tier = ageTierFor(dateOfBirth);
       // Only a RE-declaration can loosen anything. A principal with no row yet
@@ -276,6 +298,9 @@ export function createSafetyService(env = process.env) {
       if (!reporterId) throw Errors.unauthenticated("reporting requires an authenticated principal");
       if (!REPORT_REASONS.includes(reason)) throw Errors.validation(`reason must be one of: ${REPORT_REASONS.join(", ")}`);
       if (!subjectType || !subjectId) throw Errors.validation("subject_type and subject_id are required");
+      if (!SUBJECT_TYPES.includes(subjectType)) {
+        throw Errors.validation(`subject_type must be one of: ${SUBJECT_TYPES.join(", ")}`);
+      }
       const escalate = ESCALATE_IMMEDIATELY.has(reason);
       const row = {
         id: id(), reporter_id: reporterId, subject_type: subjectType, subject_id: String(subjectId),

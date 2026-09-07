@@ -272,7 +272,24 @@ test("naming a stronger-sounding method does not buy a relaxation", async () => 
   // of anything at all.
   const s = svc();
   await s.recordAge("kid3", { dateOfBirth: "2020-01-01" });
-  for (const method of ["verified", "government_id", "kyc", "staff_override", "self_declared"]) {
+  // Two refusals, for two reasons, and both are correct.
+  //
+  // An INVENTED method is now refused as invalid (422) before the tier logic is
+  // reached — `method` reaches a check-constrained column, and one row the
+  // database rejects fails the whole batched write, taking every other
+  // principal's row with it. That is a stronger guarantee than the 403, not a
+  // weaker one: the request never gets as far as being about age.
+  //
+  // A REAL method still reaches the tier logic and is refused there (403),
+  // which is the assertion this test exists for.
+  for (const method of ["verified", "government_id", "kyc", "staff_override"]) {
+    await assert.rejects(
+      () => s.recordAge("kid3", { dateOfBirth: "1990-01-01", method }),
+      (e) => e.httpStatus === 422,
+      `invented method '${method}' must be refused as invalid`,
+    );
+  }
+  for (const method of ["self_declared", "parental_attested", "document_verified"]) {
     await assert.rejects(
       () => s.recordAge("kid3", { dateOfBirth: "1990-01-01", method }),
       (e) => e.httpStatus === 403,

@@ -111,8 +111,16 @@ export class FilePersistenceStore implements PersistenceStore {
   async putSnapshot(snap: WorldSnapshot) { this.writeJsonAtomic(this.snapFile(snap.world_id), snap); }
   async getLatestSnapshot(worldId: string) { return this.readJson<WorldSnapshot>(this.snapFile(worldId)); }
   async putBaseWorld(base: BaseWorld) {
-    // Same contract as the in-memory store: a base world is written once.
-    if (fs.existsSync(this.baseFile(base.world_id))) return;
+    // Same contract as the in-memory store, INCLUDING the refusal.
+    //
+    // This returned silently on a second write while InMemoryPersistenceStore
+    // throws under a BASE IMMUTABILITY GUARD — so the same caller bug was a 500
+    // in one deployment and invisible in another, and the comment claiming a
+    // shared contract told the next reader not to check. The data was safe
+    // either way; the divergence was the defect.
+    if (fs.existsSync(this.baseFile(base.world_id))) {
+      throw new Error(`putBaseWorld: base world ${base.world_id} already exists and is immutable`);
+    }
     this.writeJsonAtomic(this.baseFile(base.world_id), base);
   }
   async getBaseWorld(worldId: string) { return this.readJson<BaseWorld>(this.baseFile(worldId)); }

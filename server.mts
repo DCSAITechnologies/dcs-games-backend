@@ -44,7 +44,7 @@ import { createJobService } from "./src/core/jobs.mjs";                        /
 import { createMarketplaceService } from "./src/core/marketplace.mjs";        // B15: marketplace backend, money DARK
 import { createProgressionService } from "./src/core/progression.mjs";        // B15: retention from measured data only
 import { createSocialService } from "./src/core/social.mjs";                    // B15: durable profiles, friends, parties, teams, studios, discovery
-import { createSafetyService, REPORT_REASONS, MOD_ACTIONS, REPORT_STATES, AGE_TIERS, MEDIA_KINDS, CONSENT_SOURCES } from "./src/core/safety.mjs";                    // A5: age tiers, consent, report/block, moderation audit
+import { createSafetyService, REPORT_REASONS, MOD_ACTIONS, REPORT_STATES, AGE_TIERS, MEDIA_KINDS, CONSENT_SOURCES, AGE_METHODS, SUBJECT_TYPES } from "./src/core/safety.mjs";                    // A5: age tiers, consent, report/block, moderation audit
 import { assertSchema, currentVersion } from "./src/core/schema.mjs";           // A2: boot-time schema assertion — refuse to serve an unsupported schema
 import { createWorldRepository, manifestHash } from "./src/core/worldstore.mjs";          // A3: durable, lossless, idempotent, ownership-aware world persistence
 import { createPrincipalResolver } from "./src/core/principal.mjs";         // A1: PARENT-OWNED canonical principal. No x-user-id fallback, ever.
@@ -514,6 +514,8 @@ const server = http.createServer(async (req, res) => {
           age_tier: AGE_TIERS,
           media_kind: MEDIA_KINDS,
           consent_source: CONSENT_SOURCES,
+          age_method: AGE_METHODS,
+          report_subject_type: SUBJECT_TYPES,
         },
       },
       netcode: "ws-separate-service", ts: new Date().toISOString(),
@@ -721,7 +723,9 @@ const server = http.createServer(async (req, res) => {
           drafts: mine.filter((w: any) => w.state !== "published").length,
           note: mine.length >= 50 ? "this is the first 50 worlds, not a total" : undefined,
         },
-        plays_of_my_worlds: plays,
+        // Summed over the SAME page as `worlds`, so it is a figure about those
+        // fifty and not about everything the caller owns. Named so.
+        plays_of_the_worlds_counted_above: plays,
         recent: mine.slice(0, 8).map((w: any) => ({ world_id: w.world_id, title: w.title, state: w.state, version: w.version, updated_at: w.updated_at })),
         measured_at: new Date().toISOString(),
       });
