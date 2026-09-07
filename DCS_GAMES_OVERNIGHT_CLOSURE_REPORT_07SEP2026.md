@@ -315,3 +315,81 @@ running. Rather than carry that as step 0 of the cutover, the run was repeated:
 **42 / 42 against schema v11**, deployment `330d80ab-cad2-41f2-8cac-45825a52ca1f`,
 commit `0b477c5f2c80`. The cutover baseline is therefore v11 and the proof for
 it exists.
+
+---
+
+## 11. V2 completion matrix
+
+Proven by `scripts/staging-v2-proof.mjs` against the deployed service — 20/20.
+
+| Capability | State | Evidence |
+| --- | --- | --- |
+| Generate a world | COMPLETE | V2 proof; an empty prompt is now refused rather than defaulted to a pirate world |
+| Load a world | COMPLETE | V2 proof; save-then-load answered 500 until today |
+| Save a full manifest | COMPLETE | V2 proof; idempotent on identical bytes |
+| Versioning | COMPLETE | V2 proof; monotonic, stale `expected_version` is a 409 |
+| Publish | COMPLETE | V2 proof; owner-only, signs an Atlas receipt |
+| Public listing | COMPLETE | V2 proof; a draft is absent, a published world present |
+| Creator's own listing | COMPLETE | V2 proof |
+| State transitions | COMPLETE | a save cannot change state; publish is the only route that does |
+| Advertised in `/health` | COMPLETE | the whole V2 surface was missing; now a `world_v2` group |
+| Identity slice | COMPLETE | fixture-backed halves retired; the live P2 verification surface unblocked |
+| T&S reports | COMPLETE | retired to `/safety/report`, which escalates and now persists |
+| Marketplace / payouts | DARK BY DESIGN | proven dark; `assert-dark` endpoints confirm nothing has moved |
+
+## 12. V3 completion matrix
+
+Proven by `scripts/staging-proofs.mjs` at schema v11 — 42/42.
+
+| Capability | State | Evidence |
+| --- | --- | --- |
+| WorldManifest V3 | COMPLETE | schema gate; 40-seed sweep across 7 prompts, all valid, unique zone ids |
+| Assembly / router | COMPLETE | real providers on staging; degraded lanes reported honestly |
+| Describe → Generate | COMPLETE | staging proof, real Cerebras providers |
+| Play | COMPLETE | staging proof; entering is counted |
+| Save / Return | COMPLETE | staging proof; found again at the expected version |
+| Restart durability | COMPLETE | byte-identical across a real process restart |
+| Version history | COMPLETE | staging proof; strictly sequential under 36 concurrent writers |
+| Rollback | COMPLETE, one caveat | content restored exactly (via diff); residual risk in §13 |
+| Expansion deltas | COMPLETE | staging proof; new version, not an overwrite |
+| World memory | COMPLETE | creation, every edit and the rollback all recorded |
+| AI companion | COMPLETE | answers, and is GROUNDED — names a real zone from the world's own manifest |
+| Chat-based editing | COMPLETE | staging proof; refuses an unsupported intent and says what IS supported |
+| Playtest / critic / repair | COMPLETE | every validator fix name implemented or declared unrepairable with a reason; no repair may leave a blocker it did not arrive with |
+| Publish gate | COMPLETE | owner-only, signed, and a save can no longer walk around it |
+| Atlas / provenance | COMPLETE | signature verified TRUSTLESSLY, 16/16; the encoding is now published so an outsider can reproduce it |
+| Netcode | COMPLETE | 186 checks; the CI gate had never run and now can |
+| Concurrency / reliability | COMPLETE | no lost updates, no duplicates, strictly sequential |
+| Security posture | COMPLETE | 35/35 remote; the anon key reads nothing from eight tables |
+| Mobile / touch / a11y | **IN PROGRESS** | see §13 |
+| Browser compatibility | IN PROGRESS | same lane |
+
+## 13. What is NOT closed
+
+Stated plainly, because a report that omits these is worth less than no report.
+
+1. **Frontend accessibility and touch — 6 failing tests.** The entire remaining
+   red in the estate. A control under the 44px touch target on the narrowest
+   phone; a page needing a second scroll axis at 320 CSS px; a control under
+   24px; a field named only by its placeholder; the mobile menu not openable
+   from the keyboard; and contrast below the WCAG minimum for its size. These
+   are real defects in real pages, found by tests written today, and they are
+   red on purpose rather than deleted.
+2. **The diligence crawl fails** — three pages render bundled sample data
+   without the visible sample label the truth layer requires. A regression from
+   this session's own frontend work, and precisely the defect class that layer
+   exists to prevent.
+3. **Rollback and undetermined live state.** An undetermined category arrives as
+   an empty array, indistinguishable from "nothing is held there", so a rollback
+   that removes entities can proceed on evidence never gathered. Gating on the
+   completeness flag was tried and REVERTED: it is never true by design, so the
+   gate disabled every deleting rollback. Closing it properly needs per-category
+   deletion analysis. Manifest-recorded ownership IS enforced independently, so
+   what the world knows is owned is protected; the residual risk is runtime
+   holdings in categories with no source.
+4. **Three tables the code names exist nowhere** — `dcsgames_ts_audit`,
+   `dcsgames_payout_kyc`, `dcsgames_economy_ledger`. All behind paths that cannot
+   run today, now a declared decision with a gate that fails if one becomes
+   reachable.
+5. **No real internal testers have used the deployed build.** Founder item, not
+   engineering: the original blocker was "no deployed build", and that is gone.
