@@ -11,6 +11,7 @@
 //   PREVIEW_URL=https://sprint-preview-07sep2026.dcs-games.pages.dev \
 //   node scripts/preview-integration-proof.mjs
 import { launchChrome, Page } from "../test/helpers/browser.mjs";
+import { REQUIRED_SCHEMA_VERSION } from "../src/core/schema.mjs";
 
 const PREVIEW = process.env.PREVIEW_URL || "https://sprint-preview-07sep2026.dcs-games.pages.dev";
 const STAGING_API = "https://dcs-games-backend-staging.up.railway.app";
@@ -81,7 +82,10 @@ try {
     const h = JSON.parse(health);
     ok("the browser can call the staging API from the preview origin", h.ok === true, health);
     ok("and the staging backend still reports payments dark", h.payments_live === false, String(h.payments_live));
-    ok("and the schema it asserts is the migrated one", h.schema === 10, String(h.schema));
+    // Read from the source of truth: a hardcoded number makes every migration
+  // look like a broken deployment.
+  ok(`and the schema it asserts is the one this code requires (v${REQUIRED_SCHEMA_VERSION})`,
+     h.schema === REQUIRED_SCHEMA_VERSION, `deployment reports v${h.schema}`);
     ok("and it names the deployment serving it", !!h.deployment, "no deployment id");
 
     const pub = await page.eval(`
