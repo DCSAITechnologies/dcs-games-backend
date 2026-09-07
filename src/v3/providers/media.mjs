@@ -144,8 +144,25 @@ export function placeholderMediaAdapter() {
       const label = (req.label || req.kind || "media").slice(0, 40);
       const hue = crypto.createHash("sha256").update(String(req.prompt || label)).digest()[0] * 360 / 256;
       if (req.kind === "image") {
+        // The dimensions are interpolated into MARKUP, and they arrive from the
+        // request body — server.mts passes `width: b.width, height: b.height`
+        // straight through. `width="${req.width || 1024}"` therefore let a
+        // caller close the attribute and write their own: a width of
+        // `600"><script>...</script><rect x="` produced an SVG containing that
+        // script, base64'd into a data: URI and stored in the manifest as the
+        // world's key art.
+        //
+        // The label beside it was already escaped; the numbers were assumed to
+        // be numbers. They are now coerced to bounded integers, which is
+        // stronger than escaping — there is no string here to escape, and a
+        // dimension that is not a number is not a dimension.
+        const dim = (v, fallback) => {
+          const n = Math.round(Number(v));
+          return Number.isFinite(n) && n >= 16 && n <= 4096 ? n : fallback;
+        };
+        const w = dim(req.width, 1024), h = dim(req.height, 576);
         const svg =
-          `<svg xmlns="http://www.w3.org/2000/svg" width="${req.width || 1024}" height="${req.height || 576}" viewBox="0 0 1024 576">` +
+          `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 1024 576">` +
           `<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">` +
           `<stop offset="0" stop-color="hsl(${hue.toFixed(0)} 45% 18%)"/><stop offset="1" stop-color="hsl(${((hue + 40) % 360).toFixed(0)} 40% 8%)"/>` +
           `</linearGradient></defs>` +

@@ -12,6 +12,7 @@ import { validateManifest } from "../src/v3/manifest/schema.mjs";
 import { planWorldLocally, archetypeFor, rng } from "../src/v3/providers/local-planner.mjs";
 import { generateTerrainLocally } from "../src/v3/providers/spatial.mjs";
 import { resolveArchetype, buildAsset, ARCHETYPE_LIBRARY } from "../src/v3/providers/asset3d.mjs";
+import { mediaAdapters } from "../src/v3/providers/media.mjs";
 import { generateWorld } from "../src/cw2/generate.mjs";
 
 const OFFLINE = { DCS_PROVIDERS_OFFLINE: "1" };
@@ -294,4 +295,46 @@ test("B1 GATE: no provider name leaks into the canonical manifest outside proven
     assert.ok(!json.includes(`"${vendor}`), `vendor '${vendor}' leaked into the canonical manifest`);
   }
   assert.equal(validateManifest(out.manifest).ok, true);
+});
+
+// --------------------------------------------- the placeholder is not a hole
+
+test("B1 GATE: the placeholder image cannot be made to carry markup a caller supplied", async () => {
+  // The dimensions are interpolated into MARKUP, and they arrive from the
+  // request body — server.mts passes `width: b.width, height: b.height`
+  // straight through to this adapter. `width="${req.width || 1024}"` therefore
+  // let a caller close the attribute and write their own, and the result was
+  // base64'd into a data: URI and stored in the manifest as the world's key
+  // art. The label beside it was already escaped; the numbers were assumed to
+  // be numbers.
+  const placeholder = mediaAdapters(OFFLINE).find((a) => a.isFallback);
+  assert.ok(placeholder, "the media lane must have a deterministic fallback");
+
+  const attacks = [
+    '1024" onload="alert(1)',
+    '600"><script>fetch("//evil")</script><rect x="',
+    '1024"/><foreignObject><body onload="alert(1)"></body></foreignObject><rect width="',
+    "javascript:alert(1)",
+  ];
+  for (const width of attacks) {
+    const out = await placeholder.invoke({ kind: "image", label: "World", prompt: "x", width, height: 576 });
+    const svg = Buffer.from(out.uri.split(",")[1], "base64").toString();
+    assert.doesNotMatch(svg, /<script/i, `script injected via width=${JSON.stringify(width)}`);
+    assert.doesNotMatch(svg, /onload=/i, `event handler injected via width=${JSON.stringify(width)}`);
+    assert.doesNotMatch(svg, /foreignObject/i, `foreign content injected via width=${JSON.stringify(width)}`);
+    assert.match(svg, /^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" width="\d+" height="\d+"/, svg.slice(0, 90));
+  }
+
+  // A real dimension is still honoured, and a nonsensical one falls back rather
+  // than reaching the document at all.
+  const good = await placeholder.invoke({ kind: "image", label: "World", prompt: "x", width: 800, height: 400 });
+  assert.match(Buffer.from(good.uri.split(",")[1], "base64").toString(), /width="800" height="400"/);
+  for (const bad of [-5, 0, 1e9, NaN, null, undefined, {}, ["x"], "eight hundred"]) {
+    const out = await placeholder.invoke({ kind: "image", label: "World", prompt: "x", width: bad, height: bad });
+    assert.match(Buffer.from(out.uri.split(",")[1], "base64").toString(), /width="1024" height="576"/, `width=${JSON.stringify(bad)}`);
+  }
+
+  // The label was already escaped and must stay that way.
+  const labelled = await placeholder.invoke({ kind: "image", label: '</text><script>alert(1)</script>', prompt: "x" });
+  assert.doesNotMatch(Buffer.from(labelled.uri.split(",")[1], "base64").toString(), /<script/i);
 });
