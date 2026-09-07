@@ -14,11 +14,32 @@ Staging only. Production out of scope. `PAYMENTS_LIVE=false`. `0002_seed.sql` ne
 
 | Lane | Owner | Scope | Files owned | Status |
 | --- | --- | --- | --- | --- |
-| Lead | Lead | frontend↔staging wiring, Cloudflare preview, deploys, evidence | server.mts, migrations, reports, scripts/deploy-* | ACTIVE |
-| A | agent | V2 closure / legacy compatibility | src/cw1–cw7, test/cw1-identity, marketplace, subscriptions, social-discovery, verification | ACTIVE |
-| B | agent | V3 world systems + B4 adversarial | src/v3/** , test/playtest, evolution, manifest-v3, runtime-v3, npc-memory, world-diff, world-rollback, fork, stitch | ACTIVE |
-| C | agent | security / auth / persistence adversarial | src/core/**, test/security-regression, route-authz, auth-principal, supabase-paths, world-persistence, collection | ACTIVE |
-| D | agent | browser / mobile / a11y / perf / netcode | test/browser-compat, a11y-pages, frontend-truth, runtime-perf, load-smoke, smoke-gate | ACTIVE |
+| Lead | Lead | frontend↔staging wiring, Cloudflare preview, deploys, evidence | server.mts, migrations, reports, scripts/* | ACTIVE |
+| A | agent | V2 closure / legacy compatibility | src/cw1–cw7, src/core/{social,verification,safety,marketplace,subscriptions,jobs}.mjs + their suites | ACTIVE |
+| B | agent | V3 world systems + B4 adversarial | src/v3/**, test/playtest, evolution, manifest-v3, runtime-v3, npc-memory, world-diff, world-rollback, fork, stitch | ACTIVE |
+| C | agent | security / auth / persistence adversarial | src/core/{worldstore,collection,principal,schema,errors,db}.mjs + their suites | **COMPLETE** |
+| D | agent | browser / mobile / a11y / perf | test/browser-compat, a11y-pages, frontend-truth, runtime-perf, load-smoke, smoke-gate, api-integration | ACTIVE |
+| E | agent | dashboard/design surfaces + functional wiring | the frontend repo `dcs-games-LIVE` (all of it) | ACTIVE |
+
+## Lead lanes closed
+
+| Item | Evidence |
+| --- | --- |
+| Deploy provenance | `scripts/deploy-staging.sh` refuses to claim a deploy unless the live service reports the deployment id it just created; ships a `git archive` export so the bytes are the commit; ledger in `reports/DEPLOYMENTS.md` |
+| Phase 5+6 staging proofs | `reports/STAGING_PROOFS.md` — 42/42 against real Supabase, including byte-identical durability across a real process restart |
+| Frontend ↔ staging | `scripts/preview-integration-proof.mjs` — 38/38 in real Chrome, asserting the observed network traffic never reaches a production host |
+| Remote security posture | `scripts/staging-security-probe.mjs` — 35/35, including the anon key reading nothing from eight tables directly against the Data API |
+| Route↔UI coverage | `reports/ROUTE_UI_COVERAGE.md` — dead buttons 9 → **0** |
+| Route inventory honesty | `/health` was hiding 37 live routes including all of V2; `test/route-inventory.test.mjs` fails on drift in either direction |
+| CORS | `ALLOWED_ORIGINS` was dead configuration; now enforced with a one-level wildcard for previews, `test/cors.test.mjs` |
+
+## Known hazard
+
+Four lanes push to one branch, so INTERMEDIATE commits on `sprint/2026-09-canonical`
+can be red. A cold rebuild pinned `e00c7cd` and found `POST /safety/age`
+answering 404 there; HEAD is green under both `node --test` and `tsx --test`.
+Only the final SHA should be treated as the banked state, and
+`scripts/reproduce.mjs` must be run against it at the end rather than mid-flight.
 
 ## Closed before this board opened
 - B4 repair/finding gap closed structurally (8 orphan fixes, UNREPAIRABLE registry)
