@@ -293,6 +293,46 @@ export async function preflight(env = process.env, opts = {}) {
       report.target.ref_source = dsnRef === distinct[0] ? "DATABASE_URL" : "service-role key claim";
       report.unverified.push("SUPABASE_URL is not a *.supabase.co host, so the project ref was taken from another channel.");
     }
+    // -- 2b. the ref the OPERATOR meant ------------------------------------
+    //
+    // The forbidden list catches the two SHARED projects. It cannot catch the
+    // mistake that becomes possible once a dedicated project exists for every
+    // environment: running the PRODUCTION cutover with the STAGING credentials
+    // still exported in the shell. Every check above would pass, the preflight
+    // would report "ALREADY MIGRATED", and production would be pointed at the
+    // staging database — with the operator having read a green result.
+    //
+    // Adding staging to FORBIDDEN_REFS would break the staging cutover, so the
+    // guard is the operator's own stated intent instead: set
+    // DCS_EXPECTED_SUPABASE_REF to the ref you were given, and any other target
+    // is refused. It is opt-in because it cannot be inferred, and there is no
+    // override, because the whole value is that you cannot argue with it at 2am.
+    const expected = lower(String(env.DCS_EXPECTED_SUPABASE_REF || "").trim());
+    report.target.expected_ref = expected || null;
+    if (expected) {
+      if (!/^[a-z]{16,32}$/.test(expected)) {
+        throw refuse(EXIT.CONFIG, "unusable DCS_EXPECTED_SUPABASE_REF",
+          `DCS_EXPECTED_SUPABASE_REF=${JSON.stringify(env.DCS_EXPECTED_SUPABASE_REF)} is not a Supabase project ref.`, [
+            "A ref is the lowercase-letter identifier in https://<ref>.supabase.co — not a URL, not a key.",
+            "Set it to that value, or unset it, and re-run.",
+          ]);
+      }
+      if (report.target.ref !== expected) {
+        throw refuse(EXIT.FORBIDDEN, "wrong project",
+          `you declared DCS_EXPECTED_SUPABASE_REF=${expected}, and the credentials in this shell name ${report.target.ref}.`, [
+            "STOP. The credentials in this shell are for a different project than the one you said you were migrating.",
+            "The commonest cause is a previous environment's exports surviving in the shell — staging credentials during a production cutover, or the reverse.",
+            "Open a NEW shell, export only the three credentials for the intended project, re-export DCS_EXPECTED_SUPABASE_REF, and re-run.",
+            "There is no override for this refusal.",
+          ]);
+      }
+      report.notes.push(`target ref matches the declared DCS_EXPECTED_SUPABASE_REF (${expected})`);
+    } else {
+      report.unverified.push(
+        "DCS_EXPECTED_SUPABASE_REF is not set, so nothing checked that this project is the one you MEANT to migrate — " +
+        "only that it is not one of the two shared projects. Set it to the ref you were given before a production cutover.");
+    }
+
     if (claims.shape === "jwt") {
       if (claims.role && claims.role !== "service_role") {
         report.notes.push(`the key declares role="${claims.role}", not "service_role" — an anon key cannot see the whole schema, so a "clean" result from it would be meaningless`);
