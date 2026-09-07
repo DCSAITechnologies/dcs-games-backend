@@ -911,3 +911,307 @@ test("BACKEND: a failed playtest request is never painted as a playtest verdict"
   assert.ok(/says nothing about whether the world passes/.test(handler),
     "the re-playtest failure message does not separate 'the check did not run' from 'the check failed'");
 });
+
+// =========================================================== the whole estate
+//
+// Everything above this line asks its questions of the five V3 document pages.
+// That was never the whole product: the frontend ships 190 HTML documents, and
+// the other 185 — the marketing site, the player dashboard, the genre and
+// marketplace pages, the studio — had never been opened by a test at all.
+//
+// The four properties below are the ones a person actually notices on a phone
+// or with a keyboard, and each was MEASURED broken across the estate on
+// 7 Sep 2026 before it was written down here:
+//
+//   - 52 pages laid out 557 CSS px of content inside a 320 px viewport, so a
+//     third of the site had to be scrolled sideways to be read (WCAG 1.4.10).
+//     Cause: .mtop-cta in assets/dcsgames.css kept all four header actions at
+//     full size below the breakpoint where .mnav collapses into the burger.
+//   - the burger that was supposed to replace that nav was squeezed to 21 px
+//     wide by the same overflow — below any target minimum, and below the 36 px
+//     the stylesheet itself asks for.
+//   - 58 pages needed 19 Tab presses to reach <main> and 48 needed 6, on every
+//     single navigation, because no page in the estate has a skip link
+//     (WCAG 2.4.1).
+//   - the dashboard search field and the homepage's primary "describe a world"
+//     field had a placeholder and no accessible name (WCAG 4.1.2 / 3.3.2), and
+//     the marketing burger announced itself as "☰".
+//
+// One navigation per page, one measurement pass, many properties. Re-visiting
+// 190 pages per assertion would cost eight minutes a test and measure the same
+// documents over and over.
+const ESTATE = (() => {
+  const out = [];
+  const walk = (dir, rel) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (e.name === ".git" || e.name === "node_modules") continue;
+      const abs = path.join(dir, e.name);
+      if (e.isDirectory()) walk(abs, rel + "/" + e.name);
+      else if (e.name.endsWith(".html")) out.push(rel + "/" + e.name);
+    }
+  };
+  if (haveSite) walk(SITE, "");
+  return out;
+})();
+
+// A viewport smaller than this is not a phone anyone ships. 320 CSS px is the
+// width WCAG 1.4.10 names, and it is what a 320x568 iPhone SE reports.
+const NARROW = { width: 320, height: 720, deviceScaleFactor: 2, mobile: true };
+
+/** Everything measured on one page, in one visit. */
+const ESTATE_PROBE = `
+  function vis(el) {
+    var cs = getComputedStyle(el);
+    if (cs.display === "none" || cs.visibility === "hidden") return false;
+    var b = el.getBoundingClientRect();
+    return b.width > 0 && b.height > 0;
+  }
+  var CTRL = 'button,[role="button"],a[href],input:not([type=hidden]),select,textarea,[tabindex]:not([tabindex="-1"])';
+  function label(el) {
+    var n = (el.getAttribute("aria-label") || "").trim();
+    if (n) return n;
+    var lb = el.getAttribute("aria-labelledby");
+    if (lb) { var t = document.getElementById(lb); if (t && (t.innerText || "").trim()) return t.innerText.trim(); }
+    if (el.id) { var l = document.querySelector('label[for="' + CSS.escape(el.id) + '"]'); if (l && (l.innerText || "").trim()) return l.innerText.trim(); }
+    var w = el.closest("label");
+    if (w && (w.innerText || "").trim()) return w.innerText.trim();
+    var ti = (el.getAttribute("title") || "").trim();
+    if (ti) return ti;
+    return "";
+  }
+  function describe(el) {
+    return el.tagName.toLowerCase()
+      + (el.id ? "#" + el.id : "")
+      + (el.className && String(el.className).trim() ? "." + String(el.className).trim().split(/\\s+/).slice(0, 2).join(".") : "");
+  }
+
+  var doc = document.documentElement;
+  var R = {
+    lang: (doc.getAttribute("lang") || "").trim(),
+    viewportMeta: (function () { var m = document.querySelector('meta[name="viewport"]'); return m ? m.getAttribute("content") : null; })(),
+    scrollW: doc.scrollWidth,
+    clientW: doc.clientWidth,
+    overflowing: [],
+    tiny: [],
+    unlabelledFields: [],
+    tabsToMain: null,
+    hasMain: false,
+    skipTarget: null,
+    burgers: [],
+  };
+
+  // Which element is actually pushing the document wide? Report the outermost
+  // one whose own parent fits, so the answer names a cause and not a symptom.
+  for (var i = 0, els = document.querySelectorAll("body *"); i < els.length; i++) {
+    var el = els[i];
+    if (!vis(el)) continue;
+    var b = el.getBoundingClientRect();
+    if (b.right <= R.clientW + 1) continue;
+    var pel = el.parentElement;
+    if (pel && pel !== document.body) {
+      var pb = pel.getBoundingClientRect();
+      if (pb.right > R.clientW + 1) continue;     // the parent is the real cause
+    }
+    // A container that scrolls sideways on purpose is not a reflow failure;
+    // only what escapes the DOCUMENT is.
+    var clipped = false;
+    for (var a = el.parentElement; a && a !== document.body; a = a.parentElement) {
+      var ox = getComputedStyle(a).overflowX;
+      if (ox === "auto" || ox === "scroll" || ox === "hidden") { clipped = true; break; }
+    }
+    if (clipped) continue;
+    R.overflowing.push({ el: describe(el), w: Math.round(b.width), right: Math.round(b.right) });
+    if (R.overflowing.length >= 6) break;
+  }
+
+  var controls = Array.prototype.filter.call(document.querySelectorAll(CTRL), vis);
+  for (var j = 0; j < controls.length; j++) {
+    var c = controls[j], cb = c.getBoundingClientRect();
+    // A link inside a run of prose is sized by its text and is exempt from the
+    // target minimum by WCAG's own "inline" exception. Anything laid out as a
+    // block, a flex/grid item or a button is not.
+    if (c.tagName === "A" && getComputedStyle(c).display === "inline") continue;
+    if (cb.width < 24 || cb.height < 24) {
+      R.tiny.push({ el: describe(c), w: Math.round(cb.width), h: Math.round(cb.height), text: (c.innerText || label(c) || "").trim().slice(0, 24) });
+    }
+  }
+
+  var fields = Array.prototype.filter.call(document.querySelectorAll('input:not([type=hidden]),select,textarea'), vis);
+  for (var k = 0; k < fields.length; k++) {
+    if (!label(fields[k])) {
+      R.unlabelledFields.push({ el: describe(fields[k]), placeholder: fields[k].getAttribute("placeholder") || null, type: fields[k].type || null });
+    }
+  }
+
+  var main = document.querySelector("main, [role=main]");
+  R.hasMain = !!main;
+  if (main) {
+    var n = 0;
+    for (var m = 0; m < controls.length; m++) { if (main.contains(controls[m])) break; n++; }
+    R.tabsToMain = n;
+    // A skip link is the FIRST thing Tab reaches and it points into the content.
+    var first = controls[0];
+    if (first && first.tagName === "A") {
+      var href = first.getAttribute("href") || "";
+      if (href.charAt(0) === "#" && href.length > 1) {
+        var dest = document.getElementById(href.slice(1));
+        if (dest && (dest === main || main.contains(dest) || dest.contains(main))) {
+          first.focus();
+          // A skip link is normally parked off-screen and slid in on :focus.
+          // Measuring the instant focus lands reads the START of that
+          // transition and calls a perfectly visible link hidden.
+          await new Promise(function (r) { setTimeout(r, 200); });
+          var fb = first.getBoundingClientRect();
+          R.skipTarget = { href: href, text: (first.innerText || label(first) || "").trim(), visibleOnFocus: fb.width > 0 && fb.height > 0 && fb.top > -fb.height && getComputedStyle(first).visibility !== "hidden" };
+          first.blur();
+        }
+      }
+    }
+  }
+
+  var bs = document.querySelectorAll('.pd-burger, #mBurger, #pdBurger, [class*="burger"]');
+  for (var q = 0; q < bs.length; q++) {
+    if (!vis(bs[q])) continue;
+    R.burgers.push({
+      el: describe(bs[q]),
+      name: label(bs[q]) || (bs[q].innerText || "").trim(),
+      hasTextName: !!label(bs[q]),
+      expanded: bs[q].getAttribute("aria-expanded"),
+      controls: bs[q].getAttribute("aria-controls"),
+    });
+  }
+  return R;
+`;
+
+let _estate = null;
+
+/**
+ * One pass over every document in the frontend, at a 320 px phone with touch on.
+ * Memoised: the first test that needs it pays for it, the rest read the result.
+ */
+async function estateSweep() {
+  if (_estate) return _estate;
+  const rows = [];
+  await page.send("Emulation.setDeviceMetricsOverride", NARROW);
+  await page.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 5 });
+  try {
+    for (const p of ESTATE) {
+      await page.goto(site.url + p, { waitMs: 600 });
+      const r = await page.eval(ESTATE_PROBE);
+      r.page = p;
+      r.errors = page.realErrors().slice(0, 2);
+      rows.push(r);
+    }
+  } finally {
+    await page.send("Emulation.setTouchEmulationEnabled", { enabled: false }).catch(() => {});
+    await page.send("Emulation.clearDeviceMetricsOverride").catch(() => {});
+  }
+  _estate = rows;
+  return rows;
+}
+
+function report(rows, fmt, limit = 12) {
+  const lines = rows.slice(0, limit).map(fmt);
+  if (rows.length > limit) lines.push(`  …and ${rows.length - limit} more`);
+  return "\n" + lines.join("\n");
+}
+
+test("ESTATE: every HTML document in the frontend is reachable and enumerated", opts, async () => {
+  // If this number collapses, the four tests below are silently measuring a
+  // handful of pages instead of the estate, and would still be green.
+  assert.ok(ESTATE.length >= 150,
+    `the frontend ships far more than ${ESTATE.length} documents — the enumeration has broken`);
+  const rows = await estateSweep();
+  assert.equal(rows.length, ESTATE.length, "every enumerated document must have been visited");
+  const broken = rows.filter((r) => r.errors.length);
+  assert.deepEqual(broken.map((r) => `${r.page}: ${r.errors[0]}`), [],
+    "no page in the estate may throw on load");
+});
+
+test("ESTATE REFLOW: no page in the frontend needs a second scroll axis at 320 CSS px", opts, async () => {
+  const rows = await estateSweep();
+  const bad = rows.filter((r) => r.scrollW > r.clientW + 1);
+  assert.deepEqual(
+    bad.map((r) => `${r.page} lays out ${r.scrollW}px inside ${r.clientW}px (+${r.scrollW - r.clientW}) — ${r.overflowing.map((o) => o.el + "@" + o.right).join(", ") || "cause not isolated"}`),
+    [],
+    `pages that must be scrolled sideways to be read (WCAG 1.4.10):${report(bad, (r) => "  " + r.page)}`,
+  );
+});
+
+test("ESTATE TOUCH: no control anywhere is smaller than a 24px target", opts, async () => {
+  // WCAG 2.2 SC 2.5.8 (AA). The V3 pages are held to 44 above; this is the floor
+  // the whole estate has to clear, and the marketing burger was at 21x36.
+  const rows = await estateSweep();
+  const bad = rows.filter((r) => r.tiny.length);
+  assert.deepEqual(
+    bad.map((r) => `${r.page}: ${r.tiny.map((t) => `${t.el} ${t.w}x${t.h} "${t.text}"`).join("; ")}`),
+    [],
+    `controls below the 24px minimum target size on a phone:${report(bad, (r) => `  ${r.page} ${r.tiny.length}`)}`,
+  );
+});
+
+test("ESTATE KEYBOARD: no page makes a keyboard user tab through the navigation to reach its content", opts, async () => {
+  // WCAG 2.4.1 Bypass Blocks. The threshold is not a style preference: a
+  // dashboard page put 19 controls in front of <main>, on every navigation.
+  const rows = await estateSweep().then((r) => r.filter((x) => x.hasMain));
+  assert.ok(rows.length > 100, `expected most of the estate to expose a main landmark, got ${rows.length}`);
+  const bad = rows.filter((r) => r.tabsToMain > 3 && !r.skipTarget);
+  assert.deepEqual(
+    bad.map((r) => `${r.page} needs ${r.tabsToMain} Tab presses to reach <main> and offers no skip link`),
+    [],
+    `pages with no way to bypass the navigation:${report(bad, (r) => `  ${r.page} (${r.tabsToMain} tabs)`)}`,
+  );
+  // And where a skip link exists it has to be usable: a skip link a sighted
+  // keyboard user cannot see when it takes focus is worse than none.
+  const hidden = rows.filter((r) => r.skipTarget && !r.skipTarget.visibleOnFocus);
+  assert.deepEqual(hidden.map((r) => r.page), [], "a skip link must become visible when it takes focus");
+  const unnamed = rows.filter((r) => r.skipTarget && !r.skipTarget.text);
+  assert.deepEqual(unnamed.map((r) => r.page), [], "a skip link must say what it does");
+});
+
+test("ESTATE LABELS: every field in the frontend has a name that is not just its placeholder", opts, async () => {
+  // A placeholder is not an accessible name — it is not exposed as one by every
+  // engine, and it disappears the moment the user types.
+  const rows = await estateSweep();
+  const bad = rows.filter((r) => r.unlabelledFields.length);
+  assert.deepEqual(
+    bad.map((r) => `${r.page}: ${r.unlabelledFields.map((f) => `${f.el}[${f.type}] placeholder=${JSON.stringify(f.placeholder)}`).join("; ")}`),
+    [],
+    `form fields with no accessible name (WCAG 4.1.2):${report(bad, (r) => "  " + r.page)}`,
+  );
+});
+
+test("ESTATE MENU: the mobile menu button is named in words and reports whether it is open", opts, async () => {
+  const rows = await estateSweep();
+  const withBurger = rows.filter((r) => r.burgers.length);
+  assert.ok(withBurger.length > 50, `the burger should be on most of the estate at 320px, found ${withBurger.length}`);
+  const unnamed = withBurger.filter((r) => r.burgers.some((b) => !b.hasTextName));
+  assert.deepEqual(
+    unnamed.map((r) => `${r.page}: ${r.burgers.filter((b) => !b.hasTextName).map((b) => `${b.el} announces ${JSON.stringify(b.name)}`).join("; ")}`),
+    [],
+    "a menu button whose only name is its glyph is read out as that glyph",
+  );
+  const unstated = withBurger.filter((r) => r.burgers.some((b) => b.expanded !== "true" && b.expanded !== "false"));
+  assert.deepEqual(
+    unstated.map((r) => `${r.page}: ${r.burgers.filter((b) => b.expanded !== "true" && b.expanded !== "false").map((b) => b.el).join("; ")}`),
+    [],
+    "a disclosure button must carry aria-expanded, or nothing announces that the menu opened",
+  );
+});
+
+test("ESTATE MOBILE: every page declares a language and a viewport a phone can use", opts, async () => {
+  const rows = await estateSweep();
+  const noLang = rows.filter((r) => !r.lang);
+  assert.deepEqual(noLang.map((r) => r.page), [],
+    "a page with no lang is read out by a screen reader in the wrong voice (WCAG 3.1.1)");
+
+  const noViewport = rows.filter((r) => !r.viewportMeta || !/width\s*=\s*device-width/.test(r.viewportMeta));
+  assert.deepEqual(noViewport.map((r) => `${r.page}: ${JSON.stringify(r.viewportMeta)}`), [],
+    "a page without width=device-width is laid out at 980px and zoomed out on every phone");
+
+  // WCAG 1.4.4: a page may not stop a user enlarging it. play-v3 shipped
+  // user-scalable=no even though its canvas already scopes touch-action.
+  const locked = rows.filter((r) => r.viewportMeta && /user-scalable\s*=\s*no|maximum-scale\s*=\s*(1(\.0+)?)\b/.test(r.viewportMeta));
+  assert.deepEqual(locked.map((r) => `${r.page}: ${r.viewportMeta}`), [],
+    "a page may not disable pinch zoom (WCAG 1.4.4) — scope touch-action to the surface that needs it instead");
+});
