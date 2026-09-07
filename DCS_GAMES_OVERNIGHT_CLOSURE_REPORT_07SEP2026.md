@@ -683,3 +683,74 @@ file, never a pattern.**
 
 It cost a lane an hour to find, and it is recorded here so it costs nobody else
 one.
+
+---
+
+## 22. The frontend: what was removed, and why it mattered
+
+The dashboard lane's job was to wire surfaces to the real backend. Most of its
+value turned out to be **deletion**, and this list is the clearest single
+statement of what was wrong with this product before today.
+
+Every item below was on the live site, presented as fact:
+
+- **player-home**: Level 47, 128,400 XP, 8,650 Coins, a 23-day streak, and a
+  "Blackout Protocol · 4 friends inside" hero with a 43% progress bar. No system
+  had measured any of it.
+- **index.html**, shown to anonymous first-time visitors: *"Deepak and 4 friends
+  are playing right now"*, a 7-day reward streak with two days marked
+  "Claimed", and four green checkmarks — Verified Creator, Verified World,
+  Verified Rewards, Provably-Fair Events.
+- **games-events**: a 42,000-participant event with a 50,000-coin prize, and a
+  countdown that was a `setInterval` started at 2h14m09s.
+- **games-atlas**: a page-computed "Trust Score" (`receipts > 0 ? 100 : 0`) and
+  a Live Trust Feed pushing an invented verification event every 3.2 seconds,
+  stamped with the current time. **That was the only thing on the site
+  manufacturing evidence while you watched it.**
+- **Thirteen AI builders** whose Generate button played a five-step animation
+  and then wrote *"published · Atlas receipt queued"* — having sent no request
+  at all.
+- **studio/revenue-payouts**: "Next payout $312 · Jun 21" with a downloadable
+  earnings statement. **studio/settings-team**: two PAID $99 invoices. No payout
+  has ever been made by this platform. Those were financial records of events
+  that did not occur, on the pages a creator opens to see what they are owed.
+- **Three testimonials from people who do not exist**, one advertising "instant
+  payouts".
+- **The Atlas verification diamond defaulted to TRUE on every card ever drawn**
+  (`w.verified !== false`).
+
+Two structural defects underneath all of it:
+
+- **`dcs-truth.js` read the access token from a key nothing writes.** It looked
+  for `dcs_access_token`; `auth.js` writes `dcsgames.token`. So the truth layer
+  was ANONYMOUS for signed-in users — every authenticated metric rendered an em
+  dash, and the internal-tester gate failed closed against allowlisted accounts.
+  The layer built to keep the site honest could not see who was looking at it.
+- **`/play`, the player's own address, was an infinite redirect loop.** A
+  `_redirects` rule rewrote it to `/play.html` and Cloudflare 308s that back to
+  `/play`. The player was not slow; it was unreachable.
+
+And **the V3 flagship journey was linked from nowhere on the entire site** — the
+thing this sprint proved end to end had no route to it from any page.
+
+### What replaced them
+
+95 of 105 routes are now reached, 0 dead buttons, 0 unadvertised. Eleven of the
+thirteen builder shells are DISABLED controls naming the route that would have
+to exist; two hand off to the real generator. Where the server publishes no enum,
+the control is disabled rather than guessing. Sample content still ships on ~90
+low-traffic pages, every one carrying a visible banner that the crawl enforces.
+
+### Still unwired — 10 routes
+
+Nine are decisions: no second credential path, no duplicate legacy moderation
+queue, no KYC flow for a payout that cannot happen, no admin grant/revoke
+without a principal picker. **One is an honest gap**:
+`POST /v3/marketplace/storefronts`, unwired because the session ran out, not
+because anyone decided it should be.
+
+### Wired but thin, which the founder should know
+
+The studio AI-builder shells are honest now, but they are shells: nothing
+generates an NPC, a quest standalone, a voice or an economy, and no amount of
+frontend work changes that.

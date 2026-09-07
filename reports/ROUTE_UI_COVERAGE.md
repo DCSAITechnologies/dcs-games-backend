@@ -1,10 +1,10 @@
 # Route-to-UI coverage
 
 Backend: https://dcs-games-backend-staging.up.railway.app
-Build:   54ccd1722381 (deployment 2fdf2945-9567-47fc-9755-f06e4fb6831c)
+Build:   e14263ba929c (deployment b49d6067-012b-41f9-a4d6-73a9fedfdc05)
 Site:    /Users/NEWUSER/Desktop/Project DCSAI/dcs-games-LIVE
 
-105 live routes, 15 retired, 57 distinct paths requested by the UI.
+105 live routes, 15 retired, 58 distinct paths requested by the UI.
 
 ## Dead buttons — the UI calls a path the backend genuinely does not serve (0)
 
@@ -16,7 +16,7 @@ None.
 None.
 
 
-## Unreached capability — a live route no page ever calls (11)
+## Unreached capability — a live route no page ever calls (10)
 
 ### identity (2)
 - `POST /auth/login`
@@ -38,10 +38,7 @@ None.
 - `GET /payout/kyc`
 - `POST /payout/kyc/start`
 
-### trust (1)
-- `GET /verify`
-
-## Reached (94)
+## Reached (95)
 
 - `POST /worlds/generate` <- create-v3.html, play.html
 - `GET /worlds/mine` <- create-v3.html, play.html, player-achievements.html (+5)
@@ -69,13 +66,13 @@ None.
 - `POST /v3/worlds/:id/stitch/preview` <- create-v3.html, history-v3.html, play-v3.html
 - `GET /v3/worlds/:id/versions/:n` <- create-v3.html, history-v3.html, play-v3.html
 - `GET /v3/worlds/:id/npcs/:npc/memory` <- create-v3.html, history-v3.html, play-v3.html
-- `GET /v3/discover` <- assets/seed-data.js, explore-v3.html, games-atlas.html (+1)
+- `GET /v3/discover` <- assets/dcs-live.js, explore-v3.html, games-atlas.html (+1)
 - `GET /api/public/worlds` <- player-play.html
-- `GET /api/public/stats` <- assets/seed-data.js, studio/pages/atlas.html
-- `GET /api/public/events` <- assets/seed-data.js, index.html
-- `GET /api/public/market` <- assets/seed-data.js, games-marketplace.html, studio/pages/marketplace.html
-- `GET /api/public/atlas/feed` <- assets/seed-data.js, studio/pages/atlas.html
-- `GET /api/public/atlas/stats` <- games-atlas.html, index.html, studio/pages/atlas.html
+- `GET /api/public/stats` <- assets/dcs-live.js, studio/pages/atlas.html
+- `GET /api/public/events` <- assets/dcs-live.js, index.html
+- `GET /api/public/market` <- assets/dcs-live.js, games-marketplace.html, studio/pages/marketplace.html
+- `GET /api/public/atlas/feed` <- assets/dcs-live.js, at-explorer.html, at-receipts.html (+1)
+- `GET /api/public/atlas/stats` <- at-creators.html, games-atlas.html, index.html (+1)
 - `POST /v3/worlds/:id/play` <- create-v3.html, history-v3.html, play-v3.html
 - `POST /v3/worlds/:id/rate` <- create-v3.html, history-v3.html, play-v3.html
 - `GET /v3/worlds/:id/stats` <- create-v3.html, history-v3.html, play-v3.html
@@ -108,20 +105,20 @@ None.
 - `POST /social/teams/:id/members` <- social-v3.html
 - `DELETE /social/teams/:id/members` <- social-v3.html
 - `GET /v3/marketplace` <- profile-v3.html
-- `GET /v3/marketplace/split` <- profile-v3.html, studio/pages/revenue.html
+- `GET /v3/marketplace/split` <- profile-v3.html, studio/pages/editors/revenue-payouts.html, studio/pages/revenue.html
 - `POST /v3/marketplace/listings` <- profile-v3.html
 - `DELETE /v3/marketplace/listings/:id` <- profile-v3.html
 - `POST /v3/marketplace/listings/:id/acquire` <- profile-v3.html
 - `GET /v3/marketplace/owned` <- profile-v3.html, studio/pages/marketplace.html
 - `GET /v3/marketplace/ledger` <- profile-v3.html, studio/pages/marketplace.html, studio/pages/revenue.html
-- `GET /v3/marketplace/assert-dark` <- studio/pages/revenue.html
-- `GET /v3/subscriptions/plans` <- profile-v3.html
+- `GET /v3/marketplace/assert-dark` <- studio/pages/editors/revenue-payouts.html, studio/pages/revenue.html
+- `GET /v3/subscriptions/plans` <- profile-v3.html, studio/pages/editors/settings-team.html
 - `POST /v3/subscriptions/subscribe` <- profile-v3.html
 - `GET /v3/subscriptions/grants` <- assets/dcs-truth.js
 - `GET /v3/subscriptions/assert-dark` <- profile-v3.html
-- `GET /me/subscription` <- profile-v3.html
+- `GET /me/subscription` <- profile-v3.html, studio/pages/editors/settings-team.html
 - `GET /me/entitlements` <- profile-v3.html
-- `GET /safety/age` <- safety-v3.html
+- `GET /safety/age` <- safety-v3.html, studio/pages/editors/revenue-payouts.html
 - `GET /safety/blocks` <- social-v3.html
 - `POST /safety/consent/parental` <- safety-v3.html
 - `POST /safety/report` <- safety-v3.html
@@ -136,4 +133,5 @@ None.
 - `GET /atlas/key` <- assets/dcs-truth.js, games-atlas.html, index.html (+1)
 - `DELETE /verify/:channel` <- profile-v3.html
 - `GET /atlas/receipt/:id` <- assets/dcs-truth.js
+- `GET /verify` <- games-atlas.html
 - `GET /v3/providers` <- create-v3.html
