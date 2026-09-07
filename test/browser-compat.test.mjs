@@ -88,6 +88,34 @@ const FULL = {
     ],
   },
   "/v3/providers": { ok: true, lanes: [{ lane: "world", adapters: [{ name: "adapter-a", status: "AVAILABLE", is_fallback: false }] }] },
+  // The internal-tester gate's predicate. It moved from GET /api/worlds/mine —
+  // which only proves the caller is signed in — to this, which goes through
+  // mustBeInternalTester() on the server. A fixture that keeps answering the
+  // old one leaves the gate closed over every test behind it.
+  "/v3/subscriptions/grants": { ok: true, grants: [], note: "Money is dark; nothing is purchasable." },
+  // The creator's own generation-job list, added to create-v3 when GET /v3/jobs
+  // stopped being a live route no page called. One job in each of the states a
+  // real list contains, including one interrupted by a restart.
+  "/v3/jobs": { ok: true, jobs: [
+    { job_id: "j_done", state: "done", world_id: "w_compat_1", progress: 1, created_at: "2026-09-01T00:00:00Z", elapsed_ms: 4200 },
+    { job_id: "j_run", state: "running", progress: 0.4, created_at: "2026-09-02T00:00:00Z" },
+    // No progress and no world: the record a restart leaves behind.
+    { job_id: "j_lost", state: "interrupted", created_at: "2026-09-03T00:00:00Z" },
+  ] },
+  "/v3/subscriptions/plans": { ok: true, purchasable: false, payments_live: false, plans: [] },
+  "/v3/subscriptions/assert-dark": { ok: true, payments_live: false, purchasable: false },
+  "/v3/marketplace": { ok: true, payments_live: false, purchasable: false, listings: [],
+                       note: "The marketplace is dark: nothing is purchasable and no money has moved." },
+  "/v3/marketplace/owned": { ok: true, items: [] },
+  "/v3/marketplace/ledger": { ok: true, entries: [], note: "No money has moved." },
+  "/v3/marketplace/split": { ok: true, splits: [], payments_live: false },
+  "/social/orgs": { ok: true, orgs: [] },
+  "/social/studios": { ok: true, studios: [] },
+  "/safety/reports": { ok: true, reports: [] },
+  "/safety/moderation-history": { ok: true, events: [] },
+  "/safety/age": { ok: true, age_bracket: null, note: "No age has been recorded for this account." },
+  "/safety/consent/parental": { ok: true, consent: null },
+  "/safety/consent/media": { ok: true, consent: null },
   "/me/profile": {
     ok: true, principal_id: "u_compat", username: "tester", display_name: "Compat Tester",
     created_at: "2026-01-02T03:04:05Z", avatar_color: "#2563ff", level: "verified_builder", is_internal_tester: true,
@@ -96,6 +124,12 @@ const FULL = {
     economy: { payments_live: false, balance_minor: null, dcs_plus: false, note: "Money is disabled." },
     level_signals: { email_verified: true, phone_verified: false, atlas_score: 52, dcs_plus: false, active_players: 11, reports: 0, is_studio: false },
   },
+  // GET /profiles/:username — the PUBLIC read of an account, shown on
+  // profile-v3 beside "if a field is not here, nobody else can see it".
+  // Deliberately narrower than /me/profile: a stranger sees no email and no
+  // principal id, and the page's claim is only true if the fixture is too.
+  "/profiles/tester": { ok: true, username: "tester", display_name: "Compat Tester", avatar_color: "#2563ff",
+                        level: "verified_builder", worlds_published: 1, created_at: "2026-01-02T03:04:05Z" },
   "/verify/status": {
     ok: true, email_verified: true, phone_verified: false, trustworthy: false, dev_mode_verifications: ["email"],
     providers: { channels: { email: { provider: "none", status: "UNAVAILABLE" } }, note: "No delivery provider is configured." },
@@ -179,6 +213,21 @@ const EMPTY = {
   "/api/worlds/mine": { ok: true, owner: "u_compat", worlds: [] },
   "/v3/discover": { ok: true, worlds: [] },
   "/v3/providers": { ok: true, lanes: [] },
+  "/v3/subscriptions/grants": { ok: true, grants: [] },
+  "/v3/jobs": { ok: true, jobs: [] },
+  "/v3/subscriptions/plans": { ok: true, purchasable: false, payments_live: false, plans: [] },
+  "/v3/subscriptions/assert-dark": { ok: true, payments_live: false, purchasable: false },
+  "/v3/marketplace": { ok: true, payments_live: false, purchasable: false, listings: [] },
+  "/v3/marketplace/owned": { ok: true, items: [] },
+  "/v3/marketplace/ledger": { ok: true, entries: [] },
+  "/v3/marketplace/split": { ok: true, splits: [], payments_live: false },
+  "/social/orgs": { ok: true, orgs: [] },
+  "/social/studios": { ok: true, studios: [] },
+  "/safety/reports": { ok: true, reports: [] },
+  "/safety/moderation-history": { ok: true, events: [] },
+  "/safety/age": { ok: true, age_bracket: null },
+  "/safety/consent/parental": { ok: true, consent: null },
+  "/safety/consent/media": { ok: true, consent: null },
   "/me/profile": { ok: true, principal_id: "u_compat", username: "tester", level: "free", level_signals: {}, can_publish: {}, economy: {} },
   "/verify/status": { ok: true, providers: {} },
   "/me/achievements": { ok: true, achievements: [] },
@@ -190,12 +239,15 @@ const EMPTY = {
   "/social/friends": { ok: true, friends: [], incoming: [], outgoing: [] },
   "/social/parties": { ok: true, parties: [] },
   "/social/teams": { ok: true, teams: [] },
+  "/profiles/tester": { ok: true, username: "tester", display_name: null, level: "free", worlds_published: 0 },
   [`/v3/worlds/${WORLD}/versions`]: { ok: true, versions: [] },
   [`/v3/worlds/${WORLD}/memory`]: { ok: true, chronology: [], timeline: [] },
 };
 
 let site, api, browser, page, deadPort;
 let MODE = "data";
+/** Paths a page asked for that the fixtures above do not define. See stubApi. */
+let unstubbed = [];
 
 function stubApi() {
   const server = http.createServer((req, res) => {
@@ -217,11 +269,24 @@ function stubApi() {
     // gate-open mode: the ownership check succeeds and everything else 500s, so
     // the surfaces BEHIND the gate get their failure paths exercised too.
     if (MODE === "gate-open-500") {
+      // Whatever the gate's predicate is, THIS is the endpoint that has to
+      // succeed — everything else 500s. It was /api/worlds/mine alone; the gate
+      // then moved to /v3/subscriptions/grants, this mode kept opening the old
+      // one, the gate closed, and two tests failed reporting that create-v3 had
+      // no #verdict element — which it does, behind a gate that had shut.
+      if (url === "/v3/subscriptions/grants") return send(200, FULL["/v3/subscriptions/grants"]);
       if (url === "/api/worlds/mine") return send(200, FULL["/api/worlds/mine"]);
       return send(500, { ok: false, error: "internal_error", detail: "The database is unreachable." });
     }
     const table = MODE === "empty" ? EMPTY : FULL;
     if (Object.prototype.hasOwnProperty.call(table, url)) return send(200, table[url]);
+    // A path the fixture does not define is recorded BY NAME. In the "data" and
+    // "empty" modes the whole premise is a backend that answered, so a 404 here
+    // means the page grew a call the fixture never followed — and the page then
+    // renders a failure the test reads as the page's own fault. Drift has to
+    // accuse itself; the alternative is a mute timeout, which is how a gate that
+    // had moved its predicate cost ten tests and no explanation.
+    if (MODE === "data" || MODE === "empty") unstubbed.push(`${req.method} ${url}`);
     return send(404, { ok: false, error: "not_found", detail: "No such endpoint." });
   });
   return new Promise((r) => server.listen(0, "127.0.0.1", () => {
@@ -280,6 +345,7 @@ const COLLECTORS = `
 /** Point the next navigation at a backend, and install the collectors. */
 async function useBackend(mode) {
   MODE = mode;
+  unstubbed = [];
   const base = mode === "refused" ? `http://127.0.0.1:${deadPort}` : api.url;
   await page.send("Page.addScriptToEvaluateOnNewDocument", {
     source: `window.DCS_API_BASE=${JSON.stringify(base)}; window.DCS_ACCESS_TOKEN="compat-test-token";` + COLLECTORS,
@@ -496,20 +562,33 @@ test("A ring is painted on every page even if the shared accessibility sheet nev
       Array.prototype.forEach.call(document.styleSheets, function (s) {
         if (s.href && /dcs-a11y\\.css/.test(s.href)) s.disabled = true;
       });
-      var el = _controls()[0];
-      if (!el) return { none: true };
-      el.focus();
+      // The first FOCUSABLE control, not the first visible one. profile-v3's
+      // first visible control is a disabled "Send a code" button, which cannot
+      // take focus by design — focusing it left activeElement on <body> and the
+      // test measured the body's outline while reporting a missing ring.
+      var all = _controls();
+      var el = null;
+      for (var i = 0; i < all.length; i++) {
+        if (all[i].disabled === true) continue;
+        all[i].focus();
+        if (document.activeElement === all[i]) { el = all[i]; break; }
+      }
+      if (!el) {
+        return { none: true, tried: all.length, first: all.length ? _desc(all[0]) : null };
+      }
       var cs = getComputedStyle(el);
       return {
         sel: _desc(el),
+        skipped: all.indexOf(el),
         width: parseFloat(cs.outlineWidth) || 0,
         style: cs.outlineStyle,
         color: cs.outlineColor,
         isActive: document.activeElement === el,
       };
     `);
-    assert.ok(!r.none, `${p.file}: no control to focus`);
-    assert.equal(r.isActive, true, `${p.file}: the control never took focus, so nothing was measured`);
+    assert.ok(!r.none,
+      `${p.file}: not one of its ${r.tried} visible controls could take focus (first was ${r.first}) — a page a keyboard cannot enter at all`);
+    assert.equal(r.isActive, true, `${p.file}: ${r.sel} reported focus and did not hold it`);
     assert.ok(r.width >= 2 && r.style !== "none",
       `${p.file}: with the shared sheet gone, ${r.sel} focuses with only a ${r.width}px ${r.style} outline — the page has no ring of its own`);
   }
@@ -669,15 +748,23 @@ test("CONTRAST MODE: every V3 page keeps its words and its control edges under W
         if (!_ownText(el).trim()) return;
         if (cs.color === cs.backgroundColor) invisible.push(_desc(el) + " paints " + cs.color + " on " + cs.backgroundColor);
       });
-      var el = _controls()[0];
-      el.focus();
-      var fcs = getComputedStyle(el);
+      // The first FOCUSABLE control. A disabled button is visible and cannot
+      // take focus, and focusing it silently measured <body>'s outline instead.
+      var all = _controls(), el = null;
+      for (var i = 0; i < all.length; i++) {
+        if (all[i].disabled === true) continue;
+        all[i].focus();
+        if (document.activeElement === all[i]) { el = all[i]; break; }
+      }
+      var fcs = el ? getComputedStyle(el) : null;
       return {
         emulated: true, invisible: invisible, gradients: gradients,
         textLength: document.body.innerText.length,
-        focusWidth: parseFloat(fcs.outlineWidth) || 0,
-        focusStyle: fcs.outlineStyle,
-        focused: document.activeElement === el,
+        focusSel: el ? _desc(el) : null,
+        focusWidth: fcs ? (parseFloat(fcs.outlineWidth) || 0) : 0,
+        focusStyle: fcs ? fcs.outlineStyle : "none",
+        focused: !!el,
+        tried: all.length,
       };
     `);
     await page.send("Emulation.setEmulatedMedia", {});
@@ -685,9 +772,10 @@ test("CONTRAST MODE: every V3 page keeps its words and its control edges under W
     assert.ok(r.textLength > 200, `${p.file}: only ${r.textLength} characters survive forced colours`);
     assert.deepEqual(r.invisible, [], `${p.file}: text painted the same colour as what is behind it under forced colours`);
     assert.deepEqual(r.gradients, [], `${p.file}: a gradient survives forced colours without opting out of the mode`);
-    assert.equal(r.focused, true, `${p.file}: the control never took focus`);
+    assert.equal(r.focused, true,
+      `${p.file}: not one of its ${r.tried} visible controls could take focus under forced colours`);
     assert.ok(r.focusWidth >= 2 && r.focusStyle !== "none",
-      `${p.file}: the focus ring is ${r.focusWidth}px ${r.focusStyle} under forced colours`);
+      `${p.file}: ${r.focusSel} focuses with a ${r.focusWidth}px ${r.focusStyle} ring under forced colours`);
   }
 });
 
@@ -786,6 +874,8 @@ test("BACKEND 200 with data: every page renders what the server sent and faults 
     await open(p);
     const r = await assertHonest(p, "data");
     assert.equal(r.gated, false, `[data] ${p.file}: the gate closed on a backend that authorised the request`);
+    assert.deepEqual([...new Set(unstubbed)], [],
+      `[data] ${p.file}: the page called endpoints this fixture does not stub, so it was answered 404 and what follows measures a broken page rather than a working one`);
     const broke = SELF_INFLICTED.filter((re) => re.test(r.text)).map(String);
     assert.deepEqual(broke, [],
       `[data] ${p.file}: the server answered and the page could not render the answer — a record with an optional field absent is a record, not an outage`);
@@ -801,6 +891,8 @@ test("BACKEND 200 but empty: an empty list is stated as a real zero, not left bl
     await open(p);
     const r = await assertHonest(p, "empty");
     assert.equal(r.gated, false, `[empty] ${p.file}: the gate closed on an authorised request`);
+    assert.deepEqual([...new Set(unstubbed)], [],
+      `[empty] ${p.file}: the page called endpoints this fixture does not stub, so it was answered 404 and what follows measures a broken page rather than a working one`);
     const broke = SELF_INFLICTED.filter((re) => re.test(r.text)).map(String);
     assert.deepEqual(broke, [], `[empty] ${p.file}: the page could not render an empty but valid response`);
     if (p.file === "create-v3.html") continue;   // the builder has nothing to list on load

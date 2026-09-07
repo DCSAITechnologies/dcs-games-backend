@@ -58,7 +58,23 @@ const WORLDS = [
 let site, api, browser, page;
 let feed = WORLDS;                 // flipped to [] to exercise the real-zero empty state
 
-/** The endpoints these two pages touch on load. Nothing else is stubbed. */
+/**
+ * The endpoints these two pages touch on load. Nothing else is stubbed.
+ *
+ * Anything NOT stubbed is recorded, so a page that grows a new call says so by
+ * name. That is not a nicety: when the internal-tester gate moved its predicate
+ * from GET /api/worlds/mine to GET /v3/subscriptions/grants, this stub kept
+ * answering the old one, the gate closed over every test, and ten tests failed
+ * as fifteen-second waitFor timeouts with no indication of why. A stub that has
+ * drifted from the product must SAY it has drifted.
+ */
+let unstubbed = [];
+/**
+ * Flipped by the gate test alone. Every other test needs the gate OPEN — they
+ * are about the surface behind it — and the gate test needs it CLOSED, by the
+ * server's own refusal rather than by a fixture that happens to 404.
+ */
+let grantsRefused = false;
 function stubApi() {
   const server = http.createServer((req, res) => {
     const send = (code, body) => {
@@ -69,10 +85,20 @@ function stubApi() {
     const url = (req.url || "").split("?")[0];
     // create-v3 fails CLOSED behind the internal gate. These tests are about
     // the surface behind the gate, so the gate is satisfied honestly: a token
-    // is injected and the ownership endpoint answers for it.
+    // is injected and the predicate the gate ACTUALLY uses answers for it.
+    // GET /v3/subscriptions/grants goes through mustBeInternalTester() on the
+    // server, which is why the gate asks it rather than an endpoint that only
+    // proves the caller is signed in.
+    if (url === "/v3/subscriptions/grants") {
+      return grantsRefused
+        ? send(403, { ok: false, error: "not_an_internal_tester", detail: "This account is not on the internal tester list." })
+        : send(200, { ok: true, grants: [], note: "Money is dark." });
+    }
     if (url === "/api/worlds/mine") return send(200, { ok: true, owner: "u_a11y", worlds: [] });
     if (url === "/v3/discover") return send(200, { ok: true, note: "Ranking uses measured plays only.", worlds: feed });
     if (url === "/v3/providers") return send(200, { ok: true, lanes: [] });
+    if (url === "/v3/jobs") return send(200, { ok: true, jobs: [] });
+    unstubbed.push(`${req.method} ${url}`);
     return send(404, { ok: false, error: "not_found" });
   });
   return new Promise((r) => server.listen(0, "127.0.0.1", () => {
@@ -275,11 +301,23 @@ const SHOW_ALL_CREATE = `
 `;
 
 async function openCreate({ showAll = true } = {}) {
+  unstubbed = [];
   await page.goto(site.url + "/create-v3.html", { waitMs: 700 });
   // The gate replaces the whole body when it closes, so the builder is only
   // really open once its own controls are in the document.
   const open = await page.waitFor('document.getElementById("gen") && !document.querySelector(".dcs-gate")');
-  assert.ok(open, "the builder never opened — the internal gate did not accept the test token");
+  if (!open) {
+    // Say WHY. This used to be a bare "the gate did not accept the test token",
+    // which is the one thing it could not have been — the token is injected —
+    // and it left ten tests failing on a silent fifteen-second wait.
+    const gateText = await page.eval("const g = document.querySelector('.dcs-gate'); return g ? g.innerText.slice(0, 240) : null;").catch(() => null);
+    assert.fail(
+      "the builder never opened.\n" +
+      `  gate on screen: ${JSON.stringify(gateText)}\n` +
+      `  endpoints this page asked for that the fixture does not stub: ${JSON.stringify(unstubbed)}\n` +
+      "  if the gate's predicate moved, stubApi() has to move with it.",
+    );
+  }
   if (showAll) await page.eval(SHOW_ALL_CREATE);
   await new Promise((r) => setTimeout(r, 150));
 }
@@ -702,6 +740,11 @@ test("A11Y: the way out of a locked page is readable and hittable", opts, async 
   // requireInternalTester() treats as "not an internal tester", and the gate
   // that appears is the one a locked-out person actually sees. No conditional
   // is left in the test: if the gate does not render, that is a failure.
+  // The refusal has to come from the SERVER's answer to the predicate the gate
+  // actually asks — not from a fixture that forgot to stub it, which would
+  // prove only that a 404 closes the gate.
+  grantsRefused = true;
+  try {
   await page.goto(site.url + "/create-v3.html", { waitMs: 300 });
   const gate = await page.eval(`
     if (!window.DCSTruth || typeof DCSTruth.requireInternalTester !== "function") {
@@ -727,4 +770,5 @@ test("A11Y: the way out of a locked page is readable and hittable", opts, async 
   assert.ok(gate.exits.length >= 1, "a locked page must offer at least one way out");
   const small = gate.exits.filter((e) => e.h < 44);
   assert.deepEqual(small, [], `the gate's only action must be hittable: ${JSON.stringify(gate.exits)}`);
+  } finally { grantsRefused = false; }
 });
