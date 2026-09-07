@@ -13,6 +13,7 @@ import { planWorldLocally, archetypeFor, rng } from "../src/v3/providers/local-p
 import { generateTerrainLocally } from "../src/v3/providers/spatial.mjs";
 import { resolveArchetype, buildAsset, ARCHETYPE_LIBRARY } from "../src/v3/providers/asset3d.mjs";
 import { mediaAdapters } from "../src/v3/providers/media.mjs";
+import { gameplayAdapters } from "../src/v3/providers/text.mjs";
 import { generateWorld } from "../src/cw2/generate.mjs";
 
 const OFFLINE = { DCS_PROVIDERS_OFFLINE: "1" };
@@ -337,4 +338,43 @@ test("B1 GATE: the placeholder image cannot be made to carry markup a caller sup
   // The label was already escaped and must stay that way.
   const labelled = await placeholder.invoke({ kind: "image", label: '</text><script>alert(1)</script>', prompt: "x" });
   assert.doesNotMatch(Buffer.from(labelled.uri.split(",")[1], "base64").toString(), /<script/i);
+});
+
+test("B1 GATE: the deterministic gameplay fallback cannot be made to throw", async () => {
+  // The fallback is the lane's LAST adapter and the reason "no lane may
+  // hard-depend on any single vendor" is true. If it throws there is nothing
+  // behind it: Lane.run reports "every adapter failed" and the generation
+  // returns a 500 rather than a plainer world.
+  //
+  // It threw. `n.position.x` assumed every NPC carries a position — which the
+  // architect's declared schema promises, and which a live model omitting it on
+  // one character out of six would break. The upstream adapters check only that
+  // `zones` and `structures` are arrays, so nothing between the model and here
+  // would have caught it.
+  const fallback = gameplayAdapters(OFFLINE).find((a) => a.isFallback);
+  assert.ok(fallback, "the gameplay lane must have a deterministic fallback");
+
+  const inputs = {
+    "an NPC with no position at all": { structures: [{ id: "s", enterable: true }], npcs: [{ id: "n" }], items: [], zones: [{ id: "z" }] },
+    "coordinates that are not numbers": { structures: [], npcs: [{ id: "n", position: { x: NaN, y: NaN, z: "over there" } }], items: [], zones: [] },
+    "a position under another name": { structures: [], npcs: [{ id: "n", spawn: { x: 5, y: 0, z: 7 } }], items: [], zones: [] },
+    "null rows in every list": { structures: [null], npcs: [null, { id: "n" }], items: [null], zones: [null] },
+    "collections that are not arrays": { structures: "x", npcs: 42, items: null, zones: {} },
+    "rows with no id": { structures: [{}], npcs: [{}], items: [{}], zones: [{}] },
+    "a footprint height that is not a height": { structures: [{ id: "s", footprint: { h: NaN } }, { id: "t", footprint: { h: "tall" } }], npcs: [], items: [], zones: [] },
+    "nothing at all": {},
+  };
+
+  for (const [label, req] of Object.entries(inputs)) {
+    const out = await fallback.invoke(req);
+    assert.ok(Array.isArray(out.behaviors) && Array.isArray(out.interactions), `${label}: no result`);
+    // And whatever it produces must be usable, not merely non-throwing.
+    const json = JSON.stringify(out);
+    assert.doesNotMatch(json, /NaN|Infinity/, `${label}: non-finite geometry reached the behaviours`);
+    for (const b of out.behaviors) assert.ok(typeof b.id === "string" && b.id, `${label}: a behaviour with no id`);
+    for (const i of out.interactions) {
+      assert.ok(typeof i.target_ref === "string" && i.target_ref, `${label}: an interaction targeting nothing`);
+      assert.ok(out.behaviors.some((b) => b.id === i.behavior_ref), `${label}: an interaction triggering a behaviour it did not make`);
+    }
+  }
 });

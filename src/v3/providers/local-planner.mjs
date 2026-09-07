@@ -309,13 +309,33 @@ export function classifyLocally(req = {}) {
  * generated code is ever executed in a player's browser.
  */
 export function behaviorsLocally(req = {}) {
-  const r = rng(req.seed ?? hashString(JSON.stringify((req.structures || []).map((s) => s.id))));
+  // This is the FALLBACK — the lane's last adapter, and the reason
+  // "no lane may hard-depend on any single vendor" is true. If it throws there
+  // is nothing behind it: Lane.run reports "every adapter failed" and the whole
+  // generation returns a 500.
+  //
+  // It threw. `n.position.x` assumed every NPC carries a position, which is
+  // what the architect's declared schema promises — and a model omitting it on
+  // one character out of six is an entirely ordinary thing for a model to do.
+  // The upstream adapters check only that `zones` and `structures` are arrays,
+  // so nothing between the model and here would have caught it.
+  //
+  // Rows that are not objects with an id are dropped, and coordinates that are
+  // not numbers are read as zero. The point of a deterministic fallback is that
+  // it always produces something; being strict about its input defeats it.
+  const isRow = (x) => x !== null && typeof x === "object" && typeof x.id === "string" && x.id !== "";
+  const at = (q) => ({
+    x: typeof q?.x === "number" && Number.isFinite(q.x) ? q.x : 0,
+    z: typeof q?.z === "number" && Number.isFinite(q.z) ? q.z : 0,
+  });
+  const structures = (Array.isArray(req.structures) ? req.structures : []).filter(isRow);
+  const npcs = (Array.isArray(req.npcs) ? req.npcs : []).filter(isRow);
+  const items = (Array.isArray(req.items) ? req.items : []).filter(isRow);
+  const zones = (Array.isArray(req.zones) ? req.zones : []).filter(isRow);
+
+  const r = rng(req.seed ?? hashString(JSON.stringify(structures.map((x) => x.id))));
   const behaviors = [];
   const interactions = [];
-  const structures = req.structures || [];
-  const npcs = req.npcs || [];
-  const items = req.items || [];
-  const zones = req.zones || [];
 
   const enterable = structures.filter((s) => s.enterable);
   const lockItem = items[0]?.id || null;
@@ -331,7 +351,7 @@ export function behaviorsLocally(req = {}) {
   });
 
   // A working lift wherever a tall structure exists.
-  const tall = structures.filter((s) => (s.footprint?.h || 0) > 12);
+  const tall = structures.filter((s) => Number.isFinite(s.footprint?.h) && s.footprint.h > 12);
   if (tall.length) {
     behaviors.push({ id: "behavior_elevator_main", kind: "elevator", spec: { floors: [0, 6, 12, Math.round(tall[0].footprint.h)], speed: 2.2, call_from: zones.slice(0, 2).map((z) => z.id) } });
     interactions.push({ id: "interaction_elevator_main", trigger: "interact", target_ref: tall[0].id, behavior_ref: "behavior_elevator_main", params: { prompt: "Call lift" } });
@@ -347,14 +367,18 @@ export function behaviorsLocally(req = {}) {
   npcs.forEach((n, i) => {
     const hostile = n.behavior === "hostile" || /stalker|scavenger|smuggler/.test(n.role || "");
     const id = `behavior_npc_${n.id}`;
+    // Where the character stands, when the model said so. An NPC with no
+    // position is still a character worth wiring up; its routine simply starts
+    // at the origin rather than taking the whole generation down.
+    const p = at(n.position || n.spawn);
     if (hostile) {
       behaviors.push({
         id, kind: "enemy_ai",
         spec: {
           aggro_radius: 14 + Math.round(r() * 8), damage: 6 + Math.round(r() * 6), health: 60 + Math.round(r() * 40), flee_below: 0.2,
           patrol: [
-            { x: n.position.x, z: n.position.z },
-            { x: Number((n.position.x + 12 - r() * 24).toFixed(2)), z: Number((n.position.z + 12 - r() * 24).toFixed(2)) },
+            { x: p.x, z: p.z },
+            { x: Number((p.x + 12 - r() * 24).toFixed(2)), z: Number((p.z + 12 - r() * 24).toFixed(2)) },
           ],
         },
       });
@@ -363,7 +387,7 @@ export function behaviorsLocally(req = {}) {
         id, kind: "npc_ai",
         spec: {
           routine: n.behavior || "idle",
-          waypoints: [{ x: n.position.x, z: n.position.z }, { x: Number((n.position.x + 8).toFixed(2)), z: Number((n.position.z + 6).toFixed(2)) }],
+          waypoints: [{ x: p.x, z: p.z }, { x: Number((p.x + 8).toFixed(2)), z: Number((p.z + 6).toFixed(2)) }],
           dialogue_topics: [n.role || "greeting", "directions", "the world"],
         },
       });
