@@ -155,3 +155,28 @@ clamped.
 
 `scripts/verify-ci-pins.mjs` now resolves every pinned external ref against its
 remote and fails with the file and line when one is dead.
+
+
+---
+
+# The V2 surface — `scripts/staging-v2-proof.mjs`
+
+Section 4 of the closure order is explicit that V2 must not be left as an
+orphaned product while V3 advances, and "not orphaned" means proven rather than
+present. There was a 42-assertion flagship proof for V3 and none at all for V2 —
+which is how the entire V2 surface came to be missing from `/health`'s route
+inventory without anyone noticing.
+
+## Result — 20 passed, 0 failed
+
+Generate, load, save, idempotent re-save, lossless round trip, publish, public
+listing, and the creator's own list. Every step exercises the legacy contract,
+not the V3 one.
+
+Three assertions exist because of defects closed today, so a regression is
+caught rather than rediscovered:
+
+- an empty prompt is REFUSED, where it used to answer 200 with a pirate world
+  handed back as the caller's own creation
+- a save cannot set `state`, and the refusal names the route that publishes
+- an ordinary save leaves a published world published, and a draft a draft
