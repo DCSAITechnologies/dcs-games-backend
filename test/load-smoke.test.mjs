@@ -14,13 +14,15 @@
 // catch a hang, not to police latency. A tight p95 assertion on a shared CI box
 // is a test that will eventually lie to whoever is on call.
 //
-// STATUS AS WRITTEN: three of these assertions FAIL against the current server.
-// That is deliberate and it is not flakiness — the failures reproduce 5/5 at a
-// concurrency of two. They pin the defects recorded in reports/LOAD_AND_SCALE.md
-// (LF-1 world plays, LF-2 principal profiles, LF-3 world saves). This file is not
-// referenced by any npm script, so it cannot redden another lane's build; wire it
-// into test:ci once collection.mjs and WorldRepository.upsert serialise their
-// read-modify-write.
+// STATUS, 7 Sep 2026: all of it passes. This header used to say that three of
+// these assertions failed — LF-1 world plays, LF-2 principal profiles, LF-3
+// world saves — and that the file "is not referenced by any npm script, so it
+// cannot redden another lane's build". Both statements had stopped being true:
+// collection.mjs and WorldRepository.upsert now serialise their read-modify-
+// write, and package.json runs this file under `test:load`, which `test` and
+// `test:ci` both call. A header that misreports which defects are live is the
+// same failure as a test that asserts nothing — it is read, believed, and
+// wrong. They are regression guards now.
 //
 // Run: node --import tsx --test test/load-smoke.test.mjs
 
@@ -269,4 +271,94 @@ test("load smoke: the server is still healthy and money is still dark after the 
   const r = await call("/health");
   assert.equal(r.status, 200, "the server must still be serving after the concurrency burst");
   assert.equal(r.body.payments_live, false, "PAYMENTS_LIVE must stay false");
+});
+
+// --------------------------------------------------------------- discovery
+test("load smoke: discovery does not get slower as the catalogue grows", async () => {
+  // The listing path is the one every anonymous visitor hits, and it is the one
+  // that gets quietly quadratic: a discover that opens each world's record to
+  // build a card costs the whole catalogue on every page view, and looks
+  // perfectly healthy while the catalogue is small.
+  //
+  // Deliberately NOT a latency SLO. A p95 in milliseconds is a number about the
+  // machine — a tight one on a shared runner is a test that will eventually lie
+  // to whoever is on call, and this suite already says so about its hang
+  // ceiling. What is asserted instead is a SHAPE: a page of at most 24 cards
+  // must cost about the same whether it is drawn from 8 worlds or from 64.
+  // Both measurements are taken back to back, on the same machine, in the same
+  // process, so the ratio between them is a property of the server.
+  //
+  // RED AS WRITTEN, and the shape is unambiguous. Measured 7 Sep 2026 against
+  // this server with the file backing, median of 41 requests at each size:
+  //
+  //     8 worlds   1.55ms      64 worlds    9.22ms
+  //    16 worlds   2.62ms     128 worlds   19.17ms
+  //    32 worlds   5.15ms     256 worlds   37.05ms
+  //
+  // The page stops growing at 24 cards from 32 worlds on, and the cost keeps
+  // going up in a straight line: 32x the catalogue for 24x the cost, about
+  // 0.14ms per published world per page view. At ten thousand worlds a single
+  // anonymous page view is over a second of main-loop time, on the busiest
+  // public route there is.
+  //
+  // The cause is src/core/worldstore.mjs:339 FileWorldStore.list(), which
+  // readdir()s the whole worlds directory, JSON.parses every record AND every
+  // sidecar, sorts all of them, and only then applies `limit` — while
+  // server.mts:1207 calls repo.listPublished(200) on every /v3/discover.
+  //
+  // SCOPE, stated precisely because it is narrower than it first looks:
+  // SupabaseWorldStore.list (src/core/worldstore.mjs:453) pushes both `limit`
+  // and `order=updated_at.desc` to PostgREST and does NOT have this shape, and
+  // staging reports persistence "supabase+file". So this is the FILE backing —
+  // the fallback path, and the one every local and CI run uses — not a
+  // statement about staging today.
+  const worldsDir = path.join(DATA, "worlds");
+  const record = JSON.parse(fs.readFileSync(path.join(worldsDir, encodeURIComponent(worldId) + ".json"), "utf8"));
+
+  /** Clone the stored record, exactly the shape the server wrote it. */
+  const seedTo = (n, tag) => {
+    for (let i = 0; i < n; i++) {
+      const cid = `${worldId}_${tag}${i}`;
+      fs.writeFileSync(
+        path.join(worldsDir, encodeURIComponent(cid) + ".json"),
+        JSON.stringify({ ...record, world_id: cid, title: `${record.title || "World"} ${tag}${i}` }),
+      );
+    }
+  };
+
+  /** The median of `n` back-to-back discover calls, so one scheduler hiccup does not decide the result. */
+  const measure = async (n = 25) => {
+    const took = [];
+    let cards = 0, status = 0;
+    for (let i = 0; i < n; i++) {
+      const t = performance.now();
+      const r = await call("/v3/discover?limit=24");
+      took.push(performance.now() - t);
+      status = r.status;
+      cards = (r.body?.worlds || []).length;
+    }
+    took.sort((a, b) => a - b);
+    return { median: took[Math.floor(took.length / 2)], status, cards };
+  };
+
+  seedTo(7, "s");                                   // 8 published worlds in total
+  const small = await measure();
+  assert.equal(small.status, 200, "discovery must answer while the catalogue is small");
+
+  seedTo(56, "l");                                  // 64 in total: 8x the catalogue
+  const large = await measure();
+  assert.equal(large.status, 200, "discovery must still answer with a larger catalogue");
+
+  // The page really did grow to its limit, or the comparison is between two
+  // identical amounts of work and proves nothing.
+  assert.ok(large.cards >= 24, `the larger catalogue must fill a 24-card page, got ${large.cards}`);
+  assert.ok(small.cards >= 8, `the smaller catalogue must have been listed at all, got ${small.cards}`);
+
+  const growth = large.median / Math.max(small.median, 0.05);
+  assert.ok(growth < 8 / 3,
+    `an 8x larger catalogue made a fixed 24-card page ${growth.toFixed(1)}x more expensive ` +
+    `(${small.median.toFixed(2)}ms at 8 worlds -> ${large.median.toFixed(2)}ms at 64). ` +
+    "src/core/worldstore.mjs:339 FileWorldStore.list() parses every record and every sidecar, " +
+    "sorts them all and slices last, and server.mts:1207 calls it on every /v3/discover — so " +
+    "discovery pays for the whole catalogue on every page view, which is a cost that only ever goes up");
 });
