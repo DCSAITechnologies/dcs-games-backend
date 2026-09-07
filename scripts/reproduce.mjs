@@ -49,7 +49,7 @@ const BANKED = {
     name: "backend",
     url: "https://github.com/DCSAITechnologies/dcs-games-backend-sprint-sep2026.git",
     branch: "sprint/2026-09-canonical",
-    sha: "acc6acd4a9b2803c000a2a18d0379c07169728a7",
+    sha: "b367c47d739cc7ae52cd80131b156ffefe369b28",
     // Relative to the temp root. The browser suites resolve the frontend as
     // path.resolve(<repo>/test, "../../../dcs-games-LIVE") — i.e. two levels
     // ABOVE the backend repo root — so the backend has to sit one directory
@@ -60,7 +60,7 @@ const BANKED = {
     name: "frontend",
     url: "https://github.com/DCSAITechnologies/dcs-games-frontend.git",
     branch: "main",
-    sha: "2c32d0a2d18ea477ddcb52e198957314dc30fa89",
+    sha: "03e8e1f843bf1d3cee690dda29097567badc0ca7",
     // The suites hard-code this directory NAME. It is not configurable.
     into: "dcs-games-LIVE",
   },
