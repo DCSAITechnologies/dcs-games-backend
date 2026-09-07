@@ -54,8 +54,25 @@ function siteFiles(dir) {
 const PATH_LITERAL = /["'`](\/(?:api\/|v3\/|worlds\/|me\/|social\/|safety\/|atlas\/|verify|profiles\/|health)[^"'`\s]*)["'`]/g;
 
 const asked = new Map();        // path-shape -> Set(files)
+/**
+ * Strip comments before looking for paths.
+ *
+ * Without this the map reports paths that appear only in prose. `/atlas/verify`
+ * showed up as a dead button when in fact dcs-truth.js had already REPLACED it
+ * and the string survived only in the comment explaining why — "the previous
+ * implementation posted to /atlas/verify, which has never existed". Reporting
+ * a fixed defect as an open one is its own kind of dishonest map.
+ */
+function stripComments(src) {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, " ")   // block comments, and HTML comments below
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/^\s*\/\/.*$/gm, " ")        // whole-line // comments
+    .replace(/([^:"'`])\/\/[^\n"'`]*$/gm, "$1"); // trailing // comments, but not "https://"
+}
+
 for (const file of siteFiles(SITE)) {
-  const src = fs.readFileSync(file, "utf8");
+  const src = stripComments(fs.readFileSync(file, "utf8"));
   for (const m of src.matchAll(PATH_LITERAL)) {
     const raw = m[1].split("?")[0].replace(/\$\{[^}]*\}/g, ":id");
     if (!asked.has(raw)) asked.set(raw, new Set());
@@ -65,8 +82,13 @@ for (const file of siteFiles(SITE)) {
 
 /** Does an advertised route pattern match a concrete path the UI asks for? */
 function matches(routePath, askedPath) {
+  // server.mts rewrites /api/* to /* for everything except /api/public/*, so
+  // `/api/worlds/mine` and `/worlds/mine` are the same route reached two ways.
+  const asked = askedPath.startsWith("/api/") && !askedPath.startsWith("/api/public/")
+    ? askedPath.slice(4)
+    : askedPath;
   const rp = routePath.split("/").filter(Boolean);
-  const ap = askedPath.split("/").filter(Boolean);
+  const ap = asked.split("/").filter(Boolean);
   if (rp.length !== ap.length) return false;
   return rp.every((seg, i) => seg.startsWith(":") || ap[i] === ":id" || seg === ap[i]);
 }
@@ -83,7 +105,9 @@ const unmatched = [];
 for (const [askedPath, files] of asked) {
   let hit = false;
   for (const r of live) {
-    const m = isPrefix(askedPath) ? r.path.startsWith(askedPath) : matches(r.path, askedPath);
+    const m = isPrefix(askedPath)
+      ? (r.path.startsWith(askedPath) || r.path.startsWith(askedPath.replace(/^\/api/, "")))
+      : matches(r.path, askedPath);
     if (m) { hit = true; for (const f of files) reachedBy.get(`${r.method} ${r.path}`).add(f); }
   }
   if (!hit) unmatched.push({ askedPath, files: [...files] });
