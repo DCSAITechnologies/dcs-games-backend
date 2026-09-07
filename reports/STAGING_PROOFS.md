@@ -28,6 +28,26 @@ Re-run against the final checkpoint. Deployment ledger in `reports/DEPLOYMENTS.m
 **68 further assertions against the deployed preview and staging backend, 0
 failures.**
 
+### Re-run at final closure, after the auth and listing fixes
+
+| Suite | Result |
+| --- | --- |
+| The founder journey (`acceptance-journey.mjs`) | **19 / 19** |
+| Session and gate honesty (`acceptance-session.mjs`) | **16 / 16** |
+| Real WebKit / real Gecko / WebKit at iPhone width | **52 / 52** |
+| Frontend to staging in a real browser (`preview-integration-proof.mjs`) | **42 / 42** |
+| V3 flagship, V2, Atlas, security, load (deployed) | **139 / 139** |
+
+**268 assertions against deployed infrastructure, 0 failures**, against Railway
+deployment `b167fa26-ea5d-4cf4-8b47-7b0cce96b3ac` (commit `e893233a`) and
+Cloudflare preview `767fd058` (frontend `e6358d32`).
+
+`acceptance-journey.mjs` is the guard for the founder-observed sign-out defect.
+It asserts the session at every hop — player home, the play click, back, reload,
+a new tab, and sign-out — because a journey that ends signed in says nothing
+about whether it was signed in throughout. See
+`reports/FINAL_CLOSURE_REPORT_07SEP2026.md`.
+
 Two engines had never run this code before this sweep. The estate's entire
 browser proof was Chromium, and the one engine-specific defect found all sprint
 (`::placeholder` opacity, which Gecko dims of its own accord) had been reasoned
