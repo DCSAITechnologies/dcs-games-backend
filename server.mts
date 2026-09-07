@@ -406,7 +406,7 @@ const server = http.createServer(async (req, res) => {
         // it out of the inventory made it look retired when it is not.
         world_v2: ["POST /worlds/generate", "GET /worlds/mine", "GET /worlds/:id/manifest", "POST /worlds/:id/save", "GET /worlds/:id/load", "POST /worlds/:id/publish"],
         world: ["POST /v3/worlds/generate", "POST /v3/worlds/generate/async", "GET /v3/worlds/:id/manifest", "POST /v3/worlds/:id/playtest", "POST /v3/worlds/:id/expand", "POST /v3/worlds/:id/edit", "POST /v3/worlds/:id/stitch", "POST /v3/worlds/:id/fork", "GET /v3/worlds/:id/versions", "POST /v3/worlds/:id/rollback", "GET /v3/worlds/:id/diff", "GET /v3/worlds/:id/memory", "POST /v3/worlds/:id/companion", "POST /v3/worlds/:id/media", "GET /v3/worlds/:id/attribution", "GET /v3/worlds/:id/parts", "POST /v3/worlds/:id/quests/generate", "POST /v3/worlds/:id/stitch/preview", "GET /v3/worlds/:id/versions/:n", "GET /v3/worlds/:id/npcs/:npc/memory"],
-        discovery: ["GET /v3/discover", "GET /api/public/worlds", "GET /api/public/stats", "POST /v3/worlds/:id/play", "POST /v3/worlds/:id/rate", "GET /v3/worlds/:id/stats"],
+        discovery: ["GET /v3/discover", "GET /api/public/worlds", "GET /api/public/stats", "GET /api/public/events", "GET /api/public/market", "GET /api/public/atlas/feed", "GET /api/public/atlas/stats", "POST /v3/worlds/:id/play", "POST /v3/worlds/:id/rate", "GET /v3/worlds/:id/stats"],
         identity: ["POST /auth/signup", "POST /auth/login", "GET /me/home", "GET /me/profile", "GET /me/achievements", "GET /me/streak", "GET /me/dashboard", "GET /profiles/:username", "GET /verify/status", "POST /verify/:channel/start", "POST /verify/:channel/confirm"],
         social: ["GET /social/friends", "POST /social/friends/accept", "GET /social/parties", "GET /social/teams", "POST /social/studios", "GET /social/orgs", "GET /social/orgs/:id", "POST /social/orgs/:id/members", "DELETE /social/orgs/:id/members", "POST /social/orgs/:id/seats", "GET /social/parties/:id", "POST /social/parties/:id/join", "POST /social/parties/:id/leave", "GET /social/studios/:id", "POST /social/studios/:id/members", "POST /social/studios/:id/split", "GET /social/teams/:id", "POST /social/teams/:id/members", "DELETE /social/teams/:id/members"],
         marketplace: ["GET /v3/marketplace", "GET /v3/marketplace/split", "POST /v3/marketplace/storefronts", "POST /v3/marketplace/listings", "DELETE /v3/marketplace/listings/:id", "POST /v3/marketplace/listings/:id/acquire", "GET /v3/marketplace/owned", "GET /v3/marketplace/ledger", "GET /v3/marketplace/assert-dark"],
@@ -505,6 +505,73 @@ const server = http.createServer(async (req, res) => {
         counted_over: Math.min(published.length, 1000),
         measured_at: new Date().toISOString(),
         source: repo.kind,
+      });
+    }
+
+    // Recent real activity. Worlds that were actually published, most recent
+    // first, from the same store /v3/discover reads. The site had a page
+    // rendering an "events" feed from bundled sample rows because nothing
+    // served this; an empty platform now returns an empty list, which is the
+    // honest answer and is what the truth layer renders as "nothing yet".
+    if (url === "/api/public/events" && method === "GET") {
+      const published = await repo.listPublished(200);
+      const events = published
+        .map((w: any) => ({
+          kind: "world_published",
+          world_id: w.world_id,
+          title: w.title,
+          at: w.updated_at || w.created_at || null,
+        }))
+        .filter((e) => e.at)
+        .sort((a, b) => String(b.at).localeCompare(String(a.at)))
+        .slice(0, 40);
+      return send(res, 200, {
+        ok: true, count: events.length, events,
+        basis: "publication records from the world store; no other activity type is recorded publicly yet",
+        measured_at: new Date().toISOString(),
+      });
+    }
+
+    // The marketplace feed, answered HONESTLY while money is dark.
+    //
+    // A 404 here sent the page to its bundled sample listings, which is how a
+    // storefront full of invented items ends up on a site that has never sold
+    // anything. The truthful answer is not an empty list either — an empty list
+    // says "no items", when the real situation is "this capability is switched
+    // off". It says which.
+    if (url === "/api/public/market" && method === "GET") {
+      return send(res, 200, {
+        ok: true,
+        enabled: PAYMENTS_LIVE,
+        listings: [],
+        count: 0,
+        reason: PAYMENTS_LIVE ? null : "the marketplace is dark during the controlled internal test window; nothing is listed, nothing is purchasable, and no money has moved",
+        assert_dark: "/v3/marketplace/assert-dark",
+        measured_at: new Date().toISOString(),
+      });
+    }
+
+    // Atlas provenance: the receipts that were actually issued.
+    if (url === "/api/public/atlas/feed" && method === "GET") {
+      const rows: any[] = await atlasReceipts.all().catch(() => []);
+      const feed = rows
+        .map((r) => ({ receipt_hash: r.receipt_hash, subject_id: r.subject_id, issued_at: r.issued_at, signed: !!r.receipt?.sig }))
+        .sort((a, b) => String(b.issued_at).localeCompare(String(a.issued_at)))
+        .slice(0, 40);
+      return send(res, 200, { ok: true, count: feed.length, receipts: feed, measured_at: new Date().toISOString() });
+    }
+    if (url === "/api/public/atlas/stats" && method === "GET") {
+      const rows: any[] = await atlasReceipts.all().catch(() => []);
+      const signed = rows.filter((r) => !!r.receipt?.sig).length;
+      return send(res, 200, {
+        ok: true,
+        receipts_issued: rows.length,
+        receipts_signed: signed,
+        // An unsigned receipt is not evidence of anything, so the two are never
+        // collapsed into one "verified" figure.
+        signing_available: atlasReady(),
+        subjects: new Set(rows.map((r) => r.subject_id).filter(Boolean)).size,
+        measured_at: new Date().toISOString(),
       });
     }
 

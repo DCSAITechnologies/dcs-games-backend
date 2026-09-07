@@ -308,3 +308,57 @@ test("HOME: reachable at /api/me/home too, which is what the site calls", async 
   assert.equal(a.status, 200);
   assert.equal(b.status, 200, "the /api prefix is rewritten, so both must work");
 });
+
+test("TRUTH GATE: a dark marketplace says it is dark, not that it is empty", async () => {
+  // A 404 here sent the page to its bundled sample listings, which is how a
+  // storefront full of invented items ends up on a site that has never sold
+  // anything. An empty list is not the honest answer either: it says "no
+  // items", when the real situation is "this capability is switched off".
+  const b = await (await call(null, "GET", "/api/public/market")).json();
+  assert.equal(b.ok, true);
+  assert.equal(b.enabled, false, "payments are dark during the internal test window");
+  assert.deepEqual(b.listings, []);
+  assert.match(b.reason, /dark|no money has moved/i, "and it must say WHY it is empty");
+  assert.equal(b.assert_dark, "/v3/marketplace/assert-dark", "and point at the proof");
+});
+
+test("TRUTH GATE: the events feed is publication records, and empty when nothing happened", async () => {
+  const b = await (await call(null, "GET", "/api/public/events")).json();
+  assert.equal(b.ok, true);
+  assert.ok(Array.isArray(b.events));
+  assert.match(b.basis, /publication records/);
+  for (const e of b.events) {
+    assert.equal(e.kind, "world_published");
+    assert.ok(e.world_id && e.at, "every event names a real world and a real time");
+  }
+
+  const { worldId } = await validManifest();
+  const before = b.count;
+  assert.equal((await call(TESTER, "POST", `/worlds/${worldId}/publish`, {})).status, 200);
+  const after = await (await call(null, "GET", "/api/public/events")).json();
+  assert.equal(after.count, before + 1, "publishing is the event");
+  assert.ok(after.events.some((e) => e.world_id === worldId));
+});
+
+test("TRUTH GATE: signed and unsigned Atlas receipts are never collapsed into one figure", async () => {
+  // An unsigned receipt is not evidence of anything, so it must not be counted
+  // toward a "verified" total.
+  const b = await (await call(null, "GET", "/api/public/atlas/stats")).json();
+  assert.equal(b.ok, true);
+  assert.equal(typeof b.receipts_issued, "number");
+  assert.equal(typeof b.receipts_signed, "number");
+  assert.ok(b.receipts_signed <= b.receipts_issued);
+  assert.equal(typeof b.signing_available, "boolean");
+});
+
+test("TRUTH GATE: the Atlas feed lists receipts that were actually issued", async () => {
+  const { worldId } = await validManifest();
+  assert.equal((await call(TESTER, "POST", `/worlds/${worldId}/publish`, {})).status, 200);
+  const b = await (await call(null, "GET", "/api/public/atlas/feed")).json();
+  assert.equal(b.ok, true);
+  assert.ok(b.receipts.some((r) => r.subject_id === worldId), "the world just published must have a receipt");
+  for (const r of b.receipts) {
+    assert.ok(r.receipt_hash, "a receipt without a hash is not a receipt");
+    assert.equal(typeof r.signed, "boolean");
+  }
+});
