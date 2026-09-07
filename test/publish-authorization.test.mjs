@@ -362,3 +362,37 @@ test("TRUTH GATE: the Atlas feed lists receipts that were actually issued", asyn
     assert.equal(typeof r.signed, "boolean");
   }
 });
+
+test("DISCOVERABILITY: the values these routes accept are published, not guessable", async () => {
+  // Lane E found the moderation action set only by sending a wrong value and
+  // reading the 422. A UI that has to guess an enum keeps its own copy, and
+  // that copy drifts the first time the server's list changes — silently,
+  // because the only symptom is a rejection the user sees and the developer
+  // does not.
+  const h = await (await call(null, "GET", "/health")).json();
+  const a = h.safety?.accepts;
+  assert.ok(a, "/health must publish what the safety routes accept");
+  for (const k of ["report_reason", "moderation_action", "age_tier", "media_kind", "consent_source"]) {
+    assert.ok(Array.isArray(a[k]) && a[k].length > 0, `${k} must be a real list`);
+  }
+  assert.ok(a.report_reason.includes("csam"));
+  assert.ok(a.moderation_action.length >= 3);
+
+  // And the published list must be the one actually enforced.
+  const bad = await call(TESTER, "POST", "/safety/report", {
+    subject_type: "world", subject_id: "w_x", reason: "definitely-not-a-reason",
+  });
+  assert.equal(bad.status, 422);
+  const detail = (await bad.json()).detail;
+  for (const reason of a.report_reason) {
+    assert.ok(detail.includes(reason), `${reason} is published but not in the enforced set`);
+  }
+});
+
+test("DISCOVERABILITY: the moderation queue carries the actions it accepts", async () => {
+  const r = await call(TESTER, "GET", "/safety/reports");
+  assert.equal(r.status, 200);
+  const b = await r.json();
+  assert.ok(Array.isArray(b.actions) && b.actions.length > 0, "a console must not have to hard-code the action set");
+  assert.ok(Array.isArray(b.states) && b.states.length > 0);
+});

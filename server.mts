@@ -44,7 +44,7 @@ import { createJobService } from "./src/core/jobs.mjs";                        /
 import { createMarketplaceService } from "./src/core/marketplace.mjs";        // B15: marketplace backend, money DARK
 import { createProgressionService } from "./src/core/progression.mjs";        // B15: retention from measured data only
 import { createSocialService } from "./src/core/social.mjs";                    // B15: durable profiles, friends, parties, teams, studios, discovery
-import { createSafetyService } from "./src/core/safety.mjs";                    // A5: age tiers, consent, report/block, moderation audit
+import { createSafetyService, REPORT_REASONS, MOD_ACTIONS, REPORT_STATES, AGE_TIERS, MEDIA_KINDS, CONSENT_SOURCES } from "./src/core/safety.mjs";                    // A5: age tiers, consent, report/block, moderation audit
 import { assertSchema, currentVersion } from "./src/core/schema.mjs";           // A2: boot-time schema assertion — refuse to serve an unsupported schema
 import { createWorldRepository, manifestHash } from "./src/core/worldstore.mjs";          // A3: durable, lossless, idempotent, ownership-aware world persistence
 import { createPrincipalResolver } from "./src/core/principal.mjs";         // A1: PARENT-OWNED canonical principal. No x-user-id fallback, ever.
@@ -443,7 +443,22 @@ const server = http.createServer(async (req, res) => {
       subscriptions: subs.describe(),
       jobs: { async_generation: true, boot_id: BOOT_ID, interrupted_on_boot: bootReconcile.interrupted },
       v3: { assembly_router: true, playtest_gate: true, expansion_delta: true, world_memory: true, companion: true, chat_edit: true },
-      safety: { age_gating: true, report_block: true, parental_consent: true, media_consent: true, automated_content_moderation: false, minor_onboarding_enabled: false },
+      safety: {
+        age_gating: true, report_block: true, parental_consent: true, media_consent: true,
+        automated_content_moderation: false, minor_onboarding_enabled: false,
+        // The values these routes ACCEPT, published rather than discoverable
+        // only by sending a wrong one and reading the 422. A UI that has to
+        // guess an enum hard-codes a copy of it, and that copy drifts the first
+        // time the server's list changes — silently, because the only symptom
+        // is a rejection the user sees and the developer does not.
+        accepts: {
+          report_reason: REPORT_REASONS,
+          moderation_action: MOD_ACTIONS,
+          age_tier: AGE_TIERS,
+          media_kind: MEDIA_KINDS,
+          consent_source: CONSENT_SOURCES,
+        },
+      },
       netcode: "ws-separate-service", ts: new Date().toISOString(),
     });
 
@@ -760,7 +775,9 @@ const server = http.createServer(async (req, res) => {
     if (url === "/safety/reports" && method === "GET") {
       await mustBeInternalTester(req, cid);              // moderation queue is staff-only
       const rows = await safety.listReports({});
-      return send(res, 200, { ok: true, count: rows.length, reports: rows });
+      // The action set travels with the queue, so a console renders exactly
+      // what the server will accept instead of carrying its own copy.
+      return send(res, 200, { ok: true, count: rows.length, reports: rows, actions: MOD_ACTIONS, states: REPORT_STATES });
     }
     {
       const mm = url.match(/^\/safety\/reports\/([^/]+)\/moderate$/);
