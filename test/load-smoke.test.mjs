@@ -315,13 +315,25 @@ test("load smoke: discovery does not get slower as the catalogue grows", async (
   const worldsDir = path.join(DATA, "worlds");
   const record = JSON.parse(fs.readFileSync(path.join(worldsDir, encodeURIComponent(worldId) + ".json"), "utf8"));
 
-  /** Clone the stored record, exactly the shape the server wrote it. */
+  /**
+   * Clone the stored record, exactly the shape the server wrote it — but with
+   * `state` set here rather than inherited.
+   *
+   * It used to take whatever state the record happened to be in, which made
+   * this measurement depend on what an EARLIER test in this file had done to
+   * that world. When a save stopped preserving `published` (a save now returns
+   * a world to draft, because its Atlas receipt attested to the previous
+   * manifest), the concurrency burst above left the source record a draft, every
+   * clone was a draft, /v3/discover returned zero cards, and this test failed at
+   * its fixture without ever reaching the shape it exists to measure — while
+   * reporting something that sounded like a discovery defect.
+   */
   const seedTo = (n, tag) => {
     for (let i = 0; i < n; i++) {
       const cid = `${worldId}_${tag}${i}`;
       fs.writeFileSync(
         path.join(worldsDir, encodeURIComponent(cid) + ".json"),
-        JSON.stringify({ ...record, world_id: cid, title: `${record.title || "World"} ${tag}${i}` }),
+        JSON.stringify({ ...record, world_id: cid, state: "published", title: `${record.title || "World"} ${tag}${i}` }),
       );
     }
   };
@@ -341,7 +353,10 @@ test("load smoke: discovery does not get slower as the catalogue grows", async (
     return { median: took[Math.floor(took.length / 2)], status, cards };
   };
 
-  seedTo(7, "s");                                   // 8 published worlds in total
+  // 8 and 64 seeded outright, rather than 7 and 56 plus the source world:
+  // the source is a draft by this point in the file, and a fixture that
+  // counts on an earlier test's leftovers measures those instead.
+  seedTo(8, "s");                                   // 8 published worlds in total
   const small = await measure();
   assert.equal(small.status, 200, "discovery must answer while the catalogue is small");
 
