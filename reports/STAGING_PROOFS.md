@@ -180,3 +180,38 @@ caught rather than rediscovered:
   handed back as the caller's own creation
 - a save cannot set `state`, and the refusal names the route that publishes
 - an ordinary save leaves a published world published, and a draft a draft
+
+
+---
+
+# Atlas provenance, verified TRUSTLESSLY — `scripts/staging-atlas-proof.mjs`
+
+The claim a receipt makes is "this world was published by this principal, and
+here is a signature you can check without trusting us". A proof that asks the
+server "is this valid?" and believes the answer establishes nothing — the server
+could say yes to anything. So this fetches the public key and the receipt
+separately, rebuilds the canonical body from the PUBLISHED rules, and verifies
+the ed25519 signature locally with Node's own crypto.
+
+## Result — 16 passed, 0 failed
+
+- the public key, the canonical field order, the aliases, the fallbacks AND the
+  encoding are all served without a login
+- a third party can fetch a receipt anonymously, and it names the world it is
+  about
+- **the signature verifies**, checked locally against the published key
+- **and a body claiming a DIFFERENT world does NOT verify** — without this the
+  positive result would prove nothing
+- an unknown receipt hash is a 404 rather than an invented receipt
+
+## What writing it found
+
+`/atlas/key` published the field order, aliases and fallbacks — everything
+except **how those resolved fields are serialised into the signed bytes**. A
+third party therefore had to guess, and the first attempt here guessed
+`field=value` lines when it is `JSON.stringify(resolved, sortedKeys)`.
+
+A signature that is valid in principle and unreproducible in practice is not
+evidence of anything. `canonical_encoding` now serves the steps as executable
+instructions, so the verifier follows what the server tells everyone rather than
+inside knowledge.
