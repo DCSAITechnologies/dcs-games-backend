@@ -4,7 +4,7 @@
 // E2E. It talks CDP over Node's built-in WebSocket, so there is no Puppeteer
 // dependency to install or pin — it drives the Chrome for Testing binary that
 // is already on the machine.
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -103,7 +103,27 @@ export async function launchChrome({ headless = true, extraArgs = [] } = {}) {
     ...extraArgs,
     "about:blank",
   ];
+  // Reap anything a previous run left behind, before adding to it.
+  //
+  // A run killed hard — a timeout, a SIGKILL, an out-of-memory reaper — cannot
+  // run its own cleanup, so its Chrome survives with its temp profile. Over one
+  // long session that reached 196 processes and 8.2 GB, which is what finally
+  // starved the machine. Nothing else on the system carries a `dcs-chrome-`
+  // profile directory, so the signature cannot match a real browser.
+  reapStaleChrome();
+
   const proc = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+
+  // Die with the parent, whatever kills it.
+  //
+  // spawn() children outlive their parent by default. The close() below handles
+  // the orderly path; this handles every other one — a test that throws before
+  // reaching it, a suite that times out, a Ctrl-C. It cannot help against
+  // SIGKILL, which is what reapStaleChrome above is for.
+  const bury = () => { try { proc.kill("SIGKILL"); } catch { /* already gone */ } };
+  process.once("exit", bury);
+  process.once("SIGINT", () => { bury(); process.exit(130); });
+  process.once("SIGTERM", () => { bury(); process.exit(143); });
   const wsUrl = await new Promise((resolve, reject) => {
     let buf = "";
     const to = setTimeout(() => reject(new Error("chrome did not report a devtools endpoint:\n" + buf)), 30000);
@@ -114,16 +134,48 @@ export async function launchChrome({ headless = true, extraArgs = [] } = {}) {
     });
     proc.on("exit", (c) => { clearTimeout(to); reject(new Error("chrome exited " + c + "\n" + buf)); });
   });
-  return {
-    proc,
-    wsUrl,
-    close: async () => {
+  const close = async () => {
       try { proc.kill("SIGKILL"); } catch {}
       // Chrome flushes its profile asynchronously after SIGKILL, so a rm can race
       // with the last write. A leftover temp profile must never fail a test run.
       try { fs.rmSync(userDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch {}
-    },
+      process.removeListener("exit", bury);
   };
+  // `kill` as well as `close`, because a caller that reaches for the wrong one
+  // gets silence: scripts/preview-integration-proof.mjs called browser.kill()
+  // inside a `try { } catch {}`, the method did not exist, the throw was
+  // swallowed, and every run of it leaked a Chrome. An alias costs nothing; a
+  // silently-ignored cleanup call costs gigabytes.
+  return { proc, wsUrl, close, kill: close };
+}
+
+/**
+ * Kill Chrome processes left by earlier runs of this harness.
+ *
+ * Matched on the `--user-data-dir=.../dcs-chrome-*` this file creates, which no
+ * real browser carries, so this cannot touch a browser someone is using. Only
+ * processes older than a couple of minutes are considered, so a run happening
+ * in parallel is left alone.
+ */
+export function reapStaleChrome({ olderThanMs = 120000 } = {}) {
+  let out = "";
+  try {
+    out = execFileSync("ps", ["-eo", "pid=,etime=,args="], { encoding: "utf8", maxBuffer: 1 << 24 });
+  } catch { return 0; }
+  let killed = 0;
+  for (const line of out.split("\n")) {
+    if (!line.includes("dcs-chrome-") || !line.includes("--user-data-dir=")) continue;
+    const m = /^\s*(\d+)\s+(\S+)/.exec(line);
+    if (!m) continue;
+    // etime is [[dd-]hh:]mm:ss — anything with an hour or day field is old.
+    const parts = m[2].split(/[-:]/).map(Number);
+    const secs = parts.length >= 4 ? 86400 * parts[0] + 3600 * parts[1] + 60 * parts[2] + parts[3]
+      : parts.length === 3 ? 3600 * parts[0] + 60 * parts[1] + parts[2]
+      : 60 * parts[0] + parts[1];
+    if (secs * 1000 < olderThanMs) continue;
+    try { process.kill(Number(m[1]), "SIGKILL"); killed++; } catch { /* gone or not ours */ }
+  }
+  return killed;
 }
 
 /** A single CDP session against a fresh tab. */

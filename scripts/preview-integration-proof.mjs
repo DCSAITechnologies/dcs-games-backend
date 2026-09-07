@@ -111,7 +111,7 @@ try {
     await page.close();
   }
 } finally {
-  try { browser.kill(); } catch { /* already gone */ }
+  try { await browser.close(); } catch { /* already gone */ }
 }
 
 console.log(lines.join("\n"));
