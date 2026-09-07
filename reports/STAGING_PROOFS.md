@@ -80,3 +80,73 @@ Describe -> Generate -> Play -> Save -> Return -> Companion -> Edit -> Expand
 - the world can be published; a published world is then visible without a
   login and an anonymous player can load it
 - the creator finds it again in their own list, at the expected version
+
+
+---
+
+# Remote security posture — `scripts/staging-security-probe.mjs`
+
+Everything checked from OUTSIDE, the way an attacker sees it. Unit tests prove
+the code refuses; this proves the DEPLOYMENT refuses, which is the only claim
+that covers a misconfigured Supabase project, a leaked key, or a service
+answering on a path nobody meant to expose.
+
+Run with `railway run` so the values come from the staging environment. The
+script prints no secret; it only ever asserts one is ABSENT.
+
+## Result — 35 passed, 0 failed
+
+- payments dark; schema v10; auth is real Supabase JWT verification; the
+  `x-user-id` impersonation path gone and provably unusable; CORS an allowlist
+  rather than a wildcard; the running commit identifiable
+- no service-role key, no anon key and no PRODUCTION project ref anywhere in
+  `/health` — the staging estate exists so that work does not touch the shared
+  production project, and that is asserted rather than assumed
+- every authenticated route refuses an anonymous caller; a garbage token and an
+  `alg:none` token are both refused
+- both money surfaces confirm nothing has moved; the public market reports
+  DARK rather than empty
+- **the anon key can read nothing.** Eight tables probed directly against the
+  Supabase Data API; it cannot write or list users either. That is the real
+  test of the RLS-on-with-no-policies posture — a 200 there would mean the
+  database serves rows to anyone holding a key that ships in the browser.
+- a hostile path returns no filesystem path
+
+---
+
+# Concurrency and durability under load — `scripts/staging-load-proof.mjs`
+
+36 concurrent edits across three rounds against one world, plus 20 concurrent
+reads, against the deployed service and its Supabase primary.
+
+## Result — 26 passed, 0 failed
+
+- every writer got an answer; nothing 5xx'd or dropped
+- every writer either applied or was refused — never silently dropped
+- **no lost updates and no duplicates**: the version count moved by exactly the
+  number of writes the server accepted. One more is a duplicate; one fewer is a
+  caller told its write succeeded when it did not.
+- version numbers strictly sequential, because a gap or a repeat means two
+  writers computed the next version from the same read
+- the manifest still loads, still has its content, and the head version matches
+  the version list
+- a stale `expected_version` is refused rather than silently applied
+- the service is still healthy and money is still dark afterwards
+
+---
+
+# Netcode anti-cheat
+
+The CI gate pinned `524a7f61c373…`, which exists on **no ref** of
+`DCSAITechnologies/dcs-games-netcode` — `git fetch` answers
+"upload-pack: not our ref". The job could never check out, so the anti-cheat
+gate had never run. Repinned to `49f103531b67` (HEAD of main) and verified by
+cloning and running it:
+
+**186 checks across twelve suites, 0 failures**, including the speedhack
+regression the gate exists for: a gross speedhack is rejected and snapped to
+origin, an exactly-at-limit move is accepted, and a legitimate walk is not
+clamped.
+
+`scripts/verify-ci-pins.mjs` now resolves every pinned external ref against its
+remote and fails with the file and line when one is dead.
