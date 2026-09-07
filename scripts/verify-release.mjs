@@ -8,6 +8,13 @@
 //
 // Every check either returns a detail string or throws. Any failure exits 1, so
 // this can gate a deploy directly. It reads; it changes nothing.
+//
+// SCOPE, stated once so no document can overstate it: every check here reads
+// THIS WORKING TREE and the local process. Nothing here contacts a deployed
+// service or a database. A PASS means "this build is safe to promote"; it is
+// never evidence that a staging or production environment is in any particular
+// state. The deployed claims come from scripts/smoke.mjs, monitor-dark.mjs,
+// staging-proofs.mjs and staging-security-probe.mjs.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -61,7 +68,14 @@ check("the forensic seed cannot re-enter the migration chain", async () => {
     let rejected = false;
     try { loadMigrations(dir); } catch (e) { rejected = /forensic seed/.test(String(e?.detail || e?.message || e)); }
     if (!rejected) throw new Error("loadMigrations accepted a forensic seed — the guard is no longer armed");
-    return "a seed migration is refused by shape, whatever it is named";
+    // Absence AND refusal. The guard being armed is what stops a seed coming
+    // back; the tree being clean is what says none is here now. Documents claim
+    // both, so both are checked.
+    const tracked = git("ls-files", "-z").split("\0").filter(Boolean);
+    const seedFiles = tracked.filter((f) => /(^|\/)\d{4}_seed\.sql$/.test(f));
+    if (seedFiles.length) throw new Error(`a seed migration is tracked in this repository: ${seedFiles.join(", ")}`);
+    const chainFiles = loadMigrations().map((m) => m.file);
+    return `a seed migration is refused by shape whatever it is named, and none is tracked in the repository; the chain is ${chainFiles[0]}..${chainFiles[chainFiles.length - 1]}`;
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -70,9 +84,15 @@ check("the forensic seed cannot re-enter the migration chain", async () => {
 // -------------------------------------------------------------------- money
 
 check("PAYMENTS_LIVE is not enabled", async () => {
+  // SCOPE: this reads the environment of the shell running the gate. It is NOT
+  // a statement about any deployed environment — a build can pass here and then
+  // be deployed into a service that sets PAYMENTS_LIVE=1. The deployed claim is
+  // GET /health `payments_live`, the two `assert-dark` routes, and
+  // scripts/monitor-dark.mjs. Say so, so nobody quotes this line as proof that
+  // production money is dark.
   const v = process.env.PAYMENTS_LIVE;
   if (v === "1") throw new Error("PAYMENTS_LIVE=1 — real money is reachable and this build must not be promoted");
-  return `PAYMENTS_LIVE=${v === undefined ? "(unset)" : JSON.stringify(v)}`;
+  return `PAYMENTS_LIVE=${v === undefined ? "(unset)" : JSON.stringify(v)} in THIS shell. Says nothing about a deployed environment — use /health, the assert-dark routes and monitor-dark.mjs for that.`;
 });
 
 check("the marketplace is dark", async () => {
@@ -81,7 +101,10 @@ check("the marketplace is dark", async () => {
   const m = createMarketplaceService(process.env);
   const r = await m.assertDark();
   if (!r.dark) throw new Error(r.problems.join("; "));
-  return `no priced listing, paid acquisition or non-test ledger entry (store: ${m.dir})`;
+  // The rows scanned live in DCS_DATA_DIR, which is .gitignored and therefore
+  // ships with NOTHING in it. This is a statement about the store this gate can
+  // reach, not about a deployed database.
+  return `no priced listing, paid acquisition or non-test ledger entry in the LOCAL store ${m.dir} (.gitignored — not shipped). The deployed claim is GET /v3/marketplace/assert-dark.`;
 });
 
 // --------------------------------------------------- fabricated verification
@@ -368,20 +391,97 @@ check("the subscription surface is dark", async () => {
 
   if (problems.length) throw new Error(problems.join("; "));
   const grants = await svc.listGrants();
-  return `no price, no paid status, no grant past ${INTERNAL_WINDOW_ENDS}; ${grants.count} comped grant(s), total ${grants.total_price_minor} minor units (store: ${svc.dir})`;
+  return `no price, no paid status, no grant past ${INTERNAL_WINDOW_ENDS}; ${grants.count} comped grant(s), total ${grants.total_price_minor} minor units in the LOCAL store ${svc.dir} (.gitignored — not shipped). The plan catalogue and status vocabulary ARE shipped and are checked above. The deployed claim is GET /v3/subscriptions/assert-dark.`;
 });
 
 // ------------------------------------------------------------ route honesty
 
-check("every route /health advertises exists in server.mts", async () => {
-  // STATIC. It reads server.mts and matches each advertised path against the
-  // route patterns actually compiled there. It does NOT start a server, so it
-  // cannot prove a route RESPONDS or that it answers the advertised METHOD —
-  // that needs a live process and is covered by
+/**
+ * Extract the routes one source file actually dispatches. Three styles are in
+ * use in this estate and all three have to be read, because a route the
+ * extractor cannot see is reported as missing — which is how this gate spent
+ * time crying wolf about six routes that demonstrably answer:
+ *
+ *   1. `url === "/health"`            — an exact literal
+ *   2. `url.match(/^\/v3\/...$/)`     — a compiled pattern
+ *   3. `seg[0]==="ts" && seg[1]==="reports" && seg[2] && seg[3]==="action"`
+ *                                     — segment dispatch, used by the cw1 slices
+ *
+ * `path` is accepted as well as `url` because the slices name it that.
+ */
+function extractRoutes(src) {
+  const literals = [...src.matchAll(/\b(?:url|path)\s*===\s*"([^"]+)"/g)].map((m) => m[1]);
+  const patterns = src.split("\n")
+    .map((line) => { const m = line.match(/\b(?:url|path)\.match\(\/(.*)\/[gimsuy]*\)/); return m ? m[1] : null; })
+    .filter(Boolean)
+    .map((sourceText) => new RegExp(sourceText));
+
+  // Segment dispatch. One line, a conjunction of constraints on seg[i]:
+  // `seg[i] === "lit"` pins that segment, a bare `seg[i]` only requires it to
+  // be present. A spec that pins NOTHING would match every path, so it is
+  // discarded rather than allowed to turn this gate into a rubber stamp.
+  const segs = [];
+  for (const line of src.split("\n")) {
+    const conds = [...line.matchAll(/\bseg\[(\d+)\]\s*(?:===\s*"([^"]*)")?/g)];
+    if (!conds.length) continue;
+    const spec = [];
+    let usable = true;
+    for (const c of conds) {
+      const i = Number(c[1]);
+      if (i > 12) { usable = false; break; }
+      if (c[2] !== undefined) {
+        if (typeof spec[i] === "string" && spec[i] !== c[2]) { usable = false; break; }
+        spec[i] = c[2];
+      } else if (spec[i] === undefined) {
+        spec[i] = null;
+      }
+    }
+    if (!usable) continue;
+    if (!spec.some((s) => typeof s === "string")) continue;
+    segs.push(spec);
+  }
+  return { literals, patterns, segs };
+}
+
+function matchesSegSpec(spec, concretePath) {
+  const parts = concretePath.split("/").filter(Boolean);
+  if (parts.length < spec.length) return false;
+  for (let i = 0; i < spec.length; i++) {
+    if (spec[i] === undefined) continue;
+    if (spec[i] === null) { if (!parts[i]) return false; continue; }
+    if (parts[i] !== spec[i]) return false;
+  }
+  return true;
+}
+
+/**
+ * Which files besides server.mts actually route a request. Derived from
+ * server.mts's own imports — any module it imports a `handleXxx` from is a
+ * mounted slice — rather than from a hand-kept list, so a slice added later is
+ * picked up instead of silently reported as six missing routes.
+ */
+function mountedRouterSources(serverSrc) {
+  const out = [];
+  for (const m of serverSrc.matchAll(/import\s*\{([^}]*)\}\s*from\s*["'](\.\/[^"']+\.(?:mjs|mts|js|ts))["']/g)) {
+    const names = m[1].split(",").map((s) => s.trim().split(/\s+as\s+/)[0]);
+    if (!names.some((n) => /^handle[A-Z]/.test(n))) continue;
+    const rel = m[2].replace(/^\.\//, "");
+    const file = path.join(ROOT, rel);
+    if (!fs.existsSync(file)) continue;
+    out.push({ file: rel, src: fs.readFileSync(file, "utf8") });
+  }
+  return out;
+}
+
+check("every route /health advertises has a handler in server.mts or a mounted slice", async () => {
+  // STATIC. It reads the router sources and matches each advertised path
+  // against the routes actually dispatched there. It does NOT start a server,
+  // so it cannot prove a route RESPONDS or that it answers the advertised
+  // METHOD — that needs a live process and is covered by
   // test/api-integration.test.mjs:479 ("every route health advertises actually
   // responds"), which boots one. What this catches without a server is the
   // failure that has actually happened: a path advertised in /health that no
-  // handler in the file matches.
+  // handler anywhere matches.
   const start = SERVER.indexOf("\n      routes: {");
   const end = SERVER.indexOf("\n      },", start);
   if (start < 0 || end < 0) throw new Error("the /health routes block is no longer where this check looks for it");
@@ -393,33 +493,77 @@ check("every route /health advertises exists in server.mts", async () => {
   }
   if (advertised.length < 20) throw new Error(`only ${advertised.length} advertised routes were parsed; the extractor has stopped reading the block`);
 
-  const literals = [...SERVER.matchAll(/url\s*===\s*"([^"]+)"/g)].map((m) => m[1]);
-  const patterns = SERVER.split("\n")
-    .map((line) => { const m = line.match(/url\.match\(\/(.*)\/[gimsuy]*\)/); return m ? m[1] : null; })
-    .filter(Boolean)
-    .map((sourceText) => new RegExp(sourceText));
-  if (!literals.length || !patterns.length) throw new Error("no route patterns were extracted from server.mts; the extractor is broken");
+  const slices = mountedRouterSources(SERVER);
+  if (!slices.length) throw new Error("no mounted slice was found from server.mts's imports; the slice extractor is broken and its routes would all be reported missing");
+  const sources = [{ file: "server.mts", ...extractRoutes(SERVER) }, ...slices.map((s) => ({ file: s.file, ...extractRoutes(s.src) }))];
 
-  const concrete = (p) => p.replace(/:[A-Za-z_]+/g, "X");
-  const resolves = (p) => literals.includes(concrete(p)) || patterns.some((rx) => rx.test(concrete(p)));
+  const main = sources[0];
+  if (!main.literals.length || !main.patterns.length) throw new Error("no route patterns were extracted from server.mts; the extractor is broken");
+
+  // A `:param` stands for SOME value, and this estate has patterns that accept
+  // only digits (`/versions/(\d+)`). Substituting one alphabetic placeholder
+  // made `GET /v3/worlds/:id/versions/:n` — a route that exists at
+  // server.mts:1791 — read as missing. Try each parameter as both.
+  const SUBS = ["X", "1"];
+  const candidates = (p) => {
+    const parts = p.split("/");
+    const idx = parts.map((s, i) => (s.startsWith(":") ? i : -1)).filter((i) => i >= 0);
+    if (!idx.length) return [p];
+    const use = idx.slice(0, 4);
+    const out = [];
+    for (let n = 0; n < SUBS.length ** use.length; n++) {
+      const c = parts.slice();
+      let k = n;
+      for (const i of use) { c[i] = SUBS[k % SUBS.length]; k = Math.floor(k / SUBS.length); }
+      for (const i of idx.slice(4)) c[i] = SUBS[0];
+      out.push(c.join("/"));
+    }
+    return out;
+  };
+  const resolvedIn = (p) => {
+    for (const cp of candidates(p)) {
+      for (const s of sources) {
+        if (s.literals.includes(cp)) return s.file;
+        if (s.patterns.some((rx) => rx.test(cp))) return s.file;
+        if (s.segs.some((spec) => matchesSegSpec(spec, cp))) return s.file;
+      }
+    }
+    return null;
+  };
   const missingIn = (entries) => entries
     .filter(({ group }) => group !== "retired")
-    .filter(({ entry }) => !resolves(entry.split(" ")[1] || ""))
+    .filter(({ entry }) => !resolvedIn(entry.split(" ")[1] || ""))
     .map(({ entry }) => entry);
 
-  // Self-test: a route that does not exist must be reported, and one that does
-  // must not be — otherwise this reports "0 missing" whatever happens.
-  if (!missingIn([{ group: "world", entry: "GET /v3/worlds/:id/definitely-not-a-route" }]).length) {
-    throw new Error("the drift check cannot detect a route that does not exist");
+  // Self-test, both directions. Widening an extractor is how a gate quietly
+  // becomes a rubber stamp, so the negatives are the important half: routes
+  // that do not exist must STILL be reported, including ones that share a
+  // prefix with a slice-dispatched route.
+  for (const absent of [
+    "GET /v3/worlds/:id/definitely-not-a-route",
+    "GET /ts/definitely-not-a-thing",
+    "POST /ts/reports/:id/definitely-not-an-action",
+    "GET /payout/definitely-not-kyc",
+    "GET /definitely-not-a-real-route-zzz",
+  ]) {
+    if (!missingIn([{ group: "world", entry: absent }]).length) {
+      throw new Error(`the drift check cannot detect a route that does not exist: ${absent}`);
+    }
   }
   if (missingIn([{ group: "trust", entry: "GET /health" }, { group: "world", entry: "POST /v3/worlds/generate" }]).length) {
     throw new Error("the drift check reports routes that plainly do exist");
   }
+  // And prove the slice extraction actually reaches something, so "0 missing"
+  // cannot come from a slice reader that silently returned nothing.
+  const viaSlice = advertised.filter((a) => a.group !== "retired")
+    .map((a) => resolvedIn(a.entry.split(" ")[1] || ""))
+    .filter((f) => f && f !== "server.mts");
+  if (!viaSlice.length) throw new Error("no advertised route resolved in a mounted slice; the slice extractor is reading nothing");
 
   const missing = missingIn(advertised);
-  if (missing.length) throw new Error(`/health advertises routes with no handler in server.mts: ${missing.join(", ")}`);
+  if (missing.length) throw new Error(`/health advertises routes with no handler in server.mts or any mounted slice: ${missing.join(", ")}`);
   const checked = advertised.filter((a) => a.group !== "retired").length;
-  return `${checked} advertised paths all resolve to a handler (${literals.length} literal + ${patterns.length} pattern routes). STATIC ONLY: methods and live responses need a running server — test/api-integration.test.mjs:479 covers that.`;
+  return `${checked} advertised paths all resolve to a handler across ${sources.length} router source(s) (${sources.map((s) => s.file).join(", ")}); ${viaSlice.length} of them are dispatched by a slice rather than by server.mts. STATIC ONLY: methods and live responses need a running server — test/api-integration.test.mjs:479 covers that.`;
 });
 
 // ------------------------------------------------------------ build identity
