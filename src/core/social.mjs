@@ -312,6 +312,18 @@ export function createSocialService(env = process.env, deps = {}) {
   }
 
   const svc = {
+    /**
+     * Bumped by every write that can move a PUBLIC figure — a play, a rating.
+     *
+     * The public stats endpoint holds its computed answer between writes, and
+     * the world repository's own counter cannot see these: recording a play
+     * changes `plays` without touching a world record, so a cache keyed only on
+     * the repository would have gone on reporting the old count. A figure that
+     * stops moving when something real happens is exactly what that endpoint
+     * exists to prevent.
+     */
+    generation: 0,
+
     dir,
     /** Where this service is actually persisting, and whether it is degraded. */
     describe: () => describeCollections(collections),
@@ -1051,6 +1063,7 @@ export function createSocialService(env = process.env, deps = {}) {
     /** Record a real play. Discovery ranks on these rows and nothing else. */
     async recordPlay(worldId, principalId, seconds = null) {
       if (!worldId) throw Errors.validation("world_id is required");
+      svc.generation++;
       // `seconds` is reported by the client, and progression grants the
       // "hour played" achievement from the total — so an unbounded number here
       // is an achievement anyone can award themselves in one request. It is
@@ -1097,6 +1110,7 @@ export function createSocialService(env = process.env, deps = {}) {
     },
 
     async rateWorld(principalId, worldId, rating) {
+      svc.generation++;
       if (!principalId) throw Errors.unauthenticated("rating a world needs an authenticated principal");
       if (!Number.isInteger(rating) || rating < 1 || rating > 5) throw Errors.validation("rating must be an integer from 1 to 5");
       if (!worldId) throw Errors.validation("world_id is required");

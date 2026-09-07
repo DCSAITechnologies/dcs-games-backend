@@ -332,6 +332,70 @@ export class FileWorldStore {
   }
 
   /**
+   * Where the listing index lives.
+   *
+   * A DIRECTORY, deliberately. Any file placed in the worlds directory shares a
+   * namespace with world records, and this estate has already lost a world once
+   * to exactly that — a world whose id ended in `.summary` was skipped as a
+   * cache file. `.index/` does not end in `.json`, so the listing scan filters
+   * it out by the rule it already applies, and no world id can collide with it.
+   */
+  _indexPath() { return path.join(this.dir, ".index", "cards.json"); }
+
+  /**
+   * The listing index: one entry per file, keyed by filename.
+   *
+   *   { m: mtimeMs, s: size, k: "record"|"cache", c: card|null }
+   *
+   * `m` and `s` are the whole safety argument. An entry is used ONLY when the
+   * file's current mtime and size still match the ones the entry was built
+   * from; anything else is read again. So the index cannot report a stale
+   * state, a stale owner or a stale updated_at, and it cannot hide a world:
+   * the file list still comes from readdir, so a record the index has never
+   * seen is simply an index miss and gets read.
+   *
+   * It is a CACHE with no authority. A missing, truncated, forged or
+   * unparseable index costs reads, never rows — the same rule the sidecar
+   * follows, for the same reason.
+   */
+  async _loadIndex() {
+    // Held in memory between calls, and re-read only when the FILE changes.
+    //
+    // Parsing a thousand-entry index on every anonymous page view is its own
+    // O(catalogue) cost, and it would have replaced one of the costs this index
+    // exists to remove. The in-memory copy is validated the same way every
+    // entry is: by the file's own mtime and size. Another process writing the
+    // index changes both, so a second server's view is picked up rather than
+    // ignored.
+    let st = null;
+    try { st = await fsp.stat(this._indexPath()); } catch { this._idxCache = null; return Object.create(null); }
+    if (this._idxCache && this._idxCache.m === st.mtimeMs && this._idxCache.s === st.size) {
+      return this._idxCache.entries;
+    }
+    try {
+      const raw = await fsp.readFile(this._indexPath(), "utf8");
+      const parsed = JSON.parse(raw);
+      if (!parsed || parsed.v !== 1 || !parsed.entries || typeof parsed.entries !== "object") {
+        this._idxCache = null;
+        return Object.create(null);
+      }
+      this._idxCache = { m: st.mtimeMs, s: st.size, entries: parsed.entries };
+      return parsed.entries;
+    } catch { this._idxCache = null; return Object.create(null); }
+  }
+
+  async _saveIndex(entries) {
+    try {
+      await fsp.mkdir(path.dirname(this._indexPath()), { recursive: true });
+      await this._atomicWrite(this._indexPath(), JSON.stringify({ v: 1, entries }));
+      // Adopt what we just wrote, with its real stat, so the next call does not
+      // re-read our own bytes.
+      const st = await fsp.stat(this._indexPath()).catch(() => null);
+      this._idxCache = st ? { m: st.mtimeMs, s: st.size, entries } : null;
+    } catch { /* best effort: the records already answered */ }
+  }
+
+  /**
    * @param summary  read the lightweight sidecar instead of the whole record.
    *                 Only for callers that need listing fields — discovery cards,
    *                 dashboards. A caller that needs the manifest must get()."
@@ -341,71 +405,138 @@ export class FileWorldStore {
     // Canonical records first: a world that exists both in its own namespace and
     // at a legacy colliding path is listed once, from the canonical record.
     const ordered = [...names.filter((n) => !n.endsWith(SIDECAR_SUFFIX)), ...names.filter((n) => n.endsWith(SIDECAR_SUFFIX))];
-    // Read in parallel, decide in order.
-    //
-    // This read one file at a time, awaiting each, so a page view cost one
-    // round trip per world in the directory: measured at 8 -> 1.55ms, 64 ->
-    // 9.22ms, 256 -> 37.05ms, while the page stayed fixed at 24 cards. The work
-    // is I/O bound, so the serialisation was the whole cost.
-    //
-    // Order still decides everything that matters — the `seen` dedup depends on
-    // canonical records being considered before sidecars — so the reads are
-    // parallelised and the RESULTS are then walked in exactly the original
-    // sequence. Nothing about which world wins a collision changes.
     const candidates = ordered.filter((n) => n.endsWith(".json"));
-    const READ_CONCURRENCY = 32;
-    const loaded = new Array(candidates.length);
-    for (let i = 0; i < candidates.length; i += READ_CONCURRENCY) {
-      const batch = candidates.slice(i, i + READ_CONCURRENCY);
-      await Promise.all(batch.map(async (n, k) => {
-        const full = path.join(this.dir, n);
-        try {
-          if (n.endsWith(SIDECAR_SUFFIX)) {
-            const rec = JSON.parse(await fsp.readFile(full, "utf8"));
-            loaded[i + k] = { n, rec };
-          } else if (summary) {
-            loaded[i + k] = { n, card: await this._card(full) };
-          } else {
-            loaded[i + k] = { n, rec: JSON.parse(await fsp.readFile(full, "utf8")) };
-          }
-        } catch { loaded[i + k] = null; /* a half-written temp file is not a world */ }
-      }));
-    }
 
-    const out = [];
-    const seen = new Set();
-    for (const entry of loaded) {
-      if (!entry) continue;
-      const n = entry.n;
-      try {
-        let r = null;
-        if (n.endsWith(SIDECAR_SUFFIX)) {
-          // Ambiguous by history: a sidecar, or a record written under a
-          // colliding id by a pre-fix build. Skipping the name outright made a
-          // world whose id ends in `.summary` vanish from listOwned,
-          // listPublished and discovery while get() still returned it. Only the
-          // content can tell the two apart.
-          const rec = entry.rec;
-          if (!rec || rec._summary === true) continue;                              // a cache is not a world
-          if (rec.world_id !== decodeURIComponent(n.slice(0, -".json".length))) continue;
-          r = summary ? FileWorldStore.summarise(rec) : rec;
-        } else if (summary) {
-          r = entry.card;
-        } else {
-          r = entry.rec;
+    // A page of 24 cards used to cost the whole catalogue.
+    //
+    // Every file was opened and parsed on every request — and there are TWO per
+    // world, because each sidecar was read in full just to decide whether it
+    // was a cache or a record. Measured: 8 worlds 1.41ms, 64 worlds 6.49ms, on
+    // the route every anonymous visitor hits. Parallelising the reads moved the
+    // constant and left the shape, which is what an index is for.
+    //
+    // The index stores each file's mtime and size alongside what was read from
+    // it, and an entry is used ONLY while both still match. A record that
+    // changed in any way — published, unpublished, retitled, deleted and
+    // recreated — has a different mtime or size and is read again. So the
+    // steady-state cost is one stat per file plus one read of the index, and
+    // the reads that remain are the page itself.
+    //
+    // Note what this does NOT do: it never decides that a world is absent. The
+    // file list still comes from readdir, so a record the index has never seen
+    // is an index miss, not an omission. That is the property that matters —
+    // a listing that silently drops a published world is worse than a slow one.
+    const index = await this._loadIndex();
+    const nextIndex = Object.create(null);
+    let dirty = false;
+
+    // Half the files in this directory are sidecars, and most of them can be
+    // ruled out without being touched at all.
+    //
+    // `<id>.summary.json` is ambiguous by history: alpha's sidecar, or the
+    // record of a world whose id is literally "alpha.summary". But if
+    // `<id>.json` is present AND classifies as a record for `<id>`, then the
+    // sidecar interpretation is the only one available — the two cannot occupy
+    // that path at once, which is what _rescueCollidingLegacy exists to keep
+    // true. That is a structural deduction rather than a guess, so it costs no
+    // safety: a world whose id ends in `.summary` is still classified whenever
+    // its owning record is absent.
+    const present = new Set(candidates);
+    const canonical = candidates.filter((n) => !n.endsWith(SIDECAR_SUFFIX));
+    const sidecarNames = candidates.filter((n) => n.endsWith(SIDECAR_SUFFIX));
+
+    const CONCURRENCY = 32;
+    const byName = new Map();
+
+    const classify = async (list) => {
+      for (let i = 0; i < list.length; i += CONCURRENCY) {
+        await Promise.all(list.slice(i, i + CONCURRENCY).map(async (n) => {
+        const full = path.join(this.dir, n);
+        let st = null;
+        try { st = await fsp.stat(full); } catch { return; }
+
+        const prior = index[n];
+        if (prior && prior.m === st.mtimeMs && prior.s === st.size) {
+          nextIndex[n] = prior;
+          byName.set(n, { n, kind: prior.k, card: prior.c });
+          return;
         }
-        if (!r || seen.has(r.world_id)) continue;
-        seen.add(r.world_id);
-        // Filtered on the record's own state and owner — never on a cache's
-        // claim about them. _card() has already proved that what it returns
-        // agrees with the record it came from.
-        if (ownerId && r.owner_id !== ownerId) continue;
-        if (state && r.state !== state) continue;
-        out.push(r);
-      } catch { /* a half-written temp file is not a world; skip */ }
+
+        dirty = true;
+        try {
+          let kind = "cache", card = null;
+          if (n.endsWith(SIDECAR_SUFFIX)) {
+            // Ambiguous by history: a sidecar, or a record written under a
+            // colliding id by a pre-fix build. Skipping the name outright made
+            // a world whose id ends in `.summary` vanish from listOwned,
+            // listPublished and discovery while get() still returned it. Only
+            // the content can tell the two apart.
+            const rec = JSON.parse(await fsp.readFile(full, "utf8"));
+            if (rec && rec._summary !== true && rec.world_id === decodeURIComponent(n.slice(0, -".json".length))) {
+              kind = "record";
+              card = FileWorldStore.summarise(rec);
+            }
+          } else {
+            // _card() on the miss path, so a corrupt sidecar is still repaired
+            // exactly as it was before the index existed. The warm path skips
+            // it; the cold path behaves identically to the old code.
+            kind = "record";
+            card = await this._card(full);
+          }
+          const entry = { m: st.mtimeMs, s: st.size, k: kind, c: card };
+          nextIndex[n] = entry;
+          byName.set(n, { n, kind, card });
+        } catch { /* a half-written temp file is not a world */ }
+        }));
+      }
+    };
+
+    await classify(canonical);
+    // Only the sidecars whose owning record is absent or is not a record.
+    const ambiguous = sidecarNames.filter((n) => {
+      const owner = n.slice(0, -SIDECAR_SUFFIX.length) + ".json";
+      if (!present.has(owner)) return true;
+      const o = byName.get(owner);
+      return !(o && o.kind === "record");
+    });
+    await classify(ambiguous);
+
+    // Canonical records first, then sidecars: the dedup depends on that order
+    // and nothing above changed it.
+    const classified = [...canonical, ...sidecarNames].map((n) => byName.get(n) || null);
+
+    // Decide in the original order: the dedup depends on canonical records
+    // being considered before sidecars, and nothing above changed that.
+    const chosen = [];
+    const seen = new Set();
+    for (const e of classified) {
+      if (!e || e.kind !== "record" || !e.card) continue;
+      const c = e.card;
+      if (!c.world_id || seen.has(c.world_id)) continue;
+      seen.add(c.world_id);
+      // Filtered on the RECORD's own state and owner. The card is bound to the
+      // exact bytes it was summarised from by mtime and size, so this is the
+      // record's own claim about itself and not a separate cache's claim about
+      // it — which is the distinction that made the sidecar safe.
+      if (ownerId && c.owner_id !== ownerId) continue;
+      if (state && c.state !== state) continue;
+      chosen.push(e);
     }
-    out.sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
-    return out.slice(0, clampLimit(limit));
+    chosen.sort((a, b) => String(b.card.updated_at || "").localeCompare(String(a.card.updated_at || "")));
+    const page = chosen.slice(0, clampLimit(limit));
+
+    if (dirty) await this._saveIndex(nextIndex);
+
+    if (summary) return page.map((e) => e.card);
+
+    // A caller that wants whole records gets whole records — but only for the
+    // page, which is the other half of the saving. Sorting and filtering happen
+    // on the indexed cards, so the manifests that are never returned are never
+    // read.
+    const full = await Promise.all(page.map(async (e) => {
+      try { return JSON.parse(await fsp.readFile(path.join(this.dir, e.n), "utf8")); } catch { return null; }
+    }));
+    return full.filter(Boolean);
   }
   async delete(id) {
     await fsp.rm(this._p(id), { force: true });
@@ -988,7 +1119,24 @@ export class MirroredVersionHistoryStore {
 
 /** The repository the router talks to. Owns ownership rules and the record shape. */
 export class WorldRepository {
-  constructor(store, versions = null) { this.store = store; this.versions = versions; }
+  constructor(store, versions = null) {
+    this.store = store;
+    this.versions = versions;
+    /**
+     * Bumped by every write this process makes.
+     *
+     * The public read endpoints recompute their figures from the whole
+     * catalogue on every anonymous request, which is how a thousand invisible
+     * drafts came to set the price of a page load. A caller can use this to
+     * hold a computed answer for as long as nothing has changed: exact for this
+     * process's own writes, because they bump it, and bounded by a short TTL
+     * for a write made by a second server, which this counter cannot see.
+     *
+     * It is a monotonic counter and nothing more. It says "something changed",
+     * never what — a cache keyed on it still recomputes from the store.
+     */
+    this.generation = 0;
+  }
   get kind() { return this.store.kind; }
 
   /**
@@ -1003,7 +1151,9 @@ export class WorldRepository {
     // the world by ONE version. Sixty-three edits were acknowledged and lost,
     // and the retained history did not have them either, so a rollback could
     // not recover them. Only writes to the SAME world wait on each other.
-    return await withLock(`world:${args?.worldId}`, () => this._upsert(args));
+    const r = await withLock(`world:${args?.worldId}`, () => this._upsert(args));
+    this.generation++;
+    return r;
   }
 
   async _upsert({ worldId, ownerId, manifest, state = "draft", title = null, expected_version = null }) {

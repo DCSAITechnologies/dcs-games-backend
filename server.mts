@@ -276,6 +276,38 @@ function corsFor(res: http.ServerResponse) {
   return h;
 }
 
+/**
+ * A short-lived hold on an expensive PUBLIC read.
+ *
+ * /api/public/stats and /api/public/worlds recompute from the whole catalogue
+ * on every anonymous request, so a thousand drafts nobody can see set the price
+ * of every page load. The store made that much cheaper; this stops it happening
+ * repeatedly for the same answer.
+ *
+ * Keyed on the repository's write generation, so ANY write by this process
+ * invalidates it immediately — publishing a world shows up on the very next
+ * request, not in two seconds. The TTL is the ceiling for a write made by a
+ * SECOND server, which this counter cannot see; without it a multi-server
+ * deployment could serve a stale catalogue indefinitely.
+ *
+ * Every response built through this already carries `measured_at`, so a reader
+ * can see how fresh the answer is rather than having to assume.
+ */
+const PUBLIC_READ_TTL_MS = 2000;
+const _publicReads = new Map<string, { gen: string; at: number; value: any }>();
+async function publicRead(key: string, build: () => Promise<any>) {
+  const hit = _publicReads.get(key);
+  // Both counters, because both kinds of write move these figures: a world
+  // being published, and a play or rating being recorded. Keying on the
+  // repository alone left `plays` frozen while the count really was changing.
+  const gen = () => `${(repo as any).generation}:${(social as any).generation ?? 0}`;
+  const now = gen();
+  if (hit && hit.gen === now && Date.now() - hit.at < PUBLIC_READ_TTL_MS) return hit.value;
+  const value = await build();
+  _publicReads.set(key, { gen: now, at: Date.now(), value });
+  return value;
+}
+
 function send(res: http.ServerResponse, code: number, body: any) {
   res.writeHead(code, { "Content-Type": "application/json", ...corsFor(res) });
   res.end(JSON.stringify(body));
@@ -544,7 +576,7 @@ const server = http.createServer(async (req, res) => {
       // It was invisible to every test because in file mode supaGet returns [].
       // It now goes through the repository, which applies the same permission
       // rules as every other read and returns discovery cards, not manifests.
-      const worlds = await repo.listPublished(50);
+      const worlds = await publicRead("public-worlds", () => repo.listPublished(50));
       return send(res, 200, { ok: true, count: worlds.length, worlds, source: repo.kind });
     }
     // Public platform figures, MEASURED.
@@ -560,6 +592,7 @@ const server = http.createServer(async (req, res) => {
     // on it answers zero rather than something encouraging. `measured_at` and
     // `source` are included so a caller can tell a real count from a cache.
     if (url === "/api/public/stats" && method === "GET") {
+      return send(res, 200, await publicRead("public-stats", async () => {
       const published = await repo.listPublished(1000);
       const statsFor = await social._statsIndex();
       let plays = 0, seconds = 0, rated = 0;
@@ -571,7 +604,7 @@ const server = http.createServer(async (req, res) => {
         seconds += st.total_seconds || 0;
         rated += st.rating_count || 0;
       }
-      return send(res, 200, {
+      return {
         ok: true,
         published_worlds: published.length,
         creators_with_a_published_world: creators.size,
@@ -611,7 +644,8 @@ const server = http.createServer(async (req, res) => {
         complete: published.length < 1000,
         measured_at: new Date().toISOString(),
         source: repo.kind,
-      });
+      };
+      }));
     }
 
     // Recent real activity. Worlds that were actually published, most recent
