@@ -12,6 +12,7 @@ import { runAllValidators, summarize, heightAt, SEVERITY } from "./validators.mj
 import { validateManifest } from "../manifest/schema.mjs";
 
 const dist = (a, b) => Math.hypot(a.x - b.x, a.z - b.z);
+const num = (v, d = 0) => (typeof v === "number" && Number.isFinite(v) ? v : d);
 const MAX_STEP_HEIGHT = 2.5;      // what a player can climb without a ramp
 const REACH = 3.0;                // interaction range
 
@@ -356,7 +357,30 @@ export function repair(manifest, findings, { liveState = null } = {}) {
       case "reseat_on_ground": {
         const s = byId(m.structures, f.where);
         if (!s) { skipped.push({ ...f, why: "structure gone" }); break; }
-        s.transform.position.y = heightAt(m.terrain, s.transform.position.x, s.transform.position.z);
+        const wasY = s.transform.position.y;
+        const ground = heightAt(m.terrain, s.transform.position.x, s.transform.position.z);
+        if (wasY === ground) { skipped.push({ ...f, why: "already on the ground" }); break; }
+
+        // Was it reachable before? Asked before the move, because that is the
+        // thing the move must not take away.
+        const wasReachable = simulatePlaythrough(m).reached.has(s.id);
+        s.transform.position.y = ground;
+
+        // `structure_floating` is MAJOR. A structure the player can no longer
+        // get to is a BLOCKER the moment a quest points at it, so a reseat that
+        // buys the first at the cost of the second is a bad trade — the repair
+        // pass manufacturing the finding that fails the world. It happens where
+        // the ground sample under a building is a spike or a pit: the building
+        // goes from standing beside walkable ground to sitting on a needle.
+        //
+        // Declining leaves the honest finding standing. The world is still
+        // rejected — MAJOR fails the gate too — but for the reason that is
+        // actually true of it, which is that its terrain is not walkable.
+        if (wasReachable && !simulatePlaythrough(m).reached.has(s.id)) {
+          s.transform.position.y = wasY;
+          skipped.push({ ...f, why: `seating '${f.where}' on the ground at y=${ground} would put it out of the player's reach; the ground under it is not somewhere a building can stand` });
+          break;
+        }
         applied.push({ fix: "reseat_on_ground", target: f.where });
         break;
       }
@@ -408,9 +432,37 @@ export function repair(manifest, findings, { liveState = null } = {}) {
           break;
         }
         const push = (needed - distance) / 2 + 1;
-        a.transform.position.x += (dx / len) * push;
-        a.transform.position.z += (dz / len) * push;
-        a.transform.position.y = heightAt(m.terrain, a.transform.position.x, a.transform.position.z);
+        let nx = a.transform.position.x + (dx / len) * push;
+        let nz = a.transform.position.z + (dz / len) * push;
+
+        // Stay inside the world. `structures_overlap` is MINOR and
+        // `structure_out_of_bounds` is a BLOCKER, so a push that leaves the
+        // terrain trades a cosmetic finding for one that fails the world — the
+        // repair pass manufacturing the blocker that rejects the generation.
+        // With large footprints the required push is large, and it did exactly
+        // that: twenty-one worlds in a five-hundred-case sweep.
+        //
+        // Clamped into the structure's own zone where it has one, and into the
+        // terrain otherwise, which is the rule `clamp_into_zone` already uses.
+        const home = byId(m.zones, a.zone);
+        const size = m.terrain?.size || { w: 0, h: 0 };
+        const [bx0, bz0, bx1, bz1] = home?.bounds && home.bounds.every(Number.isFinite)
+          ? home.bounds
+          : [0, 0, num(size.w), num(size.h)];
+        const clampedX = Math.max(bx0 + 2, Math.min(bx1 - 2, nx));
+        const clampedZ = Math.max(bz0 + 2, Math.min(bz1 - 2, nz));
+
+        // If the clamp put it back where it started, the push has nowhere to go
+        // and moving it would only pretend to have separated them.
+        if (Math.hypot(clampedX - a.transform.position.x, clampedZ - a.transform.position.z) < 0.5) {
+          skipped.push({ ...f, why: `'${f.where}' cannot be moved clear of '${f.data?.other}' without leaving ${home ? `zone '${home.id}'` : "the terrain"}` });
+          break;
+        }
+        nx = clampedX; nz = clampedZ;
+
+        a.transform.position.x = nx;
+        a.transform.position.z = nz;
+        a.transform.position.y = heightAt(m.terrain, nx, nz);
         applied.push({ fix: "separate", target: f.where });
         break;
       }
@@ -667,16 +719,32 @@ export function repair(manifest, findings, { liveState = null } = {}) {
       }
 
       case "add_quest": {
-        // A quest built ONLY from what the world already contains. If there are
-        // zones to visit, the objective is to visit them; if there is an item
-        // and someone to bring it to, it is a delivery. What this must never do
-        // is invent a story goal the world has no entities for — a quest whose
-        // steps reference things that do not exist is worse than no quest, and
-        // validateQuests would rightly reject it a moment later.
+        // A quest built ONLY from what the world already contains, AND only
+        // from what the player can actually get to.
+        //
+        // Existing is not enough. `simulateQuests` judges a step by
+        // `walk.reached.has(step.target)`, so a quest aimed at an item in a
+        // zone the walk never enters is uncompletable the moment it is written
+        // — and `quest_not_completable` is a BLOCKER. The repair was therefore
+        // manufacturing the finding that failed the world: it fixed `no_quests`
+        // and the quest it added rejected the generation. Staging returned
+        // exactly that, naming `quest_recovered_delivery` — this quest — as the
+        // reason a real prompt was refused.
+        //
+        // Reachability is computed HERE rather than taken from the caller's
+        // walk, because `link_zone`, `relocate_npc`, `move_spawn` and
+        // `flatten_zone` may all have run earlier in this same pass. The walk
+        // the round began with is stale by now; this one is true of `m` as it
+        // actually stands.
         m.quests = m.quests || [];
-        const zones = m.zones || [];
-        const items = m.items || [];
-        const talkers = (m.npcs || []).filter(npcHasSpeech);
+        const reachWalk = simulatePlaythrough(m);
+        const canReach = (id) => reachWalk.ok && reachWalk.reached.has(id);
+        const zones = (m.zones || []).filter((z) => canReach(z.id));
+        // An item is in `reached` only when some pickup or container that grants
+        // it hangs off something the walk got to, so this covers obtainability
+        // as well as position — the other blocker a collect step can raise.
+        const items = (m.items || []).filter((it) => canReach(it.id));
+        const talkers = (m.npcs || []).filter((n) => npcHasSpeech(n) && canReach(n.id));
         let quest = null;
 
         // The shape here is the schema's, not a plausible-looking approximation
@@ -726,7 +794,16 @@ export function repair(manifest, findings, { liveState = null } = {}) {
         }
 
         if (!quest) {
-          skipped.push({ ...f, why: `nothing to build an objective from (${zones.length} zones, ${items.length} items, ${talkers.length} speaking npcs)` });
+          // Declining is right here. A world where the player can reach nothing
+          // has a bigger problem than a missing quest, and inventing an
+          // objective they cannot complete would only swap a MAJOR finding for
+          // a BLOCKER.
+          skipped.push({
+            ...f,
+            why: reachWalk.ok
+              ? `nothing REACHABLE to build an objective from (${zones.length} of ${(m.zones || []).length} zones, ${items.length} of ${(m.items || []).length} items and ${talkers.length} speaking npcs can be reached from the spawn)`
+              : "the world cannot be entered, so there is nowhere to send the player",
+          });
           break;
         }
         quest.added_by = "repair";

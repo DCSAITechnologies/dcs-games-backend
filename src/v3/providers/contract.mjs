@@ -90,6 +90,24 @@ export class Lane {
       const t0 = Date.now();
       try {
         const value = await a.invoke(req, ctx);
+        // An adapter that returned no result has not succeeded.
+        //
+        // This method's contract is "try adapters in rank order until one
+        // succeeds", and it took anything at all as success — including null,
+        // undefined and a bare string. The caller then read fields off it and
+        // threw a TypeError three frames away, from inside the assembler, with
+        // the fallback adapter sitting right there unused. Every lane composes
+        // an object into the manifest, so this is the lane's own contract
+        // stated rather than a new one imposed: a lane's result is an object,
+        // and anything else is an adapter that failed and must be moved past.
+        //
+        // Today's adapters all validate their own responses, so nothing trips
+        // this. That is the point of putting it here — the lane is the chokepoint
+        // that makes "no lane may hard-depend on any single vendor" true, and it
+        // should not rely on every future adapter remembering to check.
+        if (value === null || typeof value !== "object" || Array.isArray(value)) {
+          throw new ProviderError(a.name, `returned ${Array.isArray(value) ? "an array" : value === null ? "null" : typeof value} rather than a result object`, { retryable: false });
+        }
         return {
           value,
           provenance: {

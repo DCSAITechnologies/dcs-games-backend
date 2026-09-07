@@ -575,6 +575,10 @@ test("B4: add_quest builds an objective only out of things that exist", () => {
     { id: "z0", name: "Hollow", bounds: [0, 0, 32, 32] },
     { id: "z1", name: "Ridge", bounds: [32, 0, 64, 32] },
   ];
+  // A spawn, because a quest is only an objective if somebody can start it. The
+  // fixture used to have none, so the walk reached nothing and the quest it
+  // asserted would have been uncompletable the moment it was written.
+  m.spawn = { player_spawns: [{ id: "sp", position: { x: 4, y: 0, z: 4 }, zone: "z0" }] };
   const r = repair(m, [{ id: "no_quests", severity: "major", fix: "add_quest" }]);
   const q = r.manifest.quests[0];
   assert.ok(q, "a quest must be added");
@@ -586,20 +590,90 @@ test("B4: add_quest builds an objective only out of things that exist", () => {
 
 test("B4: add_quest prefers a delivery when there is an item and someone to speak to", () => {
   const m = emptyish();
-  m.npcs = [{ id: "n1", name: "Ferrier", zone: "z0", dialogue: { seed: "the tide took it", lines: [] } }];
+  m.spawn = { player_spawns: [{ id: "sp", position: { x: 8, y: 0, z: 8 }, zone: "z0" }] };
+  m.npcs = [{ id: "n1", name: "Ferrier", zone: "z0", spawn: { x: 12, y: 0, z: 12 }, dialogue: { seed: "the tide took it", lines: [] } }];
   m.items = [{ id: "i1", name: "Bell Clapper" }];
+  // An item is only a collect target if something in the world hands it over.
+  // The fixture used to have a bare item and no way to obtain it, which is the
+  // other blocker a collect step can raise — `quest_item_unobtainable`.
+  m.structures = [{ id: "s1", name: "Boathouse", zone: "z0", transform: { position: { x: 16, y: 0, z: 16 } }, footprint: { w: 6, d: 6, h: 4 } }];
+  m.behaviors = [{ id: "b_pickup_i1", kind: "pickup", spec: { item: "i1" } }];
+  m.interactions = [{ id: "x_pickup_i1", trigger: "proximity", target_ref: "s1", behavior_ref: "b_pickup_i1" }];
+
   const r = repair(m, [{ id: "no_quests", severity: "major", fix: "add_quest" }]);
   const q = r.manifest.quests[0];
   assert.equal(q.giver_npc, "n1");
   assert.deepEqual(q.steps.map((s) => s.target), ["i1", "n1"]);
+
+  // And the quest it built is one the agent can actually finish.
+  const walk = simulatePlaythrough(r.manifest);
+  assert.ok(simulateQuests(r.manifest, walk).every((x) => x.completable),
+    "add_quest must not write a quest that fails simulateQuests the moment it exists");
 });
 
 test("B4 GATE: add_quest declines rather than inventing steps for an empty world", () => {
   const m = emptyish();
   m.zones = [{ id: "z0", name: "Hollow", bounds: [0, 0, 64, 64] }];
+  m.spawn = { player_spawns: [{ id: "sp", position: { x: 8, y: 0, z: 8 }, zone: "z0" }] };
   const r = repair(m, [{ id: "no_quests", severity: "major", fix: "add_quest" }]);
   assert.equal(r.manifest.quests.length, 0, "a quest whose steps reference nothing is worse than no quest");
-  assert.match(r.skipped.find((s) => s.fix === "add_quest").why, /nothing to build an objective from/);
+  assert.match(r.skipped.find((s) => s.fix === "add_quest").why, /nothing REACHABLE to build an objective from/);
+});
+
+test("B4 GATE: add_quest declines when the world exists but none of it can be reached", () => {
+  // The distinction the previous test cannot make. There is plenty here to
+  // build a quest out of — it is simply all on the far side of a wall.
+  const m = emptyish();
+  m.terrain = { kind: "heightmap", size: { w: 128, h: 64 }, data: Array.from({ length: 32 }, (_, r) => Array.from({ length: 64 }, (_, c) => (c > 20 && c < 26 ? 90 : 0))) };
+  m.zones = [
+    { id: "z_home", name: "Home", bounds: [0, 0, 40, 64] },
+    { id: "z_far", name: "Far Side", bounds: [60, 0, 128, 64] },
+  ];
+  m.spawn = { player_spawns: [{ id: "sp", position: { x: 8, y: 0, z: 8 }, zone: "z_home" }] };
+  m.npcs = [{ id: "n_far", name: "Hermit", zone: "z_far", spawn: { x: 100, y: 0, z: 30 }, dialogue: { seed: "hello", lines: [] } }];
+  m.items = [{ id: "i_far", name: "Relic" }];
+
+  const r = repair(m, [{ id: "no_quests", severity: "major", fix: "add_quest" }]);
+  assert.equal(r.manifest.quests.length, 0, "a quest aimed at the unreachable side of a wall can never be completed");
+  const why = r.skipped.find((s) => s.fix === "add_quest").why;
+  assert.match(why, /nothing REACHABLE/, why);
+});
+
+test("B4 GATE: the quest add_quest writes is completable the moment it is written", async () => {
+  // The staging failure this closes, in its own words: a real generation was
+  // refused 422 with `quest_not_completable` naming `quest_recovered_delivery`
+  // — the quest this repair invents. It fixed `no_quests`, a MAJOR, and the
+  // quest it added raised a BLOCKER. The repair pass was manufacturing the
+  // finding that rejected the world.
+  //
+  // Existing was never enough: `simulateQuests` judges a step by
+  // `walk.reached.has(target)`, so an item in a zone the walk never enters is
+  // uncompletable from the instant the quest names it.
+  const failures = [];
+  for (const prompt of [
+    "A quarry town where the stone remembers who cut it.",
+    "Ashfall Harbour, a rainy nordic port town",
+    "a neon cyberpunk megacity",
+    "a lush jungle temple complex",
+    "a desert canyon outpost under a red sun",
+  ]) {
+    for (let seed = 0; seed < 4; seed++) {
+      const m = await goodWorld(prompt, "w_addquest");
+      m.meta.seed = seed;
+      m.quests = [];
+      const r = repair(m, [{ id: "no_quests", severity: "major", fix: "add_quest" }]);
+      if (!r.manifest.quests.length) continue;            // declining is always allowed
+      const walk = simulatePlaythrough(r.manifest);
+      for (const q of simulateQuests(r.manifest, walk)) {
+        if (!q.completable) failures.push(`${prompt} #${seed}: ${q.quest} — ${q.steps.filter((x) => !x.ok).map((x) => x.why).join("; ")}`);
+      }
+      // And the world must not come out with a blocker it did not go in with.
+      const blockers = critique(r.manifest, { walk, quests: simulateQuests(r.manifest, walk) })
+        .findings.filter((f) => f.severity === "blocker").map((f) => f.id);
+      if (blockers.length) failures.push(`${prompt} #${seed}: adding a quest raised ${blockers.join(", ")}`);
+    }
+  }
+  assert.deepEqual(failures, [], `add_quest wrote quests that cannot be completed:\n  ${failures.join("\n  ")}`);
 });
 
 test("B4: reassign_giver prefers an NPC on the quest's own ground", () => {
@@ -1465,4 +1539,73 @@ test("B4 GATE: a repair never deletes a player's property, with or without live 
     ]);
     assert.ok((out.manifest[collection] || []).some((e) => e.id === id), `a player's ${collection} entry was deleted`);
   }
+});
+
+// ----------------------------------- the general form: no repair invents a blocker
+
+test("B4 GATE: no repair may leave the manifest with a BLOCKER it did not arrive with", async () => {
+  // The general form of two separate defects, both found the same way — a
+  // repair fixing one finding and raising a worse one:
+  //
+  //   add_quest        fixed `no_quests` (MAJOR) and wrote a quest aimed at an
+  //                    item the walk never reaches, raising
+  //                    `quest_not_completable` (BLOCKER). Staging refused a
+  //                    real generation on it.
+  //   separate         fixed `structures_overlap` (MINOR) by pushing a building
+  //                    clean out of the terrain, raising
+  //                    `structure_out_of_bounds` (BLOCKER).
+  //   reseat_on_ground fixed `structure_floating` (MAJOR) by seating a building
+  //                    on a spike, putting a quest target out of reach.
+  //
+  // A repair that trades up in severity is worse than the finding it fixed: the
+  // gate can report a MAJOR and let a creator act on it, but a BLOCKER the pass
+  // invented is a world refused for something that was never wrong with it.
+  const damages = [
+    ["untouched", () => {}],
+    ["behaviours cleared", (m) => { m.behaviors = []; }],
+    ["interactions cleared", (m) => { m.interactions = []; }],
+    ["quests cleared", (m) => { m.quests = []; }],
+    ["spawn removed", (m) => { m.spawn.player_spawns = []; }],
+    ["spawn out of bounds", (m) => { const p = m.spawn.player_spawns[0].position; p.x = m.terrain.size.w + 500; p.z = -400; }],
+    ["a zone lost", (m) => { m.zones = m.zones.slice(0, -1); }],
+    ["nav links cut", (m) => { m.navigation.links = []; }],
+    ["structures floated", (m) => { for (const s of m.structures) s.transform.position.y += 40; }],
+    ["structures stacked", (m) => { if (m.structures.length > 1) m.structures[1].transform.position = { ...m.structures[0].transform.position }; }],
+    ["footprints made enormous", (m) => { for (const s of m.structures) s.footprint = { w: 200, d: 200, h: 8 }; }],
+    ["terrain spiked", (m) => { const d = m.terrain.data; for (let r = 0; r < d.length; r++) for (let c = 0; c < d[r].length; c++) d[r][c] = ((r + c) % 2) * 60; }],
+    ["collision stripped", (m) => { for (const a of m.assets) delete a.collision; }],
+    ["every NPC muted", (m) => { for (const n of m.npcs) n.dialogue = { seed: "", lines: [] }; }],
+    ["a zone starved of ground", (m) => { m.navigation.walkable_zones = m.zones.map((z) => ({ zone: z.id, walkable_fraction: 0.02 })); }],
+    ["an item nobody can obtain", (m) => { m.behaviors = m.behaviors.filter((b) => b.kind !== "pickup"); }],
+    ["a quest step aimed at nothing", (m) => { if (m.quests[0]?.steps?.[0]) m.quests[0].steps[0].target = "ghost"; }],
+    ["a giver who does not exist", (m) => { if (m.quests[0]) m.quests[0].giver_npc = "ghost_npc"; }],
+  ];
+
+  const blockersOf = (m) => {
+    const walk = simulatePlaythrough(m);
+    return critique(m, { walk, quests: simulateQuests(m, walk) })
+      .findings.filter((f) => f.severity === "blocker")
+      .map((f) => f.id + (f.where ? `@${f.where}` : ""));
+  };
+
+  const invented = [];
+  for (const prompt of [
+    "A quarry town where the stone remembers who cut it.",
+    "Ashfall Harbour, a rainy nordic port town",
+    "a neon cyberpunk megacity",
+    "a lush jungle temple complex",
+  ]) {
+    const base = await goodWorld(prompt, "w_noblocker");
+    for (const [label, damage] of damages) {
+      const m = structuredClone(base);
+      damage(m);
+      const before = new Set(blockersOf(m));
+      const walk = simulatePlaythrough(m);
+      const fixable = critique(m, { walk, quests: simulateQuests(m, walk) }).findings.filter((f) => f.fix);
+      const r = repair(m, fixable);
+      const after = blockersOf(r.manifest).filter((b) => !before.has(b));
+      if (after.length) invented.push(`${prompt} / ${label}: ${after.slice(0, 3).join(", ")} (applied ${JSON.stringify(r.applied.map((a) => a.fix))})`);
+    }
+  }
+  assert.deepEqual(invented, [], `repairs invented blockers the world did not have:\n  ${invented.join("\n  ")}`);
 });
