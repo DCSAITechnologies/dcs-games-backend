@@ -22,8 +22,13 @@ the same process. Deploy, then run this against the new deployment.
 
 ## Result — 42 passed, 0 failed
 
-Run of 6 Sep 2026 against deployment `0acaf9d2-63a6-4401-a383-65540b083fe9`
-(commit `b27e257abd53bf8eac2c592fc84ff7e93dcc34ee`).
+Re-run 7 Sep 2026 against deployment `330d80ab-cad2-41f2-8cac-45825a52ca1f`
+(commit `0b477c5f2c80d597991ccfe2d56ceddab236f491`), **schema v11**.
+
+The earlier 42/42 was taken at schema v10. Migration 0011 moved staging to v11,
+which would have left "the staging-proven baseline" describing a schema nobody
+was running, so the whole suite was repeated at v11 rather than carried as a gap
+into the cutover plan.
 
 ### Durability across a real restart
 - a world saved by a previous process is still readable
