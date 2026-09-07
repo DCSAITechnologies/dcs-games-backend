@@ -52,38 +52,34 @@ A clone from the backend bundle produced branch `sprint/2026-09-canonical` at
 
 ---
 
-## 3. Test matrix
+## 3. Test matrix — FINAL
 
-`node --test --test-concurrency=4 test/*.test.mjs`
+`node --test --test-concurrency=2 test/*.test.mjs`
 
 | | count |
 | --- | --- |
-| tests | **1392** |
-| pass | **1380** |
-| **fail** | **2** |
+| tests | **1414** |
+| pass | **1404** |
+| **fail** | **0** |
 | skipped | 10 |
 
-**Zero unintended skips.** All ten share one conditional cause — the CW5 engine
-is TypeScript with parameter properties, which plain `node --test` cannot load —
-and all ten run under `tsx --test`: 33 tests, 33 pass, 0 skipped. Conditional on
-the loader, never on the outcome.
+**Zero failures. Zero unintended skips.** All ten skips share one conditional
+cause — the CW5 engine is TypeScript with parameter properties, which plain
+`node --test` cannot load — and all ten run under `tsx --test`.
 
-**Both remaining failures are the same defect, measured two ways**:
-`FileWorldStore.list()` considers every record in the directory to serve a
-24-card page, and `/v3/discover` calls it on every request. Measured: 8 worlds
-1.41ms, 64 worlds 6.49ms — 4.6x cost for 8x catalogue, down from ~5.9x after the
-reads were parallelised, because parallelism moves the constant and not the
-complexity. The Supabase path pushes `limit` and `order` to PostgREST and does
-not have this shape, and staging reports `supabase+file`.
+The CI-shaped run, which is the authoritative one, has **no skips at all**:
 
-**Why it is left open rather than fixed at the end of the session.** The real
-fix is an index, and an index on the world store is a cache that can drift. A
-stale entry that hides a published world from `listPublished` is worse than a
-slow listing, and this is the most safety-critical persistence path in the
-estate — one an entire lane spent the session hardening. Introducing that in the
-last hour, after which nobody would review it, is how a performance fix becomes
-a correctness defect. It is measured, named by a red test, and the next action
-is written down.
+    test:unit      1103 / 1103 · 0 skipped
+    test:unit:tsx    69 /   69 · 0 skipped
+    test:api        126 /  126 · 0 skipped
+    test:browser     98 /   98 · 0 skipped
+    test:e2e         12 /   12 · 0 skipped
+    test:load         6 /    6 · 0 skipped
+
+A note on measuring it: at `--test-concurrency=4` the Chrome-driving suites can
+be starved past a 60-second timeout by the rest of the matrix, which looks
+exactly like a failure and is not one. CI runs the browser suites at
+concurrency 1 for that reason, and the npm scripts above are the shape to trust.
 
 ## 4. Staging deployment state
 
@@ -754,3 +750,60 @@ because anyone decided it should be.
 The studio AI-builder shells are honest now, but they are shells: nothing
 generates an NPC, a quest standalone, a voice or an economy, and no amount of
 frontend work changes that.
+
+---
+
+## 23. The last red, closed
+
+Two failures remained at the end of the previous session and they were one
+defect: `FileWorldStore.list()` scaled with the whole catalogue for a paginated
+request. It is now closed, and the way it was closed matters more than that it
+was.
+
+An index is the obvious fix and the dangerous one — a listing that silently
+drops a published world is far worse than a slow listing. So the index is keyed
+on each file's **(mtime, size)** and an entry is used only while both still
+match. A record that changed in any way is read again, and the file list still
+comes from `readdir`, so a record the index has never seen is a MISS rather than
+an omission. A missing, truncated, forged or wrong-version index costs reads and
+never rows.
+
+Two further changes: sidecars are ruled out **structurally** rather than by
+trust — if `<id>.json` is present and classifies as a record for `<id>`, then
+`<id>.summary.json` can only be its sidecar — which halves the files touched;
+and the public read endpoints hold their computed answer between writes, keyed
+on write counters from **both** the repository and the social service, because
+publishing a world and recording a play both move those figures. Keying on the
+repository alone left `plays` frozen while the count really was changing, which
+the tests caught.
+
+**17 tests hold the correctness line**, and removing the staleness check turns
+five of them red — including "a published world appears on the very next read"
+and "an unpublished world stops being public". The performance accusation and
+the discovery-scaling test both pass with neither threshold touched.
+
+### And the thing found while closing it
+
+**Sixteen suites written during this sprint were in no npm script at all.** CI
+never ran them, so every proof they carried was worthless in the pipeline meant
+to enforce it — the same shape as the netcode job pinned to a commit that exists
+on no ref. They are wired in, and `test/ci-coverage.test.mjs` now fails if a
+suite is orphaned or a script names a file that does not exist.
+
+## 24. The last wiring gap, and what it actually was
+
+`POST /v3/marketplace/storefronts` was recorded as the one honest gap. It was
+not a missing UI: `createStorefront` had a route and `storefrontsFor` had none,
+so a creator could name a storefront and **never see it again**. There was
+nothing to render, which is why the surface was never built.
+
+The read was added, the surface built on `profile-v3`, and both proven in real
+Chrome against staging — the page reads the list on load, creating one POSTs,
+the confirmation quotes the id the SERVER assigned, and the new storefront
+appears from a re-read.
+
+Route coverage is now **97 of 106 reached, 0 dead buttons, 0 unadvertised**. The
+nine that remain are decisions, recorded separately in
+`reports/DECISION_GAPS.md` so that "unreached" is never read as "forgotten" —
+most sharply the payout KYC flow, which would ask real people for identity
+documents in service of a payment that cannot happen.
