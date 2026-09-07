@@ -651,18 +651,40 @@ test("a client cannot award itself an achievement with an absurd play duration",
   // is reported by the client — so an unbounded value is an achievement anyone
   // can grant themselves in one request. Nothing times a session server-side,
   // so the number is clamped and marked self-reported rather than trusted.
+  // Distinct worlds per case, because repeated reports from one principal on
+  // one world are now FOLDED into a single session — a play is a session, not a
+  // request — so reusing the pair would be testing the fold rather than the
+  // clamp.
   const social = createSocialService(tmp());
-  const row = await social.recordPlay("w1", "u1", 999_999_999);
+  const row = await social.recordPlay("w_absurd", "u1", 999_999_999);
   assert.ok(row.seconds <= 4 * 60 * 60, `an absurd duration must be clamped, got ${row.seconds}`);
   assert.equal(row.seconds_clamped, true);
   assert.equal(row.seconds_self_reported, true, "nothing on this estate timed this, and the row must say so");
 
-  const nonsense = await social.recordPlay("w1", "u1", "not-a-number");
+  const nonsense = await social.recordPlay("w_nonsense", "u1", "not-a-number");
   assert.equal(nonsense.seconds, null, "an unparseable duration is unknown, not zero and not accepted");
 
-  const honest = await social.recordPlay("w1", "u1", 120);
+  const honest = await social.recordPlay("w_honest", "u1", 120);
   assert.equal(honest.seconds, 120, "a plausible duration is still recorded exactly");
   assert.equal(honest.seconds_clamped, false);
+});
+
+test("one principal asking repeatedly is one play, not many", async () => {
+  // Requiring a credential made play rows attributable and did nothing about
+  // the COUNT: ten requests from one token in twenty milliseconds produced ten
+  // plays and forty hours of watch time, and those totals are served publicly
+  // as the platform's measured figures.
+  const social = createSocialService(tmp());
+  for (let i = 0; i < 10; i++) await social.recordPlay("w_spam", "u_spammer", 60);
+
+  const stats = await social.worldStats("w_spam");
+  assert.equal(stats.plays, 1, "ten requests in one session is one play");
+  assert.equal(stats.unique_players, 1);
+  assert.ok(stats.total_seconds <= 4 * 60 * 60, "and the accumulated seconds are still clamped");
+
+  // A different player is genuinely a different play.
+  await social.recordPlay("w_spam", "u_someone_else", 60);
+  assert.equal((await social.worldStats("w_spam")).plays, 2);
 });
 
 // =============================================================================

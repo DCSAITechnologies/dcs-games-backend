@@ -314,6 +314,21 @@ export class PersistenceEngine {
   /** POST /worlds/:id/save — accept a delta → { ok, seq }. Append-only, idempotent, monotonic. */
   async save(delta: SaveDelta, opts: { actorId?: string | null } = {}): Promise<SaveAccepted> {
     if (!delta.world_id || delta.seq == null) throw new Error('save: world_id and seq required');
+    // `seq` is validated the way the ops are, and for the same reason.
+    //
+    // `seq: "not-a-number"` passed the null check, compared as NaN against the
+    // max (so the monotonicity guard let it through), was APPENDED to an
+    // append-only store, and was then filtered back out of every replay by
+    // `d.seq > afterSeq`. The caller got ok:true and its ops were applied to
+    // nothing, permanently — which is exactly the property the op validation
+    // exists to guarantee, one field along. `seq: Infinity` is the same shape
+    // and additionally locks every future save behind an unreachable maximum.
+    if (typeof delta.seq !== 'number' || !Number.isSafeInteger(delta.seq) || delta.seq < 1) {
+      throw new Error(
+        `save: seq must be a positive integer, got ${JSON.stringify(delta.seq)}. ` +
+        `A delta the store accepts but replay skips is silently lost, and this store cannot forget it.`
+      );
+    }
     // Who owns what RIGHT NOW. Read before anything is appended, because the
     // person a delta may not act on is recorded on the object, not on the op.
     const owned = new Map<string, string | null>();

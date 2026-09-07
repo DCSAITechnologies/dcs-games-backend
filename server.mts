@@ -65,6 +65,14 @@ console.log("CW2 generation adapter:", GEN_MODE);
 const _store = HAS_SUPA
   ? new SupabasePersistenceStore({ url: SUPA, serviceRoleKey: KEY })
   : new InMemoryPersistenceStore();
+// Named, because the difference matters and nothing said it. Without Supabase
+// the runtime delta store is a Map: an object saved and acknowledged ok:true is
+// gone at the next restart, seq 1 is then accepted again as a fresh delta, and
+// the engine's append-only, monotonic and idempotent guarantees are only as
+// durable as the store beneath them. /health described the kind of every other
+// store and was silent about this one.
+const RUNTIME_STORE_KIND = HAS_SUPA ? "supabase" : "memory";
+const RUNTIME_STORE_DURABLE = HAS_SUPA;
 const persistence = new PersistenceEngine(_store);
 const idb = createIdentityStore();
 const atlas = makeAtlasRoutes({ worlds: [], events: [], receipts: [], verifiedWorldIds: [] }); // CW7 read surface; world truth now comes from the durable repository
@@ -218,7 +226,16 @@ export function originAllowed(origin: string, allowed: string[] = ALLOWED_ORIGIN
   for (const raw of allowed) {
     if (raw === "*") return true;
     const e = split(raw);
-    if (e.scheme && o.scheme && e.scheme !== o.scheme) continue;
+    // A schemeless entry means https, not "any scheme".
+    //
+    // Skipping the comparison when EITHER side lacked a scheme meant that
+    // `ALLOWED_ORIGINS=games.dcsai.ai` — the natural way to write a host —
+    // allowed http://games.dcsai.ai as well, downgrading every allowlisted
+    // origin to plaintext. A browser Origin header always carries a scheme, so
+    // the only side that can be missing one is the configuration, and the safe
+    // reading of an unqualified host is the secure scheme.
+    const entryScheme = e.scheme || "https://";
+    if (o.scheme && entryScheme !== o.scheme) continue;
     if (e.host === o.host) return true;
     if (e.host.startsWith("*.")) {
       const suffix = e.host.slice(1);                // "*.example.com" -> ".example.com"
@@ -237,10 +254,14 @@ export function originAllowed(origin: string, allowed: string[] = ALLOWED_ORIGIN
 function corsFor(res: http.ServerResponse) {
   const origin = (res as any).__dcsOrigin || "";
   if (!ALLOWED_ORIGINS.length) {
-    return { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "*", "Access-Control-Allow-Methods": "*" };
+    return { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "*, Authorization", "Access-Control-Allow-Methods": "*" };
   }
   const h: Record<string, string> = {
-    "Access-Control-Allow-Headers": "*",
+    // `*` matches every header EXCEPT Authorization, per the Fetch standard, so
+    // a wildcard alone blocks every authenticated call at the preflight while
+    // the ACAO header says the origin is welcome. Every call this API cares
+    // about carries a bearer token, so it is named.
+    "Access-Control-Allow-Headers": "*, Authorization",
     "Access-Control-Allow-Methods": "*",
     // The answer depends on the request's Origin, so caches must key on it.
     Vary: "Origin",
@@ -414,6 +435,12 @@ const server = http.createServer(async (req, res) => {
       auth_header_fallback_removed: true,      // A1: x-user-id impersonation path deleted 6 Sep 2026
       internal_testing_window_ends: "2026-09-30",
       persistence: repo.kind,
+      runtime_state_store: {
+        kind: RUNTIME_STORE_KIND,
+        durable: RUNTIME_STORE_DURABLE,
+        note: RUNTIME_STORE_DURABLE ? undefined
+          : "runtime deltas are held in memory only: they do not survive a restart, and a seq already accepted will be accepted again afterwards",
+      },
       schema_assertion: SCHEMA_STATE,
       generation: GEN_MODE,
       lanes: ["cw1-identity", "cw2-generation", "cw5-persistence", "cw7-atlas"],
@@ -535,7 +562,15 @@ const server = http.createServer(async (req, res) => {
         creators_with_a_published_world: creators.size,
         plays_of_published_worlds: plays,
         plays,                                  // kept: the site reads this name
-        play_seconds: seconds,
+        // Seconds are SELF-REPORTED by the client and nothing times a session
+        // server-side, so one account can contribute a full clamped session per
+        // window by asking. Publishing that as a platform figure would be the
+        // same untruth as an invented one, dressed as a measurement — so it is
+        // reported under a name that carries its provenance, and the neutral
+        // `play_seconds` is gone rather than left to be read as measured.
+        play_seconds_self_reported: seconds,
+        play_seconds_measured: null,
+        play_seconds_note: "nothing on this estate times a session; these seconds are reported by clients and clamped per session, so they are a claim rather than a measurement",
         ratings: rated,
         // Deliberately ABSENT: a platform-wide unique player count. The stats
         // index exposes unique players per world, and summing that across
@@ -552,7 +587,13 @@ const server = http.createServer(async (req, res) => {
         // played ten times contributes nothing. Reporting it as a total would
         // be a smaller version of the same dishonesty as inventing one.
         basis: "counted at request time over PUBLISHED worlds only; plays and ratings on drafts are not included",
-        counted_over: Math.min(published.length, 1000),
+        counted_over: published.length,
+        // The listing is capped, so on a platform with more than 1000 published
+        // worlds every figure here becomes a floor rather than a count. Said in
+        // the response instead of being left for someone to discover when the
+        // numbers stop moving.
+        page_limit: 1000,
+        complete: published.length < 1000,
         measured_at: new Date().toISOString(),
         source: repo.kind,
       });
@@ -565,19 +606,25 @@ const server = http.createServer(async (req, res) => {
     // honest answer and is what the truth layer renders as "nothing yet".
     if (url === "/api/public/events" && method === "GET") {
       const published = await repo.listPublished(200);
+      // `updated_at` is the LAST EDIT, not the publication. Labelling it
+      // `world_published` and sorting on it meant an edit re-ordered the
+      // publication feed and back-dated nothing: the world published first led
+      // the feed carrying its edit time. The store keeps no publication
+      // timestamp, so this feed cannot report one — and says so rather than
+      // implying it does.
       const events = published
         .map((w: any) => ({
-          kind: "world_published",
+          kind: "world_in_catalogue",
           world_id: w.world_id,
           title: w.title,
-          at: w.updated_at || w.created_at || null,
+          last_changed_at: w.updated_at || w.created_at || null,
         }))
-        .filter((e) => e.at)
-        .sort((a, b) => String(b.at).localeCompare(String(a.at)))
+        .filter((e) => e.last_changed_at)
+        .sort((a, b) => String(b.last_changed_at).localeCompare(String(a.last_changed_at)))
         .slice(0, 40);
       return send(res, 200, {
         ok: true, count: events.length, events,
-        basis: "publication records from the world store; no other activity type is recorded publicly yet",
+        basis: "published worlds ordered by when they last CHANGED. The store keeps no publication timestamp, so this is not a chronology of publications and does not claim to be.",
         measured_at: new Date().toISOString(),
       });
     }
@@ -641,7 +688,18 @@ const server = http.createServer(async (req, res) => {
         ok: true,
         principal_id: me.id,
         profile,
-        worlds: { total: mine.length, published: mine.filter((w: any) => w.state === "published").length, drafts: mine.filter((w: any) => w.state !== "published").length },
+        // `listOwned(me.id, 50)` returns a PAGE. Reporting its length as
+        // `total` told a creator with 55 worlds that they had 50 — a page size
+        // dressed as a count, which is the same class of untruth as an invented
+        // metric and harder to notice because it looks plausible.
+        worlds: {
+          counted: mine.length,
+          page_limit: 50,
+          complete: mine.length < 50,
+          published: mine.filter((w: any) => w.state === "published").length,
+          drafts: mine.filter((w: any) => w.state !== "published").length,
+          note: mine.length >= 50 ? "this is the first 50 worlds, not a total" : undefined,
+        },
         plays_of_my_worlds: plays,
         recent: mine.slice(0, 8).map((w: any) => ({ world_id: w.world_id, title: w.title, state: w.state, version: w.version, updated_at: w.updated_at })),
         measured_at: new Date().toISOString(),
@@ -2099,6 +2157,17 @@ const server = http.createServer(async (req, res) => {
         }
         const prior = await repo.get(m[1], { requesterId: me.id }).catch(() => null);
 
+        // CREATING a world through save requires what creating one anywhere
+        // else requires.
+        //
+        // Both generate routes take mustBeInternalTester; this one took mustBe,
+        // and repo.upsert's owner check only fires when a record already
+        // exists — so any authenticated account could bring unlimited worlds
+        // into being on ids of its choosing, during a window explicitly limited
+        // to authorised testers. Saving a world you already own is unchanged;
+        // it is creation that was never gated.
+        if (!prior) await mustBeInternalTester(req, cid);
+
         // A save to a PUBLISHED world returns it to draft, and says so.
         //
         // Preserving `published` looked like the smaller change than the old
@@ -2144,7 +2213,29 @@ const server = http.createServer(async (req, res) => {
       // Both feed livestate, which decides whether a rollback may delete things.
       const delta = b.delta || b; delta.world_id = m[1];
       await repo.get(m[1], { requesterId: me.id, requireOwner: true });
-      const r = await persistence.save(delta, { actorId: me.id });
+      // The persistence engine throws plain Errors, and the top-level handler
+      // classifies anything that is not an AppError as an internal fault and
+      // withholds the message — correctly, since an unexpected exception can
+      // carry anything. The two changes collided: the engine's carefully worded
+      // refusals ("a delta may not act on another player's behalf", "this world
+      // would be unloadable") were logged as server faults, and a client that
+      // sent a bad request was told to retry.
+      //
+      // These are the engine's OWN refusals, recognised by its own prefix, and
+      // they are the caller's fault rather than ours. Anything else still falls
+      // through as a 500 with the message withheld.
+      let r;
+      try {
+        r = await persistence.save(delta, { actorId: me.id });
+      } catch (e: any) {
+        const msg = String(e?.message || e);
+        if (!/^save: /.test(msg)) throw e;
+        if (/belongs to|another player|ownership could not be read/i.test(msg)) {
+          throw Errors.forbidden(msg, { correlationId: cid });
+        }
+        if (/non-monotonic/i.test(msg)) throw Errors.conflict(msg, { correlationId: cid });
+        throw Errors.validation(msg, { correlationId: cid });
+      }
       return send(res, 200, { ok: true, ...r, correlation_id: cid });
     }
     m = url.match(/^\/worlds\/([^/]+)\/load$/);
@@ -2166,7 +2257,13 @@ const server = http.createServer(async (req, res) => {
         snap = await persistence.load(m[1]);
       } catch (e: any) {
         if (!/base world .* not found/i.test(String(e?.message || e))) throw e;
-        runtimeUnavailable = "this world has no runtime state yet";
+        // Not "no runtime state yet" — that is a claim about HISTORY this
+        // cannot support. With an in-memory store the same absence means
+        // "saved, acknowledged, and lost at the last restart", and a load that
+        // cannot tell those apart must not assert the innocent one.
+        runtimeUnavailable = RUNTIME_STORE_DURABLE
+          ? "no runtime state has been recorded for this world"
+          : "no runtime state is present. This deployment holds runtime deltas IN MEMORY, so this may mean none was ever saved, or that it was lost at the last restart — these are indistinguishable here.";
       }
       return send(res, 200, { ok: true, world_id: m[1], world_version: rec.version, manifest_hash: rec.manifest_hash, state: rec.state, owner: rec.owner_id, manifest: rec.manifest, runtime_state: snap, runtime_note: runtimeUnavailable ?? undefined, correlation_id: cid });
     }

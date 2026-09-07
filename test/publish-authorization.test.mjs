@@ -173,7 +173,7 @@ test("PUBLISH GATE: a V2 manifest still saves — this is the V2 route", async (
   // It has never been played, so it has no runtime state — said plainly rather
   // than raised as a fault.
   assert.equal(back.runtime_state, null);
-  assert.match(back.runtime_note, /no runtime state yet/);
+  assert.match(back.runtime_note, /no runtime state/);
 });
 
 test("PUBLISH GATE: a manifest that is not an object is refused", async () => {
@@ -279,11 +279,17 @@ test("TRUTH GATE: platform stats are counted, and an empty platform says zero", 
   const b = await r.json();
   assert.equal(r.status, 200, JSON.stringify(b).slice(0, 200));
 
-  for (const k of ["published_worlds", "creators_with_a_published_world", "plays", "play_seconds", "ratings"]) {
+  for (const k of ["published_worlds", "creators_with_a_published_world", "plays", "ratings"]) {
     assert.equal(typeof b[k], "number", `${k} must be a real count`);
     assert.ok(b[k] >= 0);
   }
   assert.ok(b.measured_at, "and must say when it was counted");
+  // Seconds are a client's claim, not a measurement, and must say so.
+  assert.equal(b.play_seconds_measured, null, "nothing times a session server-side");
+  assert.equal(typeof b.play_seconds_self_reported, "number");
+  assert.match(b.play_seconds_note, /claim rather than a measurement/);
+  assert.equal(b.play_seconds, undefined, "the neutral name is gone; it read as measured");
+
   assert.match(b.basis, /PUBLISHED worlds only/,
     "the scope must be stated: a draft played ten times contributes nothing, and calling this a platform total would be a smaller version of the same dishonesty as inventing one");
 });
@@ -323,7 +329,8 @@ test("HOME: the signed-in landing data is the caller's own, and needs a caller",
   const b = await (await call(TESTER, "GET", "/me/home")).json();
   assert.equal(b.ok, true);
   assert.equal(b.principal_id, "u-tester");
-  assert.ok(b.worlds.total >= 1);
+  assert.ok(b.worlds.counted >= 1);
+  assert.equal(b.worlds.complete, true, "under the page limit, so this really is all of them");
   assert.ok(b.recent.some((w) => w.world_id === worldId), "and lists the world just made");
 
   // Another principal sees their own, not this one's.
@@ -352,14 +359,19 @@ test("TRUTH GATE: a dark marketplace says it is dark, not that it is empty", asy
   assert.equal(b.assert_dark, "/v3/marketplace/assert-dark", "and point at the proof");
 });
 
-test("TRUTH GATE: the events feed is publication records, and empty when nothing happened", async () => {
+test("TRUTH GATE: the feed does not present an edit time as a publication time", async () => {
+  // It labelled `updated_at` as `world_published` and sorted on it, so an edit
+  // re-ordered the publication feed and back-dated nothing. The store keeps no
+  // publication timestamp, so this feed cannot report one — and must not imply
+  // that it does.
   const b = await (await call(null, "GET", "/api/public/events")).json();
   assert.equal(b.ok, true);
   assert.ok(Array.isArray(b.events));
-  assert.match(b.basis, /publication records/);
+  assert.match(b.basis, /no publication timestamp/i, "the limitation must be stated, not implied away");
   for (const e of b.events) {
-    assert.equal(e.kind, "world_published");
-    assert.ok(e.world_id && e.at, "every event names a real world and a real time");
+    assert.equal(e.kind, "world_in_catalogue", "not 'published' — that is a claim the data cannot support");
+    assert.ok(e.world_id && e.last_changed_at, "every entry names a real world and a real time");
+    assert.equal(e.at, undefined, "the ambiguous field name is gone");
   }
 
   const { worldId } = await validManifest();

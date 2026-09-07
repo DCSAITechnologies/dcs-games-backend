@@ -48,6 +48,8 @@ import { computeLevel, publishCredits, canPublish } from "../cw1/identity-core.m
 
 /** The longest single play session that will be believed from a client, in
  *  seconds (4 hours). Nothing on this estate times a session server-side. */
+/** How long one session's repeated reports fold together. A play is a session, not a request. */
+const PLAY_DEDUPE_MS = 5 * 60 * 1000;
 const MAX_SESSION_SECONDS = 4 * 60 * 60;
 
 const FRIEND_STATES = ["requested", "accepted", "blocked"];
@@ -1056,6 +1058,35 @@ export function createSocialService(env = process.env, deps = {}) {
       // no later reader can mistake it for something the server timed.
       const raw = seconds == null ? null : Number(seconds);
       const clean = raw == null || !Number.isFinite(raw) ? null : Math.min(MAX_SESSION_SECONDS, Math.max(0, Math.round(raw)));
+
+      // One principal cannot count as many players by asking repeatedly.
+      //
+      // Attribution was added because an anonymous caller could take a world
+      // from 0 to 25 plays in 25 requests. Requiring a credential made the rows
+      // attributable and did nothing about the count: ten requests from one
+      // token in twenty milliseconds still produced ten plays and forty hours
+      // of watch time, and those totals are now served publicly as the
+      // platform's measured figures. A play is a session, not a request.
+      //
+      // Within the window a repeat is folded into the existing row — the
+      // seconds accumulate, which is what a continuing session means — rather
+      // than refused, because a client re-reporting progress is behaving
+      // correctly and should not get an error for it.
+      if (principalId) {
+        const since = Date.now() - PLAY_DEDUPE_MS;
+        const recent = (await plays.find((x) => x.world_id === worldId && x.principal_id === principalId))
+          .filter((x) => new Date(x.started_at).getTime() > since)
+          .sort((a, b) => String(b.started_at).localeCompare(String(a.started_at)))[0];
+        if (recent) {
+          return await plays.update((x) => x.id === recent.id, (x) => ({
+            ...x,
+            seconds: clean == null ? x.seconds : Math.min(MAX_SESSION_SECONDS, (x.seconds || 0) + clean),
+            seconds_self_reported: x.seconds_self_reported || clean != null,
+            reports: (x.reports || 1) + 1,
+          }));
+        }
+      }
+
       return await plays.insert({
         id: crypto.randomUUID(), world_id: worldId, principal_id: principalId || null,
         started_at: new Date().toISOString(),
