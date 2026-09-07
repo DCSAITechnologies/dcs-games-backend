@@ -1861,7 +1861,28 @@ const server = http.createServer(async (req, res) => {
           // every rollback whose target predates the current manifest format.
         });
 
-        const gate = await playtestAndRepair(manifest);
+        // NOT GATED on live-state completeness, and that is a decision rather
+        // than an oversight.
+        //
+        // Lane C's finding is real: an undetermined category arrives as an
+        // empty array, which is indistinguishable from "nothing is held there",
+        // so a rollback that removes entities can proceed on evidence that was
+        // never gathered. The obvious fix — refuse when the check is incomplete
+        // — was tried and reverted, because `determined.complete` is never true
+        // on this estate BY DESIGN: several categories have no source at all
+        // and report PARTIAL on purpose (see the note at the liveStateSvc
+        // construction). Gating on it would disable every deleting rollback
+        // permanently, which is not a safety improvement but a broken feature.
+        //
+        // Closing it properly needs per-category deletion analysis: refuse only
+        // when what would be removed falls in a category that could not be
+        // determined. That does not exist yet. Until it does, the response says
+        // exactly how far the check reached — live_state_checked,
+        // live_state_not_checked, live_state_complete and the note — and
+        // manifest-recorded ownership IS enforced independently inside
+        // planRollback, so what the world itself knows is owned is protected.
+        // The residual risk is runtime holdings in categories with no source.
+        const gate = await playtestAndRepair(manifest, { liveState: live });
         if (!gate.passed) {
           // An old version that no longer passes today's gate is not silently
           // shipped: the world stays where it is and the caller is told why.

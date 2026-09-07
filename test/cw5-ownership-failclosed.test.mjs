@@ -13,14 +13,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { PersistenceEngine, InMemoryPersistenceStore } from "../src/cw5/cw5_persistence.ts";
+// The CW5 engine is TypeScript with parameter properties, so plain `node --test`
+// cannot load it. Under `tsx --test` it runs in full. The skip is conditional on
+// the loader, never on the outcome — see the same pattern in livestate.test.mjs.
+let cw5 = null;
+try { cw5 = await import("../src/cw5/cw5_persistence.ts"); } catch { /* needs tsx */ }
 
 function engine() {
-  const store = new InMemoryPersistenceStore();
-  return { engine: new PersistenceEngine(store), store };
+  const store = new cw5.InMemoryPersistenceStore();
+  return { engine: new cw5.PersistenceEngine(store), store };
 }
 
-test("CW5 GATE: a malformed op is refused rather than stored", async () => {
+test("CW5 GATE: a malformed op is refused rather than stored", async (t) => {
+  if (!cw5) return t.skip("CW5 engine needs tsx (TypeScript parameter properties)");
   const { engine: e, store } = engine();
   await store.putBaseWorld({ world_id: "w1", objects: [] });
   await assert.rejects(
@@ -33,7 +38,8 @@ test("CW5 GATE: a malformed op is refused rather than stored", async () => {
   assert.ok(snap, "the world must still load after a refused save");
 });
 
-test("CW5 GATE: if ownership cannot be read, the save is refused, not permitted", async () => {
+test("CW5 GATE: if ownership cannot be read, the save is refused, not permitted", async (t) => {
+  if (!cw5) return t.skip("CW5 engine needs tsx (TypeScript parameter properties)");
   const { engine: e, store } = engine();
   await store.putBaseWorld({ world_id: "w2", objects: [{ object_id: "o1", owner_id: "alice" }] });
 
@@ -50,7 +56,8 @@ test("CW5 GATE: if ownership cannot be read, the save is refused, not permitted"
   );
 });
 
-test("CW5: a world that genuinely does not exist yet still accepts a first save", async () => {
+test("CW5: a world that genuinely does not exist yet still accepts a first save", async (t) => {
+  if (!cw5) return t.skip("CW5 engine needs tsx (TypeScript parameter properties)");
   // The legitimate case the original catch was written for must keep working:
   // nothing is owned because nothing is there.
   const { engine: e } = engine();
