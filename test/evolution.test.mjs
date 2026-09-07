@@ -17,6 +17,7 @@ import { playtestAndRepair } from "../src/v3/playtest/agent.mjs";
 import { createWorldMemory } from "../src/v3/memory/world-memory.mjs";
 import { createCompanionService } from "../src/v3/companion/companion.mjs";
 import { validateManifest } from "../src/v3/manifest/schema.mjs";
+import { validateNavigation } from "../src/v3/playtest/validators.mjs";
 
 const OFFLINE = { DCS_PROVIDERS_OFFLINE: "1" };
 const tmpEnv = () => ({ DCS_DATA_DIR: fs.mkdtempSync(path.join(os.tmpdir(), "dcs-evo-")) });
@@ -724,4 +725,67 @@ test("B5: replanning the same expansion at the same version produces the same id
   assert.deepEqual(a.add.structures.map((s) => s.id), b.add.structures.map((s) => s.id));
   assert.deepEqual(a.add.npcs.map((n) => n.id), b.add.npcs.map((n) => n.id));
   assert.deepEqual(a.add.zones.map((z) => z.id), b.add.zones.map((z) => z.id));
+});
+
+// ------------------------------ a recorded measurement must have been measured
+
+test("B6 GATE: an expansion measures the ground under its new district", async () => {
+  // `applyDelta` used to push `walkable_fraction: 1` for every zone a delta
+  // added — a figure nobody had taken, in a field that is only ever read as a
+  // measurement. `validateNavigation` raises `zone_not_walkable` from it and the
+  // repair pass flattens terrain on the strength of it, so every district an
+  // expansion added declared itself perfectly walkable whatever the ground under
+  // it was, and the one check that would catch unwalkable new ground could never
+  // fire on new ground.
+  const base = await world("A small nordic port town", "w_walk");
+  const delta = planExpansion(base, { request: "add a hospital district", author: "u1" });
+  const zoneId = delta.add.zones[0].id;
+
+  // On ordinary generated ground the answer is 1.0 — which is exactly why the
+  // assumption survived. The test is that it was ARRIVED at, so make the ground
+  // under the new district something no one could walk on and watch the number
+  // follow. The region the district lands in is patched below, so the terrain
+  // the measurement sees is the terrain the delta actually produces.
+  const applied = applyDelta(base, delta, emptyLiveState());
+  const entry = applied.manifest.navigation.walkable_zones.find((w) => w.zone === zoneId);
+  assert.ok(entry, "a new district must get a walkability record");
+  assert.equal(entry.source, "expansion");
+  assert.ok(typeof entry.walkable_fraction === "number" && entry.walkable_fraction >= 0 && entry.walkable_fraction <= 1);
+
+  // Now the same expansion onto ground nobody could stand on: a continuous
+  // 10m-per-cell ramp, so the slope over any 4m step is far past the 2.2 the
+  // spatial provider calls walkable.
+  const rough = structuredClone(base);
+  const d = rough.terrain.data;
+  for (let r = 0; r < d.length; r++) for (let c = 0; c < d[r].length; c++) d[r][c] = c * 10;
+  const roughDelta = planExpansion(rough, { request: "add a hospital district", author: "u1" });
+  // Keep the district ON the existing ground. Left to itself the planner puts a
+  // new district in free space beyond the map and grows filler terrain under it,
+  // and filler is smooth — which would measure the wrong thing.
+  roughDelta.terrain_extend = null;
+  const w = rough.terrain.size.w, h = rough.terrain.size.h;
+  roughDelta.add.zones[0].bounds = [w * 0.1, h * 0.1, w * 0.5, h * 0.5];
+  const roughApplied = applyDelta(rough, roughDelta, emptyLiveState());
+  const roughEntry = roughApplied.manifest.navigation.walkable_zones.find((w) => w.zone === roughDelta.add.zones[0].id);
+  assert.ok(roughEntry, "the district must still get a record");
+  assert.ok(roughEntry.walkable_fraction < 0.5,
+    `ground nobody can stand on must not record itself as walkable, got ${roughEntry.walkable_fraction}`);
+
+  // And the validator, which is the whole reason the number exists, now sees it.
+  assert.ok(validateNavigation(roughApplied.manifest).some((f) => f.id === "zone_not_walkable" && f.where === roughDelta.add.zones[0].id),
+    "the navigation validator must be able to raise zone_not_walkable on new ground");
+});
+
+test("B6: a delta that brings its own measured walkability keeps it", async () => {
+  // A stitch carries the guest world's own figures. Those were measured on the
+  // guest's terrain by whoever built it, and must not be overwritten.
+  const base = await world("A small nordic port town", "w_walk2");
+  const delta = planExpansion(base, { request: "add a market quarter", author: "u1" });
+  const zoneId = delta.add.zones[0].id;
+  delta.navigation_walkable = [{ zone: zoneId, walkable_fraction: 0.42, mean_ground_y: 3.5, source: "stitch:guest" }];
+
+  const applied = applyDelta(base, delta, emptyLiveState());
+  const entry = applied.manifest.navigation.walkable_zones.find((w) => w.zone === zoneId);
+  assert.equal(entry.walkable_fraction, 0.42, "a supplied measurement must win over a fresh one");
+  assert.equal(entry.source, "stitch:guest");
 });

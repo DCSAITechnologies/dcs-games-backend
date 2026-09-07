@@ -194,6 +194,37 @@ function terrainHeightAt(terrain, x, z) {
   return terrain.data[j][i];
 }
 
+/**
+ * What fraction of a zone can be stood on, sampled the way spatial.mjs samples
+ * it. The definition has to match, because `navigation.walkable_zones` has
+ * several readers and they all take it to mean the same thing.
+ */
+function measureZoneWalkability(terrain, zone) {
+  const b = zone?.bounds;
+  if (!Array.isArray(b) || b.length !== 4 || !b.every(Number.isFinite)) return { walkable_fraction: 0, mean_ground_y: 0 };
+  const [x0, z0, x1, z1] = b;
+  const stepX = Math.max(4, (x1 - x0) / 12), stepZ = Math.max(4, (z1 - z0) / 12);
+  let ok = 0, total = 0, sumY = 0;
+  for (let x = x0 + 2; x < x1 - 2; x += stepX) {
+    for (let z = z0 + 2; z < z1 - 2; z += stepZ) {
+      total++;
+      const y = terrainHeightAt(terrain, x, z);
+      const slope = Math.max(
+        Math.abs(y - terrainHeightAt(terrain, Math.min(x + 4, x1 - 1), z)),
+        Math.abs(y - terrainHeightAt(terrain, x, Math.min(z + 4, z1 - 1))),
+      );
+      if (slope < 2.2) { ok++; sumY += y; }
+    }
+  }
+  // A zone too small to sample is not evidence of unwalkable ground, so it is
+  // reported as walkable rather than as a finding nobody can act on.
+  if (!total) return { walkable_fraction: 1, mean_ground_y: 0 };
+  return {
+    walkable_fraction: Number((ok / total).toFixed(3)),
+    mean_ground_y: ok ? Number((sumY / ok).toFixed(2)) : 0,
+  };
+}
+
 function hashDeltaSeed(delta) {
   let h = 2166136261;
   const src = String(delta.delta_id || delta.label || "delta");
@@ -413,12 +444,17 @@ export function applyDelta(manifest, delta, liveState = emptyLiveState()) {
       else next.navigation.walkable_zones.push(w);
     }
   }
+  // Which added zones still need a walkability figure of their own?
+  //
+  // Measured below, AFTER the terrain patch, because the patch is what decides
+  // what the ground under them actually is. Noted here rather than filled in
+  // here so that a delta which brought its own MEASURED figures (a stitch
+  // carries the guest's) keeps them — that block ran a moment ago and wins.
+  const unmeasuredZones = [];
   for (const z of delta.add?.zones || []) {
     next.navigation = next.navigation || { links: [], walkable_zones: [], navmesh_ref: null };
     next.navigation.walkable_zones = next.navigation.walkable_zones || [];
-    if (!next.navigation.walkable_zones.some((w) => w.zone === z.id)) {
-      next.navigation.walkable_zones.push({ zone: z.id, walkable_fraction: 1, mean_ground_y: 0, source: "expansion" });
-    }
+    if (!next.navigation.walkable_zones.some((w) => w.zone === z.id)) unmeasuredZones.push(z);
   }
 
   // --- terrain patch: only the named region changes -----------------------
@@ -441,6 +477,26 @@ export function applyDelta(manifest, delta, liveState = emptyLiveState()) {
         if (i < next.terrain.data[j].length) next.terrain.data[j][i] = v;
       });
     });
+  }
+
+  // --- walkability for the zones this delta brought ------------------------
+  //
+  // Measured, not assumed. This used to push `walkable_fraction: 1` for every
+  // added zone — a figure nobody had taken, in a field that is only ever read
+  // as a measurement: `validateNavigation` raises `zone_not_walkable` from it,
+  // and the repair pass flattens terrain on the strength of it. Every district
+  // an expansion added therefore declared itself perfectly walkable whatever
+  // the ground under it turned out to be, and the one check that would have
+  // caught unwalkable new ground could never fire on new ground.
+  //
+  // It is measured the way the spatial provider measures it — a grid of at most
+  // 12x12 points inset from the bounds, walkable where the local slope over a
+  // 4m step is under 2.2 — so the number still means what its other readers
+  // think it means. On today's gentle generated terrain it comes out at 1.0,
+  // which is exactly why this went unnoticed: the assumption was true until it
+  // was not going to be.
+  for (const z of unmeasuredZones) {
+    next.navigation.walkable_zones.push({ zone: z.id, ...measureZoneWalkability(next.terrain, z), source: "expansion" });
   }
 
   // --- reseat added structures on the (possibly extended) ground -----------
