@@ -393,3 +393,78 @@ Stated plainly, because a report that omits these is worth less than no report.
    reachable.
 5. **No real internal testers have used the deployed build.** Founder item, not
    engineering: the original blocker was "no deployed build", and that is gone.
+
+---
+
+## 14. The adversarial review of the Lead's own work
+
+Late in the session a lane was given one job: review the code the Lead wrote
+today. The Lead had been author and sole reviewer of it — the arrangement that
+lets a defect survive — and the review found the signature of exactly that.
+Its own summary put it best: **the fix is right and its NEIGHBOUR is not.**
+
+Thirteen findings, all now closed. The three it called blockers:
+
+1. **The A5 consent gate was keyed on a list of words.** It gated
+   `voice|narration|avatar`. `MEDIA_KINDS` is
+   `[voice, likeness, avatar, name, performance]` and `/health` publishes that
+   list, so `kind:"likeness"` naming another principal returned **200** while the
+   identical request as `"voice"` returned 403 — and `kind:"image"` was ungated
+   and *stores the asset in the world*. A consent gate that can be stepped
+   around by choosing a different word for the same act is not a gate. It now
+   keys on whether a subject is NAMED.
+2. **Preserving `published` across a save was an unreviewed content swap.**
+   Killing the body `state` was right; `prior?.state` was not the smaller
+   change. Publishing signs a receipt over a SPECIFIC manifest, so swapping the
+   manifest underneath left the receipt attesting to content that was no longer
+   there — on a live, badged, publicly listed world. And `meta.atlas_signed`
+   came straight from the request body, and `/v3/discover` renders it as the
+   verification badge.
+3. **Migration 0011 fixed the first write in the safety flow and left three
+   failing.** Filing a report worked; acting on one did not. 0012 closes it.
+
+And the ones about telling the truth:
+
+- a play was a REQUEST, not a session: ten calls from one token in twenty
+  milliseconds became ten plays and forty hours of watch time, served publicly
+  as measured platform figures
+- `seconds` are self-reported and nothing times a session, so the neutral name
+  `play_seconds` is gone and the value now carries its provenance
+- `/me/home` reported a page size as a total
+- `/api/public/events` labelled the last EDIT as the publication time
+- CORS: a schemeless allowlist entry matched `http` as well as `https`; and
+  `Allow-Headers: *` matches every header EXCEPT `Authorization`, so every
+  authenticated call was blocked at the preflight while the ACAO said welcome
+- cw5 validated every op and never validated `seq`
+- and the two honest changes collided: the engine throws plain `Error`s, the
+  handler now withholds internal messages, so every carefully worded refusal
+  reached the caller as a bare 500 telling it to retry
+
+The largest fix came from its finding that a deployment without Supabase kept
+runtime state in a **Map** — so acknowledged state vanished at restart, a used
+`seq` was accepted again, and every local and CI run was asserting append-only
+guarantees against a store that could not keep them. There is now a
+`FilePersistenceStore`; durability is real on both branches.
+
+**Fourteen of its attacks bounced**, and those are recorded too: `originAllowed`
+survived scheme downgrade, trailing dot, port, userinfo, `%2e`, two-label
+wildcard, empty label and `null`; the `state` refusal has no bypass in any
+spelling or on any route; no public endpoint leaks a draft; the error handler
+genuinely withholds; and cw5's op validation accepts nothing replay refuses.
+A disproved hypothesis is a result — it stops the next person re-deriving it.
+
+---
+
+## 15. Proof suites — final
+
+| Proof | Result |
+| --- | --- |
+| V3 flagship + persistence, schema v11 | 42 / 42 |
+| V2 surface | 20 / 20 |
+| Atlas provenance, verified trustlessly | 16 / 16 |
+| Remote security posture | 35 / 35 |
+| Concurrency under load | 26 / 26 |
+| Frontend ↔ staging, in a browser | 42 / 42 |
+| Netcode anti-cheat | 186 checks |
+
+All re-run against the final deployment after the security fixes.
