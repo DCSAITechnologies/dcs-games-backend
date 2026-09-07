@@ -5,9 +5,33 @@
 // than a break. Nothing is invented during migration: a field the v1 world never
 // had becomes an explicit null or an empty list, and the fact that the world was
 // migrated is recorded in expansion.compatibility.migrated_from.
-import { emptyManifest, MANIFEST_VERSION, validateManifest } from "./schema.mjs";
+import { emptyManifest, MANIFEST_VERSION, validateManifest, WEATHERS, MATURITY } from "./schema.mjs";
 
 const num = (v, d = 0) => (typeof v === "number" && isFinite(v) ? v : d);
+const isRow = (x) => x !== null && typeof x === "object";
+
+/**
+ * Keep the first entity of each id and record the rest.
+ *
+ * v1 had no uniqueness check anywhere, so a stored world can genuinely hold two
+ * objects with one id. v3 rejects that outright, and the migration used to pass
+ * it straight through — producing a manifest that loads and is then refused by
+ * every single operation on it, with a schema error nobody can act on. The
+ * first entity wins because in an ambiguous pair there is no better rule, and
+ * the loss is written into the migration notes rather than swallowed.
+ */
+function dedupe(rows, what, notes) {
+  const seen = new Set();
+  const out = [];
+  let dropped = 0;
+  for (const r of rows) {
+    if (seen.has(r.id)) { dropped++; continue; }
+    seen.add(r.id);
+    out.push(r);
+  }
+  if (dropped) notes.push(`${dropped} ${what} dropped for sharing an id with an earlier one`);
+  return out;
+}
 
 function vec3(t) {
   if (!t) return { x: 0, y: 0, z: 0 };
@@ -41,6 +65,12 @@ export function migrateToV3(v1, { worldVersion = 1, creatorId = null } = {}) {
     seed: num(v1.meta?.seed, 0),
   });
 
+  // What the migration had to change, as fact. Nothing here is invented: these
+  // are v1 values the v3 contract cannot express, normalised to the nearest one
+  // it can, and v1 content that cannot be represented at all, dropped. Both are
+  // written down so a creator can be told what happened to their world.
+  const notes = [];
+
   m.world_version = worldVersion;
   m.meta = {
     ...m.meta,
@@ -50,15 +80,24 @@ export function migrateToV3(v1, { worldVersion = 1, creatorId = null } = {}) {
     style: v1.meta?.style ?? v1.meta?.genre ?? null,
     creator_id: creatorId ?? v1.meta?.creator_id ?? null,
     created_at: v1.meta?.created_at || m.meta.created_at,
-    maturity: v1.meta?.maturity || "13+",
+    // v1 accepted any string. An unrecognised rating becomes the STRICTEST one
+    // rather than the default: a world whose rating cannot be read must never
+    // end up rated lower than it was.
+    maturity: MATURITY.includes(v1.meta?.maturity) ? v1.meta.maturity
+      : (v1.meta?.maturity ? (notes.push(`maturity '${v1.meta.maturity}' is not a v3 rating; treated as 18+`), "18+") : "13+"),
   };
 
   // ---- environment: the v1 render block, where the seeder produced one -----
   const env = v1.environment || v1.env || {};
   m.environment = {
     ...m.environment,
-    time_of_day: typeof env.time_of_day === "number" ? env.time_of_day : m.environment.time_of_day,
-    weather: env.weather || "clear",
+    // v1 stored hours as well as fractions, and never bounded either. Clamping
+    // is normalisation, not invention: an out-of-range time is not a time.
+    time_of_day: typeof env.time_of_day === "number" && isFinite(env.time_of_day)
+      ? Math.max(0, Math.min(1, env.time_of_day > 1 ? env.time_of_day / 24 : env.time_of_day))
+      : m.environment.time_of_day,
+    weather: WEATHERS.includes(env.weather) ? env.weather
+      : (env.weather ? (notes.push(`weather '${env.weather}' is not a v3 weather; treated as clear`), "clear") : "clear"),
     sky: env.sky ?? null,
     fog: env.fog ?? null,
     ambient_light: env.ambient ?? env.ambient_light ?? null,
@@ -67,20 +106,43 @@ export function migrateToV3(v1, { worldVersion = 1, creatorId = null } = {}) {
 
   // ---- terrain -------------------------------------------------------------
   if (v1.terrain) {
-    const kind = v1.terrain.type === "heightmap" ? "heightmap" : v1.terrain.type === "tilegrid" ? "tilegrid" : "flat";
+    let kind = v1.terrain.type === "heightmap" ? "heightmap" : v1.terrain.type === "tilegrid" ? "tilegrid" : "flat";
+    // A world with no extent is not a place. v1 emitted zero and negative sizes.
+    const w = num(v1.terrain.size?.w, 128), h = num(v1.terrain.size?.h, 128);
+    const size = { w: w > 0 ? w : 128, h: h > 0 ? h : 128 };
+    if (size.w !== w || size.h !== h) notes.push(`terrain size ${w}x${h} is not a usable extent; restored to ${size.w}x${size.h}`);
+    // A non-flat terrain needs a grid. If v1 recorded a kind but no readable
+    // data, the honest answer is flat ground — claiming a heightmap we do not
+    // have would put every structure at a height nothing can sample.
+    const data = Array.isArray(v1.terrain.data) && v1.terrain.data.length ? v1.terrain.data : null;
+    if (kind !== "flat" && !data && typeof v1.terrain.data_ref !== "string") {
+      notes.push(`terrain declared '${kind}' with no readable data; treated as flat`);
+      kind = "flat";
+    }
     m.terrain = {
       kind,
-      size: { w: num(v1.terrain.size?.w, 128), h: num(v1.terrain.size?.h, 128) },
-      data: v1.terrain.data ?? null,
+      size,
+      data,
+      ...(typeof v1.terrain.data_ref === "string" ? { data_ref: v1.terrain.data_ref } : {}),
       materials: v1.terrain.material ? [v1.terrain.material] : [],
     };
   }
 
   // ---- zones: v1 kept them inside terrain ---------------------------------
-  const v1zones = v1.terrain?.zones || v1.zones || [];
+  const v1zones = (v1.terrain?.zones || v1.zones || []).filter(isRow);
   m.zones = v1zones.map((z, i) => {
-    const rect = z.rect || z.bounds || [];
-    const bounds = rect.length === 4 ? rect.map((n) => num(n)) : [0, 0, num(m.terrain.size.w), num(m.terrain.size.h)];
+    const rect = Array.isArray(z.rect || z.bounds) ? (z.rect || z.bounds) : [];
+    const full = [0, 0, m.terrain.size.w, m.terrain.size.h];
+    let bounds = rect.length === 4 ? rect.map((n) => num(n)) : full;
+    // A zone whose rectangle is degenerate or unreadable — v1 wrote both, and
+    // NaN coerces to 0 here — is still a real place with a real name. It gets
+    // the whole map rather than being deleted: losing the district would lose
+    // everything a player did in it, and a zone the size of the world is at
+    // least true of where its contents are.
+    if (bounds[2] <= bounds[0] || bounds[3] <= bounds[1]) {
+      notes.push(`zone '${z.id || z.name || i}' had no usable bounds; given the full extent`);
+      bounds = full;
+    }
     return {
       id: z.id || `zone_${(z.name || i).toString().toLowerCase().replace(/[^a-z0-9]+/g, "_")}`,
       name: z.name || z.id || `Zone ${i + 1}`,
@@ -91,6 +153,7 @@ export function migrateToV3(v1, { worldVersion = 1, creatorId = null } = {}) {
       ambience: null,
     };
   });
+  m.zones = dedupe(m.zones, "zones", notes);
 
   // ---- assets: v1 had no registry, so one is derived from the kinds used ---
   const kinds = new Map();
@@ -117,7 +180,7 @@ export function migrateToV3(v1, { worldVersion = 1, creatorId = null } = {}) {
   };
 
   // ---- structures (v1 objects) --------------------------------------------
-  m.structures = (v1.objects || []).map((o, i) => ({
+  m.structures = (v1.objects || []).filter(isRow).map((o, i) => ({
     id: o.object_id || `struct_${i}`,
     zone: null,
     asset_ref: kindOf(o.kind, "prop"),
@@ -133,7 +196,7 @@ export function migrateToV3(v1, { worldVersion = 1, creatorId = null } = {}) {
   }));
 
   // ---- npcs ----------------------------------------------------------------
-  m.npcs = (v1.npcs || []).map((n, i) => ({
+  m.npcs = (v1.npcs || []).filter(isRow).map((n, i) => ({
     id: n.npc_id || n.id || `npc_${i}`,
     name: n.name || n.kind || `NPC ${i + 1}`,
     role: n.kind || null,
@@ -148,7 +211,7 @@ export function migrateToV3(v1, { worldVersion = 1, creatorId = null } = {}) {
   }));
 
   // ---- items ---------------------------------------------------------------
-  m.items = (v1.items || []).map((it, i) => ({
+  m.items = (v1.items || []).filter(isRow).map((it, i) => ({
     id: it.item_id || it.id || `item_${i}`,
     name: it.name || it.kind || `Item ${i + 1}`,
     kind: it.kind || "misc",
@@ -157,6 +220,10 @@ export function migrateToV3(v1, { worldVersion = 1, creatorId = null } = {}) {
     effects: [],
   }));
 
+  m.structures = dedupe(m.structures, "structures", notes);
+  m.npcs = dedupe(m.npcs, "npcs", notes);
+  m.items = dedupe(m.items, "items", notes);
+
   const npcIds = new Set(m.npcs.map((n) => n.id));
   const itemIds = new Set(m.items.map((it) => it.id));
   const structIds = new Set(m.structures.map((s) => s.id));
@@ -164,12 +231,12 @@ export function migrateToV3(v1, { worldVersion = 1, creatorId = null } = {}) {
   const resolves = (t) => npcIds.has(t) || itemIds.has(t) || structIds.has(t) || zoneIds.has(t);
 
   // ---- quests --------------------------------------------------------------
-  m.quests = (v1.quests || []).map((q, i) => ({
+  m.quests = (v1.quests || []).filter(isRow).map((q, i) => ({
     id: q.quest_id || q.id || `quest_${i}`,
     title: q.title || `Quest ${i + 1}`,
     giver_npc: npcIds.has(q.giver) ? q.giver : null,
     zone: null,
-    steps: (q.objectives || q.steps || []).map((o, j) => {
+    steps: (Array.isArray(q.objectives || q.steps) ? (q.objectives || q.steps) : []).filter(isRow).map((o, j) => {
       // Only keep a target that actually resolves. A dangling target would make
       // the quest undoable, and inventing one would hide that from the critic.
       const raw = o.target || o.trigger || null;
@@ -183,6 +250,17 @@ export function migrateToV3(v1, { worldVersion = 1, creatorId = null } = {}) {
     rewards: q.reward ? [q.reward] : [],
     prerequisites: [],
   }));
+  m.quests = dedupe(m.quests, "quests", notes);
+  // A quest with no steps can never be completed, and v3 refuses one outright.
+  // Dropping it is the same decision the repair pass makes for the same reason:
+  // a world with fewer real quests beats a world with a quest that cannot end.
+  const emptyQuests = m.quests.filter((q) => !q.steps.length).map((q) => q.id);
+  if (emptyQuests.length) {
+    notes.push(`${emptyQuests.length} quest(s) had no objectives and could never be completed: ${emptyQuests.join(", ")}`);
+    m.quests = m.quests.filter((q) => q.steps.length);
+  }
+  // Step ids are unique within their quest in v3; v1 never checked.
+  for (const q of m.quests) q.steps = dedupe(q.steps, `steps in quest '${q.id}'`, notes);
 
   m.assets = Array.from(kinds.values());
 
@@ -206,7 +284,7 @@ export function migrateToV3(v1, { worldVersion = 1, creatorId = null } = {}) {
   };
 
   // ---- spawn ---------------------------------------------------------------
-  const playerSpawns = (v1.spawns || []).filter((s) => !s.role || s.role === "player");
+  const playerSpawns = (v1.spawns || []).filter(isRow).filter((s) => !s.role || s.role === "player");
   if (playerSpawns.length) {
     m.spawn.player_spawns = playerSpawns.map((s, i) => ({
       id: s.id || `spawn_${i}`,
@@ -219,6 +297,30 @@ export function migrateToV3(v1, { worldVersion = 1, creatorId = null } = {}) {
   if (v1.meta?.atlas_receipt_hash) {
     m.meta.atlas_receipt_hash = v1.meta.atlas_receipt_hash;
     m.meta.atlas_signed = !!v1.meta.atlas_signed;
+  }
+
+  if (notes.length) m.expansion.compatibility.migration_notes = notes;
+
+  // Migration must not hand back something the contract rejects.
+  //
+  // It used to. `ensureV3` returns the validation alongside the manifest and
+  // every caller takes the manifest and drops the validation, so an invalid
+  // migration produced a world that LOADED and was then refused by every
+  // operation on it — the playtest gate reporting schema errors about a file
+  // the creator never wrote and cannot edit. A fuzz over thirty malformed v1
+  // worlds found eleven that migrated straight into an invalid manifest.
+  //
+  // Everything above normalises the cases that fuzz found. This is the backstop
+  // for the ones it did not: loud, specific, and at the point of the fault
+  // rather than three steps downstream.
+  const check = validateManifest(m);
+  if (!check.ok) {
+    const err = new TypeError(
+      `this v1 world could not be migrated to WorldManifestV3: ${check.errors.slice(0, 4).map((e) => `${e.path} ${e.message}`).join("; ")}`
+    );
+    err.migration_errors = check.errors;
+    err.migration_notes = notes;
+    throw err;
   }
 
   return m;

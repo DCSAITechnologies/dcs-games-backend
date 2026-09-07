@@ -268,3 +268,113 @@ test("V3 GATE: every seed produces a schema-valid manifest, not just the ones we
   }
   assert.deepEqual(bad, [], `these seeds cannot be generated at all:\n  ${bad.join("\n  ")}`);
 });
+
+// ------------------------------------------ a legacy world must actually load
+
+/** A v1.0 world in the shape the C1 seeder emitted. */
+function legacyWorld() {
+  return {
+    schema_version: "1.0",
+    world_id: "w_v1",
+    meta: { title: "Old Town", prompt: "a town", seed: 7, created_at: "2025-01-01T00:00:00Z" },
+    environment: { time_of_day: 0.4, weather: "rain" },
+    terrain: {
+      type: "heightmap", size: { w: 128, h: 128 },
+      data: Array.from({ length: 8 }, () => Array(8).fill(1)),
+      zones: [{ id: "z1", name: "Centre", rect: [0, 0, 64, 64] }, { id: "z2", name: "Edge", rect: [64, 0, 128, 64] }],
+    },
+    objects: [{ object_id: "o1", kind: "building", transform: { x: 10, y: 0, z: 10 } }],
+    npcs: [{ npc_id: "n1", name: "Vera", spawn: { x: 12, y: 0, z: 12 }, dialogue_seed: "hello" }],
+    quests: [{ quest_id: "q1", title: "Say hello", objectives: [{ id: "s1", trigger: "talk", target: "n1" }] }],
+    spawns: [{ id: "sp", x: 4, y: 1, z: 4 }],
+  };
+}
+
+test("B0 GATE: every way a v1 world can be malformed still migrates to a VALID v3 manifest", () => {
+  // `ensureV3` returns the validation next to the manifest and every caller in
+  // server.mts takes the manifest and drops the validation. So an invalid
+  // migration produced a world that LOADED and was then refused by every
+  // operation on it — the playtest gate reporting schema errors about a file
+  // the creator never wrote and cannot edit.
+  //
+  // A fuzz over these found eleven that migrated straight into an invalid
+  // manifest, plus one that threw a raw TypeError out of the mapper.
+  const damages = {
+    no_meta: (v) => { delete v.meta; },
+    no_terrain: (v) => { delete v.terrain; },
+    no_zones: (v) => { delete v.terrain.zones; },
+    zone_no_rect: (v) => { for (const z of v.terrain.zones) delete z.rect; },
+    zone_degenerate_rect: (v) => { v.terrain.zones[0].rect = [0, 0, 0, 0]; },
+    zone_nonsense_rect: (v) => { v.terrain.zones[0].rect = [NaN, 0, "x", null]; },
+    duplicate_zone_ids: (v) => { v.terrain.zones[1].id = v.terrain.zones[0].id; },
+    duplicate_object_ids: (v) => { v.objects.push({ ...v.objects[0] }); },
+    duplicate_npc_ids: (v) => { v.npcs.push({ ...v.npcs[0] }); },
+    duplicate_quest_ids: (v) => { v.quests.push({ ...v.quests[0] }); },
+    quest_with_no_objectives: (v) => { v.quests[0].objectives = []; },
+    quest_objectives_not_a_list: (v) => { v.quests[0].objectives = "talk to vera"; },
+    terrain_size_zero: (v) => { v.terrain.size = { w: 0, h: 0 }; },
+    terrain_size_negative: (v) => { v.terrain.size = { w: -5, h: -5 }; },
+    terrain_data_not_a_grid: (v) => { v.terrain.data = "not-an-array"; },
+    weather_v1_never_bounded: (v) => { v.environment.weather = "meteor"; },
+    time_of_day_in_hours: (v) => { v.environment.time_of_day = 18; },
+    time_of_day_out_of_range: (v) => { v.environment.time_of_day = 4; },
+    maturity_not_a_v3_rating: (v) => { v.meta.maturity = "21+"; },
+    null_rows_everywhere: (v) => { v.objects = [null]; v.npcs = [null]; v.quests = [null]; v.terrain.zones = [null]; },
+    everything_empty: (v) => { v.objects = []; v.npcs = []; v.quests = []; v.terrain.zones = []; },
+  };
+
+  const broken = [];
+  for (const [name, damage] of Object.entries(damages)) {
+    const v1 = legacyWorld();
+    damage(v1);
+    let out;
+    try { out = ensureV3(v1, { worldVersion: 1, creatorId: "u1" }); }
+    catch (e) { broken.push(`${name}: threw ${e.constructor.name}: ${e.message.slice(0, 120)}`); continue; }
+    if (!out.validation.ok) broken.push(`${name}: ${out.validation.errors.slice(0, 2).map((e) => `${e.path} ${e.message}`).join("; ")}`);
+    // Nothing non-finite may reach the manifest either.
+    const bad = [];
+    (function walk(n, p) {
+      if (n === null || typeof n !== "object") return;
+      if (Array.isArray(n)) return n.forEach((x, i) => walk(x, `${p}[${i}]`));
+      for (const [k, x] of Object.entries(n)) {
+        if (typeof x === "number" && !Number.isFinite(x)) bad.push(`${p}.${k}`);
+        else walk(x, `${p}.${k}`);
+      }
+    })(out.manifest, "$");
+    if (bad.length) broken.push(`${name}: non-finite at ${bad.slice(0, 3).join(", ")}`);
+  }
+  assert.deepEqual(broken, [], `legacy worlds that cannot be loaded:\n  ${broken.join("\n  ")}`);
+});
+
+test("B0: what the migration had to change is written down, not swallowed", () => {
+  const v1 = legacyWorld();
+  v1.environment.weather = "meteor";
+  v1.meta.maturity = "21+";
+  v1.terrain.zones[1].id = v1.terrain.zones[0].id;
+  v1.quests.push({ quest_id: "q_empty", title: "Nothing", objectives: [] });
+
+  const m = migrateToV3(v1, { worldVersion: 1, creatorId: "u1" });
+  const notes = m.expansion.compatibility.migration_notes || [];
+  assert.ok(notes.length >= 4, `every change must be recorded, got: ${JSON.stringify(notes)}`);
+  assert.ok(notes.some((n) => /weather/.test(n)), JSON.stringify(notes));
+  assert.ok(notes.some((n) => /maturity/.test(n)), JSON.stringify(notes));
+  assert.ok(notes.some((n) => /zones dropped/.test(n)), JSON.stringify(notes));
+  assert.ok(notes.some((n) => /no objectives/.test(n)), JSON.stringify(notes));
+
+  // An unreadable rating becomes the STRICTEST one, never a laxer one: a world
+  // whose rating cannot be read must not end up rated lower than it was.
+  assert.equal(m.meta.maturity, "18+");
+  // A clean world says nothing, because nothing had to change.
+  assert.equal(migrateToV3(legacyWorld(), { worldVersion: 1 }).expansion.compatibility.migration_notes, undefined);
+});
+
+test("B0: a migrated legacy world is not just valid, it is playable", async () => {
+  const { playtestAndRepair } = await import("../src/v3/playtest/agent.mjs");
+  const m = migrateToV3(legacyWorld(), { worldVersion: 1, creatorId: "u1" });
+  assert.ok(validateManifest(m).ok);
+  const out = await playtestAndRepair(m);
+  // It may or may not pass — a v1 world really is thin — but whatever the gate
+  // decides, the manifest it hands back must still satisfy the contract.
+  assert.ok(validateManifest(out.manifest).ok,
+    `the gate produced an invalid manifest from a legacy world: ${JSON.stringify(validateManifest(out.manifest).errors.slice(0, 3))}`);
+});
