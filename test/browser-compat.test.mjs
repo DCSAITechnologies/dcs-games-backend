@@ -46,7 +46,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { serveStatic, launchChrome, Page, findChrome } from "./helpers/browser.mjs";
 import { resolveSite } from "./helpers/site.mjs";
-import { CONTRAST_HELPERS, belowContrastMinimum } from "./helpers/a11y-probe.mjs";
+import { CONTRAST_HELPERS, belowContrastMinimum, unmeasurableText } from "./helpers/a11y-probe.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SITE = resolveSite(HERE);   // throws loudly if the frontend is absent
@@ -1421,6 +1421,17 @@ test("ESTATE CONTRAST: every word the frontend paints clears the WCAG minimum fo
   const scanned = rows.reduce((n, r) => n + (r.contrast ? r.contrast.length : 0), 0);
   assert.ok(scanned > 2000,
     `expected the estate's text to be measured, scanned only ${scanned} pieces across ${rows.length} pages`);
+
+  // Text this method cannot describe is named out loud rather than counted as a
+  // pass. Gradient-filled headings — background-clip:text with a transparent
+  // colour — are painted by their own background image, so a single colour
+  // cannot describe them; the arithmetic returns 1:1 and would report a legible
+  // 40px hero word as unreadable. They are excluded from the ratio and listed
+  // here, because "not measured" and "measured and fine" are different answers
+  // and a suite that conflates them is the thing this file exists to prevent.
+  const unmeasured = rows.flatMap((r) => unmeasurableText(r.contrast || []).map((u) => `${r.page}: ${u}`));
+  assert.ok(unmeasured.length < 40,
+    `too much of the estate's text cannot be measured this way to call this suite meaningful:${report(unmeasured.map((u) => ({ u })), (x) => "  " + x.u)}`);
 
   const bad = [];
   for (const r of rows) {

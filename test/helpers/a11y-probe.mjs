@@ -60,10 +60,29 @@ export const CONTRAST_HELPERS = `
     var cs = getComputedStyle(el, pseudo || null);
     var bg = _bgOf(el);
     var text = pseudo === "::placeholder" ? (el.placeholder || "") : (_cown(el) || el.value || "");
+    // GRADIENT-FILLED TEXT IS NOT MEASURABLE THIS WAY, and pretending otherwise
+    // manufactures a defect. A background-clip:text rule with color:transparent
+    // paints the glyphs with the element's background IMAGE; the computed
+    // colour is then transparent, compositing to exactly the backdrop, and the
+    // arithmetic below returns 1:1 on text a person reads perfectly well.
+    // Measured: index.html's 40px hero word "With AI" — a bright cyan-to-purple
+    // gradient on dark navy — was reported as 1:1 and would have been handed to
+    // the frontend lane as an accessibility defect.
+    //
+    // It is EXCLUDED from the ratio, not silently dropped: the caller gets the
+    // row flagged so it can say out loud that this text was not measured. An
+    // unmeasured thing that reports itself as passing is the failure this whole
+    // suite exists to prevent.
+    var clip = cs.webkitBackgroundClip || cs.backgroundClip;
+    var fg = _parse(cs.color);
+    var unmeasurable = (clip === "text" && fg[3] === 0)
+      ? "filled by its own background image (background-clip:text), so a single colour cannot describe it"
+      : null;
     return {
       sel: _cdesc(el) + (pseudo || ""),
       text: String(text).trim().slice(0, 34),
-      ratio: _ratio(_over(_parse(cs.color), bg), bg),
+      ratio: unmeasurable ? null : _ratio(_over(fg, bg), bg),
+      unmeasurable: unmeasurable,
       size: parseFloat(cs.fontSize),
       weight: Number(cs.fontWeight) || 400,
       color: cs.color,
@@ -100,10 +119,15 @@ export function requiredRatio(row) {
   return large ? 3 : 4.5;
 }
 
+/** Text this method cannot describe, so a caller can say so rather than imply it passed. */
+export function unmeasurableText(rows) {
+  return rows.filter((r) => r.unmeasurable).map((r) => `${r.sel} "${r.text}" — ${r.unmeasurable}`);
+}
+
 /** The rows that do not clear their own threshold, worst first. */
 export function belowContrastMinimum(rows) {
   return rows
-    .filter((r) => Number.isFinite(r.ratio) && r.ratio < requiredRatio(r))
+    .filter((r) => !r.unmeasurable && Number.isFinite(r.ratio) && r.ratio < requiredRatio(r))
     .sort((a, b) => a.ratio - b.ratio)
     .map((r) => `${r.sel} "${r.text}" is ${r.ratio}:1 at ${r.size}px/${r.weight}, needs ${requiredRatio(r)}:1`);
 }
