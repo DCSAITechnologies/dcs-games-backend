@@ -743,7 +743,9 @@ const server = http.createServer(async (req, res) => {
     if (url === "/me/home" && method === "GET") {
       const me = await mustBe(req, cid);
       const [mine, profile] = await Promise.all([
-        repo.listOwned(me.id, 50),
+        // CARDS: /me/home reads world_id, title, state, version and updated_at,
+        // all of which the summary carries. See listOwnedCards.
+        repo.listOwnedCards(me.id, 50),
         social.me(me).catch(() => null),
       ]);
       const statsFor = await social._statsIndex();
@@ -1196,7 +1198,8 @@ const server = http.createServer(async (req, res) => {
     // ---- B15 retention and the creator dashboard, from measured data only ----
     if (url === "/me/achievements" && method === "GET") {
       const me = await mustBe(req, cid);
-      const owned = (await repo.listOwned(me.id, 200)).map((w: any) => w.world_id);
+      // Only the ids are used, so this must not read two hundred manifests.
+      const owned = (await repo.listOwnedCards(me.id, 200)).map((w: any) => w.world_id);
       return send(res, 200, { ok: true, ...(await progression.achievements(me.id, owned)) });
     }
     if (url === "/me/streak" && method === "GET") {

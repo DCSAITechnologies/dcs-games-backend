@@ -299,3 +299,44 @@ test("INDEX GATE: the index never becomes a world", async () => {
   assert.deepEqual(ids(rows), ["w1"], "the index file must not be picked up as a record");
   assert.ok(fs.existsSync(path.join(dir, "worlds", ".index", "cards.json")), "and it really was written");
 });
+
+// ---------------------------------------------------------------------------
+// listOwnedCards — the summary path the home screen needed and was not asking
+// for. /me/home and /me/achievements together read up to 250 FULL world records
+// per page load to use five fields the card already carries; on an account with
+// a real catalogue that put the first authenticated screen at ~4.5s.
+//
+// This asserts the card carries exactly what those two routes read, and that it
+// is genuinely a summary rather than a full record wearing a flag — otherwise
+// the fix would be a rename.
+test("listOwnedCards returns summaries carrying every field /me/home reads", async () => {
+  const dir = tmp();
+  const repo = repoOver(dir);
+  for (let i = 0; i < 5; i++) {
+    await repo.upsert({
+      worldId: `w_card_${i}`, ownerId: "p_cards",
+      manifest: { meta: { title: `World ${i}` }, zones: [{ id: `z${i}`, big: "x".repeat(4096) }] },
+      state: i % 2 ? "published" : "draft",
+    });
+  }
+
+  const cards = await repo.listOwnedCards("p_cards", 50);
+  assert.equal(cards.length, 5);
+
+  for (const c of cards) {
+    // The exact fields server.mts reads on /me/home and /me/achievements.
+    for (const f of ["world_id", "title", "state", "version", "updated_at"]) {
+      assert.ok(f in c, `the card is missing ${f}, which /me/home renders`);
+    }
+    assert.equal(c._summary, true, "listOwnedCards must return summaries");
+    // A summary that still carries the whole world is not a summary.
+    assert.equal(c.manifest?.zones, undefined,
+      "the card carried the full manifest \u2014 the read this exists to avoid");
+  }
+
+  // It must be the SAME page as listOwned, or the two routes would disagree
+  // about what the creator owns.
+  const full = await repo.listOwned("p_cards", 50);
+  assert.deepEqual(ids(cards), ids(full),
+    "the card page and the record page must describe the same worlds, in the same order");
+});

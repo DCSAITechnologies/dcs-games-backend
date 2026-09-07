@@ -1334,6 +1334,24 @@ export class WorldRepository {
     if (!ownerId) throw Errors.validation("owner is required");
     return await this.store.list({ ownerId, limit });
   }
+  /**
+   * The caller's own worlds as CARDS — the same page as listOwned, without
+   * reading every manifest off disk.
+   *
+   * /me/home and /me/achievements between them read up to 250 full world
+   * records per page load to use `world_id`, `title`, `state`, `version` and
+   * `updated_at` — every one of which the summary card already carries. On an
+   * account with a real catalogue that put the first authenticated screen at
+   * about 4.5 seconds.
+   *
+   * This is the same defect class as the paginated list that scaled with the
+   * whole catalogue, arriving through a caller instead of through the store:
+   * the summary path existed, and the caller did not ask for it.
+   */
+  async listOwnedCards(ownerId, limit = 50) {
+    if (!ownerId) throw Errors.validation("owner is required");
+    return await this.store.list({ ownerId, limit, summary: true });
+  }
   /** Discovery cards only — the manifest is NOT included in full. */
   async listPublished(limit = 50) { return await this.store.list({ state: "published", limit, summary: true }); }
 }
