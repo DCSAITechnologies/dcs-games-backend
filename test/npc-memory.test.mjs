@@ -279,3 +279,34 @@ test("B7: a claim may not be assembled out of two separate events", async () => 
     "two real events must not combine into a causal claim neither of them records",
   );
 });
+
+test("B5 GATE: concurrent companion writes all survive, and adopt stays one companion", async () => {
+  // The same read-then-write race as the world chronicle, and with a sharper
+  // consequence. `companion_memory_refs` from this store is what liveStateFor
+  // reads to decide whether a rollback may go ahead, so a memory lost to a race
+  // is a hold the server cannot see — and a rollback that should have been
+  // refused deletes the NPC or the item the player's companion remembers.
+  // Asking a companion to remember two things at once is ordinary, not exotic.
+  const svc = createCompanionService({ env: { DCS_DATA_DIR: fs.mkdtempSync(path.join(os.tmpdir(), "dcs-cmp-race-")) } });
+  await svc.adopt("u_race", "w_race", { persona: "guide" });
+
+  const N = 10;
+  await Promise.all(Array.from({ length: N }, (_, i) =>
+    svc.remember("u_race", "w_race", { text: `memory ${i}`, refs: [`ref_${i}`] })));
+
+  const rec = await svc.get("u_race", "w_race");
+  assert.equal(rec.memories.length, N, "every memory must survive");
+  assert.deepEqual(
+    rec.memories.flatMap((m) => m.refs).sort(),
+    Array.from({ length: N }, (_, i) => `ref_${i}`).sort(),
+    "every held reference must survive — this is what blocks a destructive rollback",
+  );
+
+  // Adopt is documented as idempotent, and concurrently it was not: five calls
+  // each minted a new companion and the last write won, so a player could lose
+  // the identity — and the memories attached to it — to a double click.
+  const svc2 = createCompanionService({ env: { DCS_DATA_DIR: fs.mkdtempSync(path.join(os.tmpdir(), "dcs-cmp-adopt-")) } });
+  const adopted = await Promise.all(Array.from({ length: 5 }, () => svc2.adopt("u_a", "w_a", { persona: "guide" })));
+  assert.equal(new Set(adopted.map((r) => r.companion_id)).size, 1, "five concurrent adopts must yield one companion");
+  assert.equal((await svc2.get("u_a", "w_a")).companion_id, adopted[0].companion_id);
+});

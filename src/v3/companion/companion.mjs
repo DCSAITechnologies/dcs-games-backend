@@ -73,6 +73,35 @@ export function createCompanionService(opts = {}) {
     return rec;
   }
 
+  /**
+   * One writer at a time, per companion.
+   *
+   * Every mutating method here is read-then-write with nothing in between, so
+   * two calls landing together both read the same record and the second write
+   * discarded the first. Ten concurrent `remember()` calls kept ONE memory.
+   *
+   * That is worse than losing notes. `companion_memory_refs` from this store is
+   * what `liveStateFor` reads to decide whether a rollback may go ahead, so a
+   * memory lost to a race is a hold the server cannot see — and a rollback that
+   * should have been refused deletes the NPC or the item the player's companion
+   * remembers. A player asking their companion to remember two things at once is
+   * an ordinary thing, not an edge case.
+   *
+   * Serialised within this process, which is what the deployment has: server.mts
+   * constructs one instance over a local directory. This is NOT a cross-process
+   * lock and does not pretend to be one.
+   */
+  const queues = new Map();
+  function serialize(principalId, worldId, work) {
+    const key = `${principalId}::${worldId}`;
+    const prev = queues.get(key) || Promise.resolve();
+    // The chain must survive a rejection, or one failed write would wedge this
+    // companion for the lifetime of the process.
+    const next = prev.then(work, work);
+    queues.set(key, next.then(() => {}, () => {}));
+    return next;
+  }
+
   return {
     dir,
     PERSONAS,
@@ -81,6 +110,7 @@ export function createCompanionService(opts = {}) {
     async adopt(principalId, worldId, { name = null, persona = "guide" } = {}) {
       if (!principalId) throw Errors.unauthenticated("adopting a companion requires an authenticated principal");
       if (!PERSONAS[persona]) throw Errors.validation(`persona must be one of: ${Object.keys(PERSONAS).join(", ")}`);
+      return await serialize(principalId, worldId, async () => {
       const existing = await read(principalId, worldId);
       if (existing && existing.state !== "dismissed") return { ...existing, idempotent: true };
       const rec = {
@@ -99,6 +129,7 @@ export function createCompanionService(opts = {}) {
         active_quest: existing?.active_quest || null,
       };
       return await write(rec);
+      });
     },
 
     async get(principalId, worldId) {
@@ -108,18 +139,22 @@ export function createCompanionService(opts = {}) {
     },
 
     async follow(principalId, worldId, following = true) {
-      const rec = await this.get(principalId, worldId);
-      if (rec.state === "dismissed") throw Errors.conflict("this companion has been dismissed; adopt it again first");
-      rec.state = following ? "following" : "adopted";
-      return await write(rec);
+      return await serialize(principalId, worldId, async () => {
+        const rec = await this.get(principalId, worldId);
+        if (rec.state === "dismissed") throw Errors.conflict("this companion has been dismissed; adopt it again first");
+        rec.state = following ? "following" : "adopted";
+        return await write(rec);
+      });
     },
 
     /** Dismiss keeps the record so memory survives; only the state changes. */
     async dismiss(principalId, worldId) {
-      const rec = await this.get(principalId, worldId);
-      rec.state = "dismissed";
-      rec.dismissed_at = new Date().toISOString();
-      return await write(rec);
+      return await serialize(principalId, worldId, async () => {
+        const rec = await this.get(principalId, worldId);
+        rec.state = "dismissed";
+        rec.dismissed_at = new Date().toISOString();
+        return await write(rec);
+      });
     },
 
     /**
@@ -128,31 +163,37 @@ export function createCompanionService(opts = {}) {
      */
     async remember(principalId, worldId, { text, kind = "note", refs = [] }) {
       if (!text || typeof text !== "string") throw Errors.validation("a memory needs text");
-      const rec = await this.get(principalId, worldId);
-      rec.memories.push({
-        id: crypto.randomUUID(), kind, text: text.slice(0, 400), refs,
-        at: new Date().toISOString(),
+      return await serialize(principalId, worldId, async () => {
+        const rec = await this.get(principalId, worldId);
+        rec.memories.push({
+          id: crypto.randomUUID(), kind, text: text.slice(0, 400), refs,
+          at: new Date().toISOString(),
+        });
+        // Bounded on purpose: an unbounded memory list is a silent storage leak.
+        if (rec.memories.length > 200) rec.memories = rec.memories.slice(-200);
+        return await write(rec);
       });
-      // Bounded on purpose: an unbounded memory list is a silent storage leak.
-      if (rec.memories.length > 200) rec.memories = rec.memories.slice(-200);
-      return await write(rec);
     },
 
     async forget(principalId, worldId, memoryId) {
-      const rec = await this.get(principalId, worldId);
-      const before = rec.memories.length;
-      rec.memories = rec.memories.filter((m) => m.id !== memoryId);
-      if (rec.memories.length === before) throw Errors.notFound(`memory ${memoryId}`);
-      return await write(rec);
+      return await serialize(principalId, worldId, async () => {
+        const rec = await this.get(principalId, worldId);
+        const before = rec.memories.length;
+        rec.memories = rec.memories.filter((m) => m.id !== memoryId);
+        if (rec.memories.length === before) throw Errors.notFound(`memory ${memoryId}`);
+        return await write(rec);
+      });
     },
 
     /** Track where the player is, so the companion is zone-aware. */
     async updateContext(principalId, worldId, { zone = null, activeQuest = null } = {}) {
-      const rec = await this.get(principalId, worldId);
-      if (zone !== null) rec.last_zone = zone;
-      if (activeQuest !== null) rec.active_quest = activeQuest;
-      rec.context_updated_at = new Date().toISOString();
-      return await write(rec);
+      return await serialize(principalId, worldId, async () => {
+        const rec = await this.get(principalId, worldId);
+        if (zone !== null) rec.last_zone = zone;
+        if (activeQuest !== null) rec.active_quest = activeQuest;
+        rec.context_updated_at = new Date().toISOString();
+        return await write(rec);
+      });
     },
 
     /**
