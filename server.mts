@@ -413,8 +413,17 @@ const server = http.createServer(async (req, res) => {
         subscriptions: ["GET /v3/subscriptions/plans", "POST /v3/subscriptions/subscribe", "POST /v3/subscriptions/grant", "POST /v3/subscriptions/revoke", "GET /v3/subscriptions/grants", "GET /v3/subscriptions/assert-dark", "GET /me/subscription", "GET /me/entitlements"],
         safety: ["GET /safety/age", "GET /safety/blocks", "POST /safety/consent/parental", "POST /safety/report", "GET /safety/reports", "POST /safety/block", "GET /safety/consent/media", "GET /safety/moderation-history", "POST /safety/reports/:id/moderate"],
         jobs: ["GET /v3/jobs", "GET /v3/jobs/:id"],
+        // Live, and previously invisible: these are dispatched inside the cw1
+        // slice rather than by the main router, so nothing that scanned
+        // server.mts alone could see them. /ts/* is the LEGACY moderation
+        // console and reads a store that POST /reports no longer writes to, so
+        // it can only ever return an empty queue — said here rather than left
+        // for someone to discover. The live console is /safety/reports.
+        moderation_legacy: ["GET /ts/reports (superseded by GET /safety/reports; its store is no longer written to)", "POST /ts/reports/:id/action", "POST /ts/reports/:id/appeal/decide"],
+        // Shells only. No provider is contacted and no money can move.
+        payouts_dark: ["GET /payout/kyc", "POST /payout/kyc/start"],
         trust: ["GET /health", "GET /atlas/key", "DELETE /verify/:channel", "GET /atlas/receipt/:id", "GET /verify", "GET /v3/providers"],
-        retired: ["GET /api/marketplace (410)", "GET /api/me/payouts (410)", "GET /me/revenue (410)", ...retiredSocialRoutes()],
+        retired: ["GET /api/marketplace (410)", "GET /api/me/payouts (410)", "GET /me/revenue (410)", "POST /auth/ensure (410)", ...retiredSocialRoutes()],
       },
       manifest_version: MANIFEST_VERSION,
       social: { profiles: true, friends: true, parties: true, teams: true, studios: true, discovery: true, ...social.describe() },
@@ -1422,9 +1431,24 @@ const server = http.createServer(async (req, res) => {
           throw Errors.conflict("the expansion would have lost existing state", { correlationId: cid, meta: { problems: preserved.problems } });
         }
 
-        const gate = await playtestAndRepair(applied.manifest);
+        // The gate is told about the player's state, and preservation is
+        // checked AGAIN on the manifest that is actually stored.
+        //
+        // verifyPreservation certified `applied.manifest`, but what gets saved
+        // is `gate.manifest` — the REPAIRED one. A repair that drops a quest
+        // the player completed, or removes a structure they own, destroys state
+        // that had just been certified safe, after the certification. The
+        // second check is not belt-and-braces; it is the only one that covers
+        // the object that reaches the store.
+        const gate = await playtestAndRepair(applied.manifest, { liveState: live });
         if (!gate.passed) {
           return send(res, 422, { ok: false, error: "expansion_failed_playtest", detail: "the expanded world did not pass the playtest gate and was not saved", verdict: gate.verdict, findings: gate.rounds.at(-1).findings.slice(0, 10), correlation_id: cid });
+        }
+        const keptAfterRepair = verifyPreservation(before, gate.manifest, live);
+        if (!keptAfterRepair.ok) {
+          throw Errors.conflict("a repair during the playtest gate would have lost existing state", {
+            correlationId: cid, meta: { problems: keptAfterRepair.problems, stage: "after_repair" },
+          });
         }
 
         const saved = await repo.upsert({ worldId: rec.world_id, ownerId: me.id, manifest: gate.manifest, state: rec.state, title: gate.manifest.meta.title });
@@ -1452,10 +1476,23 @@ const server = http.createServer(async (req, res) => {
           // Honest: an unrecognised edit is a 422 that says what IS supported.
           return send(res, 422, { ok: false, error: "edit_not_understood", detail: plan.error, supported: plan.supported, hint: plan.hint, correlation_id: cid });
         }
-        const applied = applyDelta(before, plan.delta, (await liveStateFor(mm[1], b.live_state)).live);
-        const gate = await playtestAndRepair(applied.manifest);
+        // Live state is hoisted rather than inlined into applyDelta, because it
+        // is needed three times: to apply the delta safely, to tell the repair
+        // pass what it may not delete, and to check afterwards that it didn't.
+        // The edit path had no preservation check at all — an edit is a smaller
+        // change than an expansion, but a repair triggered by it can remove
+        // exactly the same things.
+        const live = (await liveStateFor(mm[1], b.live_state)).live;
+        const applied = applyDelta(before, plan.delta, live);
+        const gate = await playtestAndRepair(applied.manifest, { liveState: live });
         if (!gate.passed) {
           return send(res, 422, { ok: false, error: "edit_failed_playtest", detail: "the edited world did not pass the playtest gate and was not saved", verdict: gate.verdict, findings: gate.rounds.at(-1).findings.slice(0, 6), correlation_id: cid });
+        }
+        const editKept = verifyPreservation(before, gate.manifest, live);
+        if (!editKept.ok) {
+          throw Errors.conflict("the edit, or a repair during the playtest gate, would have lost existing state", {
+            correlationId: cid, meta: { problems: editKept.problems },
+          });
         }
         const saved = await repo.upsert({ worldId: rec.world_id, ownerId: me.id, manifest: gate.manifest, state: rec.state, title: gate.manifest.meta.title });
         await worldMemory.record(rec.world_id, { kind: "edited", summary: plan.summary, worldVersion: gate.manifest.world_version, actorId: me.id, detail: { request: b.request, intent: plan.intent } });
@@ -1570,7 +1607,13 @@ const server = http.createServer(async (req, res) => {
         }
         recordStitch(applied.manifest, stitch);
 
-        const gate = await playtestAndRepair(applied.manifest);
+        const gate = await playtestAndRepair(applied.manifest, { liveState: live });
+        const stitchKept = verifyPreservation(host.manifest, gate.manifest, live);
+        if (!stitchKept.ok) {
+          throw Errors.conflict("a repair during the playtest gate would have lost existing state", {
+            correlationId: cid, meta: { problems: stitchKept.problems, stage: "after_repair" },
+          });
+        }
         if (!gate.passed) {
           return send(res, 422, {
             ok: false, error: "stitch_failed_playtest",
