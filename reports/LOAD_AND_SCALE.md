@@ -1,13 +1,66 @@
-# Load and scale — measured, 2026-09-06
+# Load and scale — measured, 2026-09-06 · **reconciled 2026-09-07**
 
 `DCS_GAMES_LAUNCH_REQUIREMENTS.md` listed load and scale as an unverified gap. It
 is no longer unverified. It is now a set of measurements and **three correctness
-defects**, all of which reproduce deterministically.
+defects**, all of which reproduced deterministically.
 
 **Read this first:** the headline finding is not a latency number. Under a
-concurrency of **two**, this service accepts writes with `2xx` and then throws
+concurrency of **two**, this service accepted writes with `2xx` and then threw
 most of them away, silently. Everything else in this document is secondary to
 that.
+
+---
+
+## 0. RECONCILED, 7 September 2026 — LF-1, LF-2 and LF-3 are FIXED
+
+**The three lost-write defects below are closed, and the closure is measured,
+not asserted.** They are left in the document in full rather than deleted,
+because the tables are the reason the fix exists and because a report that
+silently drops its own findings cannot be audited.
+
+The fix is a per-key serialisation: `createKeyedMutex()` in `src/core/mutex.mjs`,
+applied per collection in `src/core/collection.mjs` and per world in
+`WorldRepository.upsert` (`withLock("world:<id>", ...)` in
+`src/core/worldstore.mjs`). Reads are never locked, and unrelated collections
+never wait on each other.
+
+Re-run 7 Sep 2026 on the machine in §1, against the current tree:
+
+```
+node scripts/load-test.mjs --levels=2 --duration=1 --warmup=0 --worlds=1 --write-probe=2
+  plays        2 concurrent POSTs: 2 accepted, 2 persisted, LOST 0
+  first login  2 concurrent GET /me/profile for a NEW principal: 1 profile row (expected 1)
+  signin burst 2 distinct new principals at once: 2 got 2xx, 2 persisted, LOST 0
+  world save   2 concurrent POST /worlds/:id/save: 2 accepted, 0 conflicted, version 2 -> 4, LOST 0 edits
+
+node scripts/load-test.mjs --levels=8,32,64 --duration=2 --warmup=1 --worlds=12 --write-probe=64
+  concurrency  8   plays 64/64 persisted, LOST 0 · signin 64/64, LOST 0 · saves 64/64, LOST 0, v2  -> 66
+  concurrency 32   plays 64/64 persisted, LOST 0 · signin 64/64, LOST 0 · saves 64/64, LOST 0, v66 -> 130
+  concurrency 64   plays 64/64 persisted, LOST 0 · signin 64/64, LOST 0 · saves 64/64, LOST 0, v194
+  LOAD TEST PASSED — every request 2xx, no lost writes, no duplicate rows.
+```
+
+The minimal reproduction in §2 — two simultaneous plays, one destroyed — no
+longer reproduces. `pre_existing_rows_lost` was 0 at every level, as before.
+
+**Independently, and against a real deployed service rather than a local one:**
+`reports/STAGING_PROOFS.md` records **26/26** concurrency-and-durability
+assertions — 36 concurrent edits across three rounds plus 20 concurrent reads
+against the deployed Railway staging service and its Supabase primary, with the
+version count moving by exactly the number of writes the server accepted, version
+numbers strictly sequential, and a stale `expected_version` refused rather than
+silently applied. That closes the "Supabase was never exercised under load" gap
+in §6.
+
+**The latency and throughput tables in §3 are from 2026-09-06 and have NOT been
+re-measured like-for-like.** The two runs above used a shorter per-level duration
+(1s and 2s against the canonical 6s), so their read figures — 774 rps at
+concurrency 8 against the 458 rps recorded below — are **not** a like-for-like
+comparison and must not be quoted as one. They are consistent with the
+`/v3/discover` projection fix (`CARD_PROJECTION` in `src/core/worldstore.mjs`
+replaced `select=*`, which had been pulling 941KB to serve 10KB of cards), but
+consistency is not measurement. Re-run the canonical ramp before quoting a
+throughput number.
 
 ---
 
@@ -140,7 +193,7 @@ is deliberately immutable and keyed on `(world_id, version)`, the retained
 version history also gains only one entry — so the rollback feature cannot
 recover the discarded edits either. They are simply gone.
 
-### Severity
+### Severity — as it was on 2026-09-06
 
 Zero requests failed while all of this was happening. **Across the concurrency
 1→128 ramp — 16,187 requests — every single read returned `200`, and there were
@@ -230,7 +283,13 @@ was **not** run and would be needed to rule a leak out properly.
 
 ## 4. Incidental finding, from a single request (not a load finding)
 
-`GET /worlds/:id/load` returns **500** for a world created through
+**[RECONCILED 7 Sep 2026 — FIXED.]** `server.mts` now registers a base world on
+the v3 generation path as well as the legacy one (`cw5-register-base-world`,
+best-effort and reported rather than swallowed), so the two live-state categories
+that have a real durable source no longer report UNAVAILABLE for every world made
+today. The original finding, for the record:
+
+`GET /worlds/:id/load` returned **500** for a world created through
 `POST /v3/worlds/generate`:
 
 ```
@@ -253,7 +312,18 @@ made blocking:
 cd cw4-deploy/dcs-games-netcode && npm test   # exit 0
 ```
 
-**13 suites, 197 checks, 0 failures**, plus `npm run build` (`tsc`) exit 0:
+**13 suites, 197 checks, 0 failures**, plus `npm run build` (`tsc`) exit 0.
+
+> **[RECONCILED 7 Sep 2026] This 197 and the 186 quoted elsewhere are two
+> different things, and neither supersedes the other.** This run was of the local
+> `cw4-deploy/dcs-games-netcode` working tree on 2026-09-06. The figure the CI
+> gate now stands on is **186 checks across twelve suites, 0 failures**, at
+> `DCSAITechnologies/dcs-games-netcode` commit
+> `49f103531b6701b64afe03bf89a4615442e9aef3`, cloned and run — see
+> `reports/STAGING_PROOFS.md`. The counts differ because the trees differ; the
+> local tree has a thirteenth suite. Quote the pinned one when you mean the gate.
+
+The 2026-09-06 local run, by suite:
 
 | suite | checks | | suite | checks |
 |---|---:|---|---|---:|
@@ -269,10 +339,18 @@ Because it is green, it is safe to gate on. A blocking workflow now exists at
 `cw4-deploy/dcs-games-netcode/.github/workflows/ci.yml` — build plus full suite,
 no `continue-on-error`.
 
-**Still open, and outside this lane's file ownership:** the `netcode` job in
-`gb/.github/workflows/ci.yml` still carries `continue-on-error: true`. That is the
-job the sprint actually runs, and until that one line is removed a netcode
-regression still cannot fail the backend pipeline. See §7.
+~~**Still open, and outside this lane's file ownership:** the `netcode` job in
+`gb/.github/workflows/ci.yml` still carries `continue-on-error: true`.~~
+
+> **[RECONCILED 7 Sep 2026 — CLOSED, and a larger problem was found underneath
+> it.]** The `netcode` job carries no `continue-on-error` (the only two remaining
+> in that file are on `upload-artifact` steps). But removing the line was not
+> what made the gate real. The job's `ref:` was pinned to `524a7f61c373…`, which
+> **exists on no ref** of that repository — `git fetch` answers "upload-pack: not
+> our ref" — so the job could never check out and the anti-cheat gate had never
+> run at all. Repinned to `49f103531b67` and verified by cloning and running it.
+> `scripts/verify-ci-pins.mjs` now resolves every pinned external ref against its
+> remote and fails with the file and line when one is dead.
 
 ---
 
@@ -282,11 +360,14 @@ Stated plainly, because an unmeasured thing must not be reported as a measured o
 
 - **Production topology.** No proxy, no TLS, no container CPU/memory limit, no
   cold start, no multi-instance deployment, no autoscaler. Loopback only.
-- **Supabase.** Every run used the file store with `SUPABASE_URL` empty. The
-  mirrored/degraded paths in `collection.mjs` and `MirroredWorldStore` — which add
-  a network round trip *inside* the same read-modify-write window — were never
-  exercised under load. LF-1/LF-2/LF-3 will behave differently there, and the
-  wider await window makes the race window larger, not smaller.
+- ~~**Supabase.** Every run used the file store with `SUPABASE_URL` empty…~~
+  **[RECONCILED 7 Sep 2026 — partly closed.]** Still true of *these* runs. No
+  longer true of the estate: `reports/STAGING_PROOFS.md` records 26/26
+  concurrency-and-durability assertions against the deployed staging service and
+  its **real Supabase primary**, including 36 concurrent edits across three
+  rounds with no lost updates and no duplicates. What remains unmeasured against
+  Supabase is the rest of this section's list — write-path percentiles,
+  generation under load, sustained soak, and a corpus beyond 200 worlds.
 - **Write-path latency.** The probes measure write *correctness*, not write
   throughput or percentiles. There are no p50/p95/p99 numbers for any POST.
 - **Generation under load.** `POST /v3/worlds/generate` and
@@ -311,28 +392,40 @@ Stated plainly, because an unmeasured thing must not be reported as a measured o
 
 ## 7. What should happen next
 
-1. **Serialise the read-modify-write in `src/core/collection.mjs`.** A per-collection
-   promise chain (each mutation awaits the previous one) closes LF-1 and LF-2 with
-   no change to the interface above it. Append-only writes would be better still
-   for `world_plays`, which is the collection that grows without bound and is
-   re-read in full by `/v3/discover` for every world on every request.
-2. **Serialise or version-guard `WorldRepository.upsert`** to close LF-3, and make
-   `POST /worlds/:id/save` require `expected_version` rather than defaulting it to
-   `null`, so a concurrent editor gets the `409` the repository already knows how
-   to raise.
-3. **Remove `continue-on-error: true` from the `netcode` job in
-   `gb/.github/workflows/ci.yml`.** The suite is green; the gate is currently
-   decorative. (Not done here: that file is outside this lane's ownership.)
-4. **Fix `/v3/discover`.** It is O(published worlds × plays rows) per request. Even
-   with the correctness bugs fixed, 200 published worlds takes the whole service to
-   37 rps on a fast machine with an empty plays file.
-5. **Wire `test/load-smoke.test.mjs` into `test:ci`** once 1 and 2 land. It is
-   deterministic — 5/5 identical runs, 2 pass / 3 fail — and takes about 1.3 s. It
-   is currently referenced by no npm script precisely so a known-red test cannot
-   break another lane's build.
+**[RECONCILED 7 Sep 2026 — four of these five are DONE. Statuses below are
+checked in the source, not remembered.]**
+
+1. ~~Serialise the read-modify-write in `src/core/collection.mjs`.~~ **DONE.**
+   `createKeyedMutex()` in `src/core/mutex.mjs`, applied per collection. Reads are
+   never locked and unrelated collections never wait on each other. Closes LF-1
+   and LF-2 — measured, §0.
+2. ~~Serialise or version-guard `WorldRepository.upsert`.~~ **DONE for the
+   defect; the second half is NOT done and is a preference, not a bug.**
+   `withLock("world:<id>", ...)` closes LF-3. `POST /worlds/:id/save` still
+   defaults `expected_version` to `null` (`server.mts`:
+   `expected_version: b.expected_version ?? null`), so a caller that supplies one
+   gets the `409` — proven on staging, `reports/STAGING_PROOFS.md` — and a caller
+   that does not is serialised rather than refused. Requiring it would be a
+   breaking API change, which is why it has not been made unilaterally.
+3. ~~Remove `continue-on-error: true` from the `netcode` job.~~ **DONE**, and the
+   gate turned out to be dead for a worse reason than that line — see §5.
+4. **Fix `/v3/discover`.** **Partly done, and the part that landed is the one
+   that was measured as most expensive.** `CARD_PROJECTION` in
+   `src/core/worldstore.mjs` replaced `select=*` for card listings, so the
+   manifest body no longer leaves the database — measured at 24 published worlds
+   with 60-zone manifests, 941KB was arriving to serve 10KB of cards. **The
+   O(worlds × plays) shape described in §3 has not been re-measured** and this
+   item is not closed.
+5. ~~Wire `test/load-smoke.test.mjs` into `test:ci`.~~ **DONE**, and it is no
+   longer known-red: `package.json` runs it as `test:load`, `test:ci` composes it,
+   and it reports **5 tests / 5 pass / 0 fail** on the current tree.
 
 ---
 
-*Every number in this document came from a run performed on 2026-09-06 on the
-machine described in §1. Nothing is extrapolated, modelled or estimated. Where
-something was not measured it is listed in §6 rather than guessed at.*
+*Every number in the original body of this document came from a run performed on
+2026-09-06 on the machine described in §1. Every number added on 2026-09-07 is
+marked as such and came from a run performed that day on the same machine.
+Nothing is extrapolated, modelled or estimated. Where something was not measured
+it is listed in §6 rather than guessed at, and where something was fixed after
+being measured, the original measurement is left standing beside the correction
+rather than deleted.*

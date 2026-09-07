@@ -1,6 +1,6 @@
 # Cold rebuild — can this estate be rebuilt by somebody who is not us?
 
-**Lane W · 6–7 September 2026**
+**Lane W · 6–7 September 2026 · reconciled 7 September 2026**
 **Script:** `scripts/reproduce.mjs` · **Runs:** 2 complete cold rebuilds
 **Verdict:** **Yes, for the backend and the browser stack — with four prerequisites that are
 nowhere written down, and with three ways for a newcomer's run to come out green while
@@ -8,6 +8,74 @@ having proved nothing.**
 
 Everything below describes runs that actually happened. Nothing here is an idealised
 process. Where something was not exercised, it says so.
+
+---
+
+## 0 · RECONCILED, 7 September 2026 — read this before quoting any number below
+
+Three of the six findings have been fixed since these runs, and **every count in
+§5 is stale.** The runs themselves are left intact: they are a record of two
+rebuilds that actually happened at a named SHA, and rewriting them in place would
+destroy the only thing that makes them evidence.
+
+### Findings 2, 3 and 4 are CLOSED
+
+| finding | status | evidence |
+|---|---|---|
+| 2 — `test:browser` exits 0 with 83/83 skipped when the frontend is absent | **FIXED** | `test/helpers/site.mjs` now exports `resolveSite()`, which **throws loudly** naming the resolved path, and honours a `DCS_SITE_DIR` override — the exact fix proposed below, both halves of it |
+| 3 — `test:e2e` fails obscurely for the same missing directory | **FIXED** | `test/flagship-e2e.test.mjs:24` is now `const SITE = resolveSite(HERE); // throws loudly if the frontend is absent` |
+| 4 — CI never checks out the frontend, and the job that tries uses a path `actions/checkout` cannot write | **FIXED** | both the `frontend` and `browser` jobs in `.github/workflows/ci.yml` now check the frontend out **inside** the workspace as `path: frontend` and pass `DCS_SITE_DIR: ${{ github.workspace }}/frontend`; the `continue-on-error: true` that swallowed the failure is gone, and the workflow carries the reason in a comment |
+
+### Findings 1, 5 and 6 stand
+
+- **1** was this lane's own parser bug and was fixed within these runs.
+- **5 — a fixed staging database name the code will drop without asking — is
+  STILL OPEN.** `scripts/migrate.mjs:15` still defaults its DSN to
+  `postgresql://127.0.0.1:5432/dcs_games_staging`, line 38 still defaults `--db`
+  to the same, and `proveReproducible()` still opens with
+  `drop database if exists <db>`. On a shared host `npm run staging` still
+  destroys whatever is in `dcs_games_staging` with no confirmation.
+- **6 — the suites still turn off silently without Postgres.** Deliberate and
+  documented in the test file's own header; listed here because a newcomer still
+  gets a green `npm test` that never touched a database.
+
+### §5's counts are stale, and one prerequisite gap has closed
+
+| | at the two runs (`e00c7cd`) | on 7 Sep 2026 |
+|---|---|---|
+| schema built from the chain | v9, 54 tables | **v11**, 54 tables (`0010` grants privileges, `0011` adds a column and widens a check; neither creates a table) |
+| `test:unit` | 818 | **997** |
+| `test:unit:tsx` | 24 | 24 |
+| `test:api` | 119 | 119 |
+| `test:load` | 5 | 5 |
+| `test:e2e` | 12 | 12 |
+| `test:browser` | 83 | **1 failing** on the current tree, in a file another lane was actively editing — not a banked number in either direction |
+| total | 1,061 | not re-totalled while the tree is moving; the five green suites alone are 1,157 |
+
+`test/cutover.test.mjs` (31 / 0) is now part of `test:unit` and was not in the
+original table.
+
+**The netcode gap in §8 has closed.** That section says "**No SHA for that
+repository was banked**… nothing pins it, so a CI-equivalent rebuild of the
+estate is not reproducible today." The workflow now pins
+`ref: 49f103531b6701b64afe03bf89a4615442e9aef3` and `scripts/verify-ci-pins.mjs`
+resolves every pinned external ref against its remote and fails with the file and
+line when one is dead — which is how the *previous* pin, `524a7f61c373…`, was
+found to exist on **no ref** of that repository, meaning the anti-cheat job could
+never check out and the gate had never run.
+
+**`npm run secret-scan` (§8, "Not run") has now been run**, and it needed
+fixing in both directions before its result meant anything: it was reporting two
+findings on two test fixtures, and separately it was letting six realistic
+secrets through — a key inside a `<script>` tag, a key on a line with an
+ellipsis, and `process.env.X || "<real key>"` among them. It now reports CLEAN
+over 185 files (repo) and 394 (repo + frontend), and prints the count so a pass
+over nothing cannot read as a pass.
+
+**Everything about a deployed service in §8 has changed and §8 has not been
+edited to match.** "No Railway service" is no longer true — see
+`reports/DEPLOYMENTS.md` and `reports/STAGING_PROOFS.md`. **`api.games.dcsai.ai`
+is still untouched**, and that half of the sentence still holds.
 
 ---
 
