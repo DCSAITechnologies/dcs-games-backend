@@ -483,7 +483,8 @@ const server = http.createServer(async (req, res) => {
         ok: true,
         published_worlds: published.length,
         creators_with_a_published_world: creators.size,
-        plays,
+        plays_of_published_worlds: plays,
+        plays,                                  // kept: the site reads this name
         play_seconds: seconds,
         ratings: rated,
         // Deliberately ABSENT: a platform-wide unique player count. The stats
@@ -496,7 +497,11 @@ const server = http.createServer(async (req, res) => {
         unique_players_note: "not counted platform-wide; summing per-world uniques would double-count anyone who played more than one world",
         // Said plainly: these are counts of what exists, not projections, and
         // the listing they are counted over is capped.
-        basis: "counted from the world store and measured play/rating records at request time",
+        // Scoped, and said so. Every figure here is over PUBLISHED worlds only,
+        // so `plays` is not "plays on this platform" — a draft the creator
+        // played ten times contributes nothing. Reporting it as a total would
+        // be a smaller version of the same dishonesty as inventing one.
+        basis: "counted at request time over PUBLISHED worlds only; plays and ratings on drafts are not included",
         counted_over: Math.min(published.length, 1000),
         measured_at: new Date().toISOString(),
         source: repo.kind,

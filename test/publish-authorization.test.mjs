@@ -254,7 +254,8 @@ test("TRUTH GATE: platform stats are counted, and an empty platform says zero", 
     assert.ok(b[k] >= 0);
   }
   assert.ok(b.measured_at, "and must say when it was counted");
-  assert.match(b.basis, /counted from/, "and on what basis");
+  assert.match(b.basis, /PUBLISHED worlds only/,
+    "the scope must be stated: a draft played ten times contributes nothing, and calling this a platform total would be a smaller version of the same dishonesty as inventing one");
 });
 
 test("TRUTH GATE: no platform-wide unique player count is invented", async () => {
