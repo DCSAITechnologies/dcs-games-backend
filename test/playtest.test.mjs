@@ -1273,3 +1273,151 @@ test("B4: add_behaviors connects what it builds, in the round it builds it", asy
   const out = await playtestAndRepair(await (async () => { const x = await goodWorld("Wiring Probe", "w_wiring2"); x.behaviors = []; return x; })(), { maxRounds: 2 });
   assert.equal(out.passed, true, `a wiped world must not need a third round: ${out.verdict}`);
 });
+
+// ------------------------------------------ the loop is bounded, and it is inert
+
+test("B4 GATE: the repair pass never mutates the manifest it was given", async () => {
+  // The /v3/worlds/:id/playtest endpoint runs the full pass over a stored
+  // manifest and reports without saving. If the pass mutated its input, that
+  // read-only probe would silently rewrite the caller's world in memory — and
+  // on the expansion path it would rewrite the very manifest verifyPreservation
+  // was about to be shown.
+  const damages = [
+    ["untouched", () => {}],
+    ["behaviours cleared", (m) => { m.behaviors = []; }],
+    ["interactions cleared", (m) => { m.interactions = []; }],
+    ["spawn removed", (m) => { m.spawn.player_spawns = []; }],
+    ["a zone lost", (m) => { m.zones = m.zones.slice(0, -1); }],
+    ["structures floated", (m) => { for (const s of m.structures) s.transform.position.y += 40; }],
+    ["quests cleared", (m) => { m.quests = []; }],
+    ["a zone starved of ground", (m) => { m.navigation.walkable_zones = [{ zone: m.zones[0].id, walkable_fraction: 0.02 }]; }],
+  ];
+  const base = await goodWorld("Immutability Probe", "w_immutable");
+  const changed = [];
+  for (const [label, damage] of damages) {
+    const m = structuredClone(base);
+    damage(m);
+    const before = JSON.stringify(m);
+    const out = await playtestAndRepair(m);
+    if (JSON.stringify(m) !== before) changed.push(label);
+    // And the repaired world is a different object, not the same one edited.
+    if (out.repairs.length) assert.notEqual(out.manifest, m, `${label}: the result must not be the input`);
+  }
+  assert.deepEqual(changed, [], `the pass edited the manifest it was handed: ${changed.join(", ")}`);
+});
+
+test("B4 GATE: the repair loop is bounded and cannot churn", async () => {
+  // Two failure modes, one test. A loop that never terminates hangs the
+  // generate request; a loop that applies the same repair round after round
+  // terminates but calls no progress progress, which is how link_zone once
+  // failed worlds while reporting three successful repairs every round.
+  const damages = [
+    ["behaviours cleared", (m) => { m.behaviors = []; }],
+    ["interactions cleared", (m) => { m.interactions = []; }],
+    ["everything wired away", (m) => { m.behaviors = []; m.interactions = []; m.quests = []; }],
+    ["a zone lost", (m) => { m.zones = m.zones.slice(0, -1); }],
+    ["nav links cut", (m) => { m.navigation.links = []; }],
+    ["no cast at all", (m) => { m.npcs = []; m.structures = []; m.items = []; m.behaviors = []; m.interactions = []; m.quests = []; }],
+  ];
+  const base = await goodWorld("Churn Probe", "w_churn");
+  for (const [label, damage] of damages) {
+    const m = structuredClone(base);
+    damage(m);
+    const out = await playtestAndRepair(m);
+
+    assert.ok(out.rounds.length <= 3, `${label}: ${out.rounds.length} rounds ran`);
+
+    // No round may repeat the previous round's repairs exactly: that is work
+    // without progress, and the loop counting it as progress is the churn.
+    const sigs = out.rounds.map((r) => (r.repairs || []).map((x) => JSON.stringify(x)).sort().join("|"));
+    for (let i = 1; i < sigs.length; i++) {
+      assert.ok(!(sigs[i] && sigs[i] === sigs[i - 1]),
+        `${label}: round ${i + 1} applied exactly what round ${i} did — ${sigs[i].slice(0, 200)}`);
+    }
+    // A round that changed nothing must be the last one.
+    for (let i = 0; i < out.rounds.length - 1; i++) {
+      assert.ok((out.rounds[i].repairs || []).length > 0,
+        `${label}: round ${i + 1} applied nothing and the loop went round again`);
+    }
+  }
+});
+
+test("B4 GATE: a repaired world does not need repairing again", async () => {
+  // The strongest statement of "no churn": run the whole pass twice. If the
+  // second run finds more to do, the first one did not finish, and the loop
+  // bound is hiding it rather than the repairs being complete.
+  const base = await goodWorld("Idempotence Probe", "w_idem");
+  const unstable = [];
+  for (const [label, damage] of [
+    ["behaviours cleared", (m) => { m.behaviors = []; }],
+    ["interactions cleared", (m) => { m.interactions = []; }],
+    ["a zone lost", (m) => { m.zones = m.zones.slice(0, -1); }],
+    ["spawn removed", (m) => { m.spawn.player_spawns = []; }],
+    ["quests cleared", (m) => { m.quests = []; }],
+  ]) {
+    const m = structuredClone(base);
+    damage(m);
+    const first = await playtestAndRepair(m);
+    if (!first.passed) continue;                    // a rejection is a separate question
+    const second = await playtestAndRepair(first.manifest);
+    if ((second.repairs || []).length) unstable.push(`${label}: ${JSON.stringify(second.repairs.map((r) => r.fix))}`);
+  }
+  assert.deepEqual(unstable, [], `a second pass still found work to do:\n  ${unstable.join("\n  ")}`);
+});
+
+test("B4 GATE: a PASS means the world is genuinely playable, on every damage the pass survives", async () => {
+  // The other side of "the gate must be able to fail": whenever it says yes,
+  // the yes has to be worth something. Every property here is one a player
+  // would hit in the first two minutes.
+  const damages = [
+    ["untouched", () => {}],
+    ["behaviours cleared", (m) => { m.behaviors = []; }],
+    ["interactions cleared", (m) => { m.interactions = []; }],
+    ["quests cleared", (m) => { m.quests = []; }],
+    ["spawn removed", (m) => { m.spawn.player_spawns = []; }],
+    ["spawn out of bounds", (m) => { const p = m.spawn.player_spawns[0].position; p.x = m.terrain.size.w + 500; p.z = -400; }],
+    ["a zone lost", (m) => { m.zones = m.zones.slice(0, -1); }],
+    ["nav links cut", (m) => { m.navigation.links = []; }],
+    ["a quest step aimed at nothing", (m) => { if (m.quests[0]?.steps?.[0]) m.quests[0].steps[0].target = "ghost"; }],
+    ["a pickup for an item nobody has", (m) => { m.behaviors.push({ id: "behavior_pickup_ghost", kind: "pickup", spec: { item: "ghost_item" } }); }],
+    ["every NPC muted", (m) => { for (const n of m.npcs) n.dialogue = { seed: "", lines: [] }; }],
+    ["structures floated", (m) => { for (const s of m.structures) s.transform.position.y += 40; }],
+  ];
+
+  const lies = [];
+  for (const prompt of ["Ashfall Harbour, a rainy nordic port town", "a lush jungle temple complex"]) {
+    const base = await goodWorld(prompt, "w_nolie");
+    for (const [label, damage] of damages) {
+      const m = structuredClone(base);
+      damage(m);
+      const out = await playtestAndRepair(m);
+      if (!out.passed) continue;                 // a refusal is honest by construction
+      const w = out.manifest;
+      const say = (why) => lies.push(`${prompt} / ${label}: ${why}`);
+
+      if (!validateManifest(w).ok) say(`the manifest is invalid: ${JSON.stringify(validateManifest(w).errors.slice(0, 2))}`);
+
+      // It can be entered, and the player can move once inside.
+      const walk = simulatePlaythrough(w);
+      if (!walk.ok) say("there is no spawn");
+      else if (walk.visited_cells <= 1) say("the player cannot move from the spawn");
+
+      // Every quest it still claims to have can be finished.
+      for (const q of simulateQuests(w, walk)) {
+        if (!q.completable) say(`quest '${q.quest}' cannot be completed: ${q.steps.filter((s) => !s.ok).map((s) => s.why).join("; ")}`);
+      }
+
+      // Everything interactive points at something that exists.
+      const ids = new Set([...w.zones, ...w.structures, ...w.npcs, ...(w.items || [])].map((x) => x.id));
+      const behaviours = new Set(w.behaviors.map((b) => b.id));
+      for (const i of w.interactions) {
+        if (!ids.has(i.target_ref)) say(`interaction '${i.id}' targets '${i.target_ref}', which does not exist`);
+        if (!behaviours.has(i.behavior_ref)) say(`interaction '${i.id}' triggers '${i.behavior_ref}', which does not exist`);
+      }
+
+      // And there is something to do at all.
+      if (!w.behaviors.length) say("the world has no behaviours — it is scenery");
+    }
+  }
+  assert.deepEqual(lies, [], `the gate passed worlds that are not playable:\n  ${lies.join("\n  ")}`);
+});
