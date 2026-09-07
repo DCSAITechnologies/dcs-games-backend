@@ -13,7 +13,7 @@ import { createAssemblyRouter } from "../src/v3/router/assembly.mjs";
 import { createWorldMemory } from "../src/v3/memory/world-memory.mjs";
 import { createNpcMemory } from "../src/v3/companion/npc-memory.mjs";
 import { createCompanionService } from "../src/v3/companion/companion.mjs";
-import { playtestAndRepair } from "../src/v3/playtest/agent.mjs";
+import { playtestAndRepair, simulatePlaythrough, simulateQuests } from "../src/v3/playtest/agent.mjs";
 import { applyDelta, newDelta, emptyLiveState } from "../src/v3/expansion/delta.mjs";
 import { validateManifest } from "../src/v3/manifest/schema.mjs";
 
@@ -309,4 +309,84 @@ test("B5 GATE: concurrent companion writes all survive, and adopt stays one comp
   const adopted = await Promise.all(Array.from({ length: 5 }, () => svc2.adopt("u_a", "w_a", { persona: "guide" })));
   assert.equal(new Set(adopted.map((r) => r.companion_id)).size, 1, "five concurrent adopts must yield one companion");
   assert.equal((await svc2.get("u_a", "w_a")).companion_id, adopted[0].companion_id);
+});
+
+// ------------------------------- a generated quest must be completable at birth
+
+test("9.5 GATE: a procedural quest only ever sends a player somewhere they can reach", async () => {
+  // The same defect the add_quest repair had, in a different endpoint. Every
+  // target here was picked on EXISTENCE, and existence is not the test the gate
+  // applies: `simulateQuests` judges a step by `walk.reached.has(target)`.
+  //
+  // It matters because server.mts runs the playtest gate over the world with
+  // this quest added and answers 422 `quest_failed_playtest` when it fails — so
+  // an unreachable target does not produce a weaker quest, it produces no quest
+  // and an error. On a world with one ordinary wall across it, 43 of 50
+  // generated quests came out uncompletable.
+  const worldMemory = createWorldMemory({ DCS_DATA_DIR: fs.mkdtempSync(path.join(os.tmpdir(), "dcs-pq-")) });
+  const npcMemory = createNpcMemory({ worldMemory });
+
+  const uncompletable = [];
+  let generated = 0, refused = 0, strandedSeeds = 0;
+  for (let seed = 0; seed < 8; seed++) {
+    const m = (await createAssemblyRouter({ DCS_PROVIDERS_OFFLINE: "1" })
+      .assemble({ prompt: "a lush jungle temple complex", worldId: "w_pq", creatorId: "u1", seed })).manifest;
+
+    // A ridge across the map, so part of the world is genuinely out of reach —
+    // which is an ordinary shape for a generated world, not a contrived one.
+    const d = m.terrain.data;
+    const cut = Math.floor(d[0].length * 0.45);
+    for (let r = 0; r < d.length; r++) for (let c = cut; c < cut + 4; c++) d[r][c] = 120;
+
+    // Not every seed strands somebody — where the NPCs happen to fall is the
+    // generator's business. The corpus is asserted to contain stranded NPCs
+    // below, which is what the test actually needs.
+    const walk = simulatePlaythrough(m);
+    if (m.npcs.some((n) => !walk.reached.has(n.id))) strandedSeeds++;
+
+    for (const npc of m.npcs) {
+      let gen;
+      try { gen = await npcMemory.proceduralQuest("w_pq", m, { giverNpcId: npc.id, seed }); }
+      catch (e) {
+        // Refusing is correct for a giver nobody can walk to, and it must say so.
+        refused++;
+        assert.equal(e.httpStatus, 422);
+        assert.match(e.detail, /cannot be reached|does not contain enough/, e.detail);
+        continue;
+      }
+      generated++;
+      const mm = structuredClone(m);
+      mm.quests = [...mm.quests, gen.quest];
+      const q = simulateQuests(mm, simulatePlaythrough(mm)).find((x) => x.quest === gen.quest.id);
+      if (!q.completable) uncompletable.push(`${gen.quest.id} via ${npc.id}: ${q.steps.filter((s) => !s.ok).map((s) => s.why).join("; ")}`);
+    }
+  }
+  assert.ok(strandedSeeds > 0, "the corpus must contain worlds with unreachable NPCs, or it proves nothing");
+  assert.ok(generated > 0, "the fixture must still produce real quests, or it proves nothing");
+  assert.ok(refused > 0, "and it must exercise the refusal path too");
+  assert.deepEqual(uncompletable, [], `procedural quests that cannot be completed:\n  ${uncompletable.join("\n  ")}`);
+});
+
+test("9.5: a named giver nobody can walk to is refused, not silently swapped", async () => {
+  // The caller asked for THIS character. Quietly substituting a different NPC
+  // would answer a question nobody asked, and a quest nobody can start is not
+  // an answer either.
+  const worldMemory = createWorldMemory({ DCS_DATA_DIR: fs.mkdtempSync(path.join(os.tmpdir(), "dcs-pq2-")) });
+  const npcMemory = createNpcMemory({ worldMemory });
+  const m = (await createAssemblyRouter({ DCS_PROVIDERS_OFFLINE: "1" })
+    .assemble({ prompt: "a lush jungle temple complex", worldId: "w_pq2", creatorId: "u1", seed: 2 })).manifest;
+
+  const stranded = m.npcs[0];
+  stranded.spawn = { x: m.terrain.size.w * 4, y: 400, z: m.terrain.size.h * 4 };
+  assert.ok(!simulatePlaythrough(m).reached.has(stranded.id), "the fixture needs an unreachable NPC");
+
+  await assert.rejects(
+    () => npcMemory.proceduralQuest("w_pq2", m, { giverNpcId: stranded.id }),
+    (e) => {
+      assert.equal(e.httpStatus, 422);
+      assert.match(e.detail, new RegExp(`'${stranded.id}' cannot be reached`));
+      assert.ok(Array.isArray(e.meta.reachable_npcs), "the refusal must say who CAN be reached");
+      return true;
+    },
+  );
 });

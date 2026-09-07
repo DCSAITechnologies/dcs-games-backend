@@ -11,6 +11,7 @@
 // made up about a past that did not happen.
 import crypto from "node:crypto";
 import { Errors } from "../../core/errors.mjs";
+import { simulatePlaythrough } from "../playtest/agent.mjs";
 
 /** How an NPC relates to a recorded event, given who they are and where. */
 function relevance(npc, event, manifest) {
@@ -88,7 +89,40 @@ export function createNpcMemory({ worldMemory } = {}) {
       const structures = manifest.structures || [];
       if (!npcs.length) throw Errors.validation("a procedural quest needs at least one NPC");
 
-      const giver = npcs.find((n) => n.id === giverNpcId) || npcs[0];
+      // Only ever send a player somewhere they can get to.
+      //
+      // Every target here was picked on EXISTENCE alone, and existence is not
+      // the test the gate applies: `simulateQuests` judges a step by
+      // `walk.reached.has(target)`, so a quest naming a zone behind a cliff is
+      // uncompletable from the moment it is written. server.mts runs the
+      // playtest gate over the world with this quest added and answers 422
+      // `quest_failed_playtest` when it fails, so an unreachable target does not
+      // produce a poor quest — it produces no quest and an error. On a world
+      // with one ordinary wall across it, 43 of 50 generated quests came out
+      // uncompletable.
+      //
+      // Same defect the add_quest repair had, in a different endpoint, and the
+      // same answer: walk the world and build only from what the walk reached.
+      const walk = simulatePlaythrough(manifest);
+      const canReach = (id) => walk.ok && walk.reached.has(id);
+
+      const reachableNpcs = npcs.filter((n) => canReach(n.id));
+      const giver = giverNpcId
+        ? npcs.find((n) => n.id === giverNpcId)
+        : (reachableNpcs[0] || npcs[0]);
+      if (!giver) throw Errors.validation("a procedural quest needs at least one NPC");
+      // A named giver who cannot be reached is refused rather than quietly
+      // swapped: the caller asked for THIS character, and a quest nobody can
+      // start is not an answer to that.
+      if (!canReach(giver.id)) {
+        throw Errors.validation(
+          walk.ok
+            ? `'${giver.id}' cannot be reached from the spawn, so a quest they give could never be started`
+            : "this world has no spawn, so there is nowhere to start a quest from",
+          { meta: { npc: giver.id, reachable_npcs: reachableNpcs.map((n) => n.id).slice(0, 10) } },
+        );
+      }
+
       const s = seed ?? hash(worldId + giver.id + String(manifest.world_version));
       const r = rng(s);
 
@@ -102,10 +136,19 @@ export function createNpcMemory({ worldMemory } = {}) {
         if (b.kind === "pickup" && b.spec?.item) obtainable.add(b.spec.item);
         if (b.kind === "container" && Array.isArray(b.spec?.contains)) for (const it of b.spec.contains) obtainable.add(it);
       }
-      const item = items.filter((i) => obtainable.has(i.id))[Math.floor(r() * Math.max(1, items.filter((i) => obtainable.has(i.id)).length))] || null;
-      const otherNpc = npcs.filter((n) => n.id !== giver.id)[Math.floor(r() * Math.max(1, npcs.length - 1))] || null;
-      const zone = zones[Math.floor(r() * zones.length)] || null;
-      const structure = structures.filter((x) => x.enterable)[0] || structures[0] || null;
+      // Reachability already implies obtainability — an item enters `reached`
+      // only when a pickup or container that grants it hangs off something the
+      // walk got to — but the explicit set is kept because it is the thing
+      // validateQuests checks, and the two agreeing is not an accident to rely
+      // on silently.
+      const usableItems = items.filter((i) => obtainable.has(i.id) && canReach(i.id));
+      const item = usableItems[Math.floor(r() * usableItems.length)] || null;
+      const otherNpcs = reachableNpcs.filter((n) => n.id !== giver.id);
+      const otherNpc = otherNpcs[Math.floor(r() * otherNpcs.length)] || null;
+      const reachableZones = zones.filter((z) => canReach(z.id));
+      const zone = reachableZones[Math.floor(r() * reachableZones.length)] || null;
+      const reachableStructures = structures.filter((x) => canReach(x.id));
+      const structure = reachableStructures.filter((x) => x.enterable)[0] || reachableStructures[0] || null;
 
       const steps = [{ id: "step_ask", kind: "talk", target: giver.id, description: `Speak to ${giver.name}.` }];
       if (zone) steps.push({ id: "step_go", kind: "reach", target: zone.id, description: `Go to ${zone.name}.` });
@@ -113,7 +156,14 @@ export function createNpcMemory({ worldMemory } = {}) {
       else if (structure) steps.push({ id: "step_use", kind: "activate", target: structure.id, description: `Get inside the ${structure.purpose || "building"}.` });
       if (otherNpc) steps.push({ id: "step_deliver", kind: "deliver", target: otherNpc.id, description: `Take word to ${otherNpc.name}.` });
 
-      if (steps.length < 2) throw Errors.validation("this world does not contain enough to build a quest from");
+      if (steps.length < 2) {
+        throw Errors.validation(
+          `this world does not contain enough that ${giver.name || giver.id} can send a player to: ` +
+          `${reachableZones.length} of ${zones.length} zones, ${usableItems.length} of ${items.length} items and ` +
+          `${reachableStructures.length} of ${structures.length} structures can be reached from the spawn`,
+          { meta: { reachable: { zones: reachableZones.length, items: usableItems.length, structures: reachableStructures.length } } },
+        );
+      }
 
       return {
         quest: {
