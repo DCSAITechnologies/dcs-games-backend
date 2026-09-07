@@ -201,7 +201,12 @@ const manifest = {
 };
 
 const SPRINT = path.resolve(GB, "../../DCS_GAMES_SPRINT_SEP2026");
-const out = path.join(SPRINT, "RELEASE_MANIFEST.json");
+// CI has no sibling sprint directory, and its upload-artifact step looks for
+// RELEASE_MANIFEST.json inside the workspace — so the job produced no artifact
+// even on a clean run. DCS_RELEASE_MANIFEST_DIR lets the pipeline say where it
+// wants the file without changing where a local run puts it.
+const OUT_DIR = process.env.DCS_RELEASE_MANIFEST_DIR || SPRINT;
+const out = path.join(OUT_DIR, "RELEASE_MANIFEST.json");
 fs.mkdirSync(path.dirname(out), { recursive: true });
 fs.writeFileSync(out, JSON.stringify(manifest, null, 2) + "\n");
 
