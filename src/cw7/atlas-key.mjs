@@ -32,6 +32,26 @@ export function makeKeyEndpoint(deps = {}) {
       // the signer uses, so an external verifier can reproduce them exactly.
       canonical_aliases: Object.fromEntries(Object.entries(SIGNED_FIELDS).map(([k, v]) => [k, v.aliases])),
       canonical_fallbacks: Object.fromEntries(Object.entries(SIGNED_FIELDS).map(([k, v]) => [k, v.fallback])),
+      // ...and the ENCODING, which was the one piece an outside verifier could
+      // not derive. The fields, aliases and fallbacks were published; how they
+      // are serialised into the signed bytes was not, so a third party had to
+      // guess. A signature that is valid in principle and unreproducible in
+      // practice is not evidence of anything — the whole reason a receipt is
+      // signed is that somebody who does not trust this server can check it.
+      canonical_encoding: {
+        form: "json-object-sorted-keys",
+        // Written out as executable steps rather than prose, because the point
+        // is that a verifier follows them exactly.
+        steps: [
+          "for each name in canonical_fields, take the first of [name, ...canonical_aliases[name]] present and non-null on the receipt",
+          "if none is present, use canonical_fallbacks[name] (which may be null)",
+          "coerce each value: strings, numbers and booleans as-is; anything else through JSON.stringify once, and the result must be a primitive",
+          "serialise as JSON.stringify(resolved, canonical_fields.slice().sort()) — a JSON OBJECT with the canonical field names as sorted keys",
+          "the signed bytes are that string in UTF-8",
+        ],
+        signature_encoding: "base64",
+        verify: "ed25519 verify(signed_bytes, base64decode(receipt.sig), public_key)",
+      },
     };
   }
 
