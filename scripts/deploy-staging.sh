@@ -43,8 +43,33 @@ STAGE_DIR="$(mktemp -d)"
 trap 'rm -rf "$STAGE_DIR"' EXIT
 git archive "$COMMIT" | tar -x -C "$STAGE_DIR"
 
-if [ "$(git rev-parse HEAD)" != "$(git ls-remote origin "refs/heads/$BRANCH" | cut -f1)" ]; then
-  echo "REFUSING: HEAD is not pushed. Bank it before deploying, or the deployed code exists on one laptop." >&2
+# The guard is "is this commit recoverable if the laptop dies", and the answer
+# lives on the PRIVATE bank.
+#
+# This used to check `origin`. The sprint branch was deliberately deleted from
+# the public origin on 7 Sep 2026, so from that moment the check could never
+# pass — and the obvious way to make it pass would have been to push the sprint
+# history back to a public remote, which is exactly what the deletion existed to
+# prevent. A safety check that can only be satisfied by undoing a safety
+# decision is worse than no check.
+#
+# BANK_REMOTE is overridable so a different checkout can name its own mirror,
+# but it must be a real remote: an unset or misspelled one would make
+# `git ls-remote` fail and the comparison trivially true, which would turn the
+# guard off silently.
+BANK_REMOTE="${BANK_REMOTE:-bank}"
+if ! git remote get-url "$BANK_REMOTE" >/dev/null 2>&1; then
+  echo "REFUSING: no '$BANK_REMOTE' remote. Set BANK_REMOTE to the private mirror this checkout banks to." >&2
+  exit 2
+fi
+BANK_HEAD="$(git ls-remote "$BANK_REMOTE" "refs/heads/$BRANCH" | cut -f1)"
+if [ -z "$BANK_HEAD" ]; then
+  echo "REFUSING: $BANK_REMOTE has no branch '$BRANCH'. Push it before deploying." >&2
+  exit 2
+fi
+if [ "$COMMIT" != "$BANK_HEAD" ]; then
+  echo "REFUSING: HEAD ($COMMIT) is not on $BANK_REMOTE/$BRANCH ($BANK_HEAD)." >&2
+  echo "Bank it before deploying, or the deployed code exists on one laptop." >&2
   exit 2
 fi
 
