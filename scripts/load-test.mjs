@@ -397,7 +397,24 @@ async function distinctFirstLoginProbe(n, tag) {
  * The per-world file itself is written tmp+rename, so this is a lost UPDATE, not
  * a corrupted file — which is exactly why it is invisible without this check.
  */
+let SAVE_PROBE_RUN = 0;
+
 async function worldSaveProbe(worldId, n) {
+  // Every burst must write titles NO EARLIER BURST HAS WRITTEN.
+  //
+  // The titles used to be `concurrent edit ${i}`, reused verbatim at every
+  // concurrency level against the same world. POST /worlds/:id/save is
+  // idempotent by design: a save whose manifest hash, state and title all match
+  // what is stored returns 200 with `idempotent: true` and does NOT cut a new
+  // version, which is correct. So at every level after the first, save #0 was a
+  // genuine no-op — and this probe, which infers loss from
+  // accepted - versions_advanced, counted that no-op as a LOST EDIT.
+  //
+  // It reported "LOST WORLD EDIT — 8 saves returned 200, the world advanced
+  // only 7 version(s)" on four runs out of four, deterministically, against a
+  // repository that had already been fixed with a per-world lock. A harness
+  // that manufactures a data-loss report is worse than no harness.
+  const burst = ++SAVE_PROBE_RUN;
   const before = await call(`/v3/worlds/${worldId}/manifest`, { token: TESTER });
   const baseVersion = Number(before.body?.world_version ?? 0);
   const manifest = before.body?.manifest;
@@ -406,14 +423,28 @@ async function worldSaveProbe(worldId, n) {
   const statuses = await Promise.all(Array.from({ length: n }, (_, i) =>
     call(`/worlds/${worldId}/save`, {
       method: "POST", token: TESTER,
-      body: { manifest: { ...manifest, meta: { ...(manifest.meta || {}), title: `concurrent edit ${i}` } }, state: "published" },
-    }).then((r) => ({ status: r.status, version: r.body?.world_version })).catch((e) => ({ status: "transport:" + e.message }))));
+      // No `state`. A save can no longer set a world's state at all — that was
+      // an authorization bypass producing published, discoverable worlds past
+      // the internal-tester check, ownership, the playtest gate and the Atlas
+      // signing key — and the server answers 422 to a save that carries it.
+      // While it was here every save in this probe came back 422 and the
+      // lost-update question, which is the whole reason this probe exists
+      // beyond latency, was never asked: it reported "LOST 0 edits" from a
+      // burst in which nothing was ever written.
+      body: { manifest: { ...manifest, meta: { ...(manifest.meta || {}), title: `concurrent edit b${burst}-${i}` } } },
+    }).then((r) => ({ status: r.status, version: r.body?.world_version, idempotent: r.body?.idempotent === true }))
+      .catch((e) => ({ status: "transport:" + e.message }))));
 
   await new Promise((r) => setTimeout(r, 250));
   const after = await call(`/v3/worlds/${worldId}/manifest`, { token: TESTER });
   const finalVersion = Number(after.body?.world_version ?? 0);
   const accepted = statuses.filter((s) => s.status === 200).length;
   const conflicts = statuses.filter((s) => s.status === 409).length;
+  // A 200 that changed nothing is not an accepted edit and must never be
+  // counted as one. With unique titles this should be zero; it is measured
+  // rather than assumed, so the metric cannot quietly become wrong again.
+  const idempotent = statuses.filter((s) => s.status === 200 && s.idempotent).length;
+  const wrote = accepted - idempotent;
 
   const versionsDir = path.join(DATA, "world-versions");
   const retained = fs.readdirSync(versionsDir).filter((f) => f.startsWith(encodeURIComponent(worldId) + "@")).length;
@@ -421,13 +452,20 @@ async function worldSaveProbe(worldId, n) {
   return {
     concurrent_saves: n,
     accepted_200: accepted,
+    idempotent_200: idempotent,
+    edits_written: wrote,
     rejected_409_conflict: conflicts,
     other_statuses: statuses.filter((s) => s.status !== 200 && s.status !== 409).map((s) => s.status),
     version_before: baseVersion,
     version_after: finalVersion,
     versions_advanced: finalVersion - baseVersion,
-    // Every accepted, non-idempotent save should have produced its own version.
-    lost_versions: Math.max(0, accepted - (finalVersion - baseVersion)),
+    // Every accepted, NON-IDEMPOTENT save should have produced its own version.
+    lost_versions: Math.max(0, wrote - (finalVersion - baseVersion)),
+    // A burst in which nothing was accepted AND nothing conflicted did not
+    // measure concurrency at all, and "LOST 0" from it is vacuous. Reported
+    // explicitly so a probe that stopped working can never again read as a
+    // healthy result.
+    probe_ran: accepted + conflicts > 0,
     retained_version_files: retained,
     final_title: after.body?.manifest?.meta?.title ?? null,
   };
@@ -514,8 +552,16 @@ async function main() {
       if (burst.pre_existing_rows_lost > 0) result.failures.push(`concurrency ${level}: STORE DESTRUCTION — ${burst.pre_existing_rows_lost} pre-existing principal rows disappeared during a concurrent sign-in burst`);
       if (burst.store_parse_error) result.failures.push(`concurrency ${level}: ${burst.store_parse_error}`);
       if (saves.skipped) result.failures.push(`concurrency ${level}: world-save probe could not run — ${saves.skipped} (status ${saves.status})`);
-      if (saves.lost_versions > 0) result.failures.push(`concurrency ${level}: LOST WORLD EDIT — ${saves.accepted_200} saves returned 200, the world advanced only ${saves.versions_advanced} version(s) (${saves.lost_versions} edits lost)`);
+      if (saves.lost_versions > 0) result.failures.push(`concurrency ${level}: LOST WORLD EDIT — ${saves.edits_written} saves returned 200 with a real change, the world advanced only ${saves.versions_advanced} version(s) (${saves.lost_versions} edits lost)`);
+      // Titles are unique per burst, so nothing in this probe should ever be a
+      // no-op. One that is means the probe is repeating itself again and the
+      // loss figure below it is not trustworthy.
+      if (saves.idempotent_200 > 0) result.failures.push(`concurrency ${level}: the world-save probe wrote ${saves.idempotent_200} save(s) that changed nothing — it is repeating a title, so its lost-edit count cannot be believed`);
       if (saves.other_statuses?.length) result.failures.push(`concurrency ${level}: /worlds/:id/save returned ${JSON.stringify(saves.other_statuses.slice(0, 5))}`);
+      // "LOST 0 edits" out of a burst where nothing was written says nothing
+      // about lost updates. A probe that did not run is a failure of the probe,
+      // reported as such, so it can never be read as a healthy result.
+      if (!saves.skipped && !saves.probe_ran) result.failures.push(`concurrency ${level}: the world-save probe measured NOTHING — ${saves.concurrent_saves} concurrent saves produced 0 accepted and 0 conflicted, so the lost-update question was never asked`);
 
       log(`## concurrency ${level}`);
       log(`   reads      ${reads.requests} req in ${round(wall)}s -> ${reads.throughput_rps} rps | p50 ${reads.latency_ms.p50}ms  p95 ${reads.latency_ms.p95}ms  p99 ${reads.latency_ms.p99}ms  max ${reads.latency_ms.max}ms`);
@@ -526,7 +572,7 @@ async function main() {
       log(`   plays      ${probeN} concurrent POSTs: ${plays.accepted_2xx} accepted, ${plays.rows_persisted} persisted, LOST ${plays.lost_writes} (stats says ${plays.stats_endpoint_plays})`);
       log(`   first login ${probeN} concurrent GET /me/profile for a NEW principal: ${firstLogin.profile_rows_for_one_principal} profile rows written (expected 1)`);
       log(`   signin burst ${probeN} distinct new principals at once: ${burst.accepted_2xx} got 2xx, ${burst.profiles_persisted} persisted, LOST ${burst.lost_profiles}, pre-existing rows lost ${burst.pre_existing_rows_lost}`);
-      log(`   world save ${probeN} concurrent POST /worlds/:id/save: ${saves.accepted_200} accepted 200, ${saves.rejected_409_conflict} conflicted, version ${saves.version_before} -> ${saves.version_after}, LOST ${saves.lost_versions} edits, ${saves.retained_version_files} version files`);
+      log(`   world save ${probeN} concurrent POST /worlds/:id/save: ${saves.accepted_200} accepted 200 (${saves.edits_written} real, ${saves.idempotent_200} no-op), ${saves.rejected_409_conflict} conflicted, version ${saves.version_before} -> ${saves.version_after}, LOST ${saves.lost_versions} edits, ${saves.retained_version_files} version files`);
       log(`   rss        ${entry.server_rss_mb.before} -> ${entry.server_rss_mb.after_reads} -> ${entry.server_rss_mb.after_writes} MB`);
       log("");
     }
