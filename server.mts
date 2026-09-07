@@ -656,11 +656,27 @@ const server = http.createServer(async (req, res) => {
     // Atlas provenance: the receipts that were actually issued.
     if (url === "/api/public/atlas/feed" && method === "GET") {
       const rows: any[] = await atlasReceipts.all().catch(() => []);
+      // Only receipts for worlds that are publicly readable RIGHT NOW.
+      //
+      // A receipt is issued at publication and kept forever, which is correct —
+      // it attests to something that happened. But a world can leave the
+      // catalogue afterwards (any save returns it to draft, because the
+      // signature no longer describes its content), and a public feed that goes
+      // on naming it both discloses an id nobody can now fetch and implies the
+      // world is still published. The receipt is not withdrawn; it is simply
+      // not advertised on a surface that means "here is what you can go and
+      // look at".
+      const publicNow = new Set((await repo.listPublished(1000)).map((w: any) => w.world_id));
       const feed = rows
+        .filter((r) => publicNow.has(r.subject_id))
         .map((r) => ({ receipt_hash: r.receipt_hash, subject_id: r.subject_id, issued_at: r.issued_at, signed: !!r.receipt?.sig }))
         .sort((a, b) => String(b.issued_at).localeCompare(String(a.issued_at)))
         .slice(0, 40);
-      return send(res, 200, { ok: true, count: feed.length, receipts: feed, measured_at: new Date().toISOString() });
+      return send(res, 200, {
+        ok: true, count: feed.length, receipts: feed,
+        basis: "receipts for worlds currently in the public catalogue. A receipt for a world that has since left it is still valid and still fetchable by hash; it is not advertised here.",
+        measured_at: new Date().toISOString(),
+      });
     }
     if (url === "/api/public/atlas/stats" && method === "GET") {
       const rows: any[] = await atlasReceipts.all().catch(() => []);
