@@ -414,7 +414,7 @@ const server = http.createServer(async (req, res) => {
         safety: ["GET /safety/age", "GET /safety/blocks", "POST /safety/consent/parental", "POST /safety/report", "GET /safety/reports", "POST /safety/block", "GET /safety/consent/media", "GET /safety/moderation-history", "POST /safety/reports/:id/moderate"],
         jobs: ["GET /v3/jobs", "GET /v3/jobs/:id"],
         trust: ["GET /health", "GET /atlas/key", "DELETE /verify/:channel", "GET /atlas/receipt/:id", "GET /verify", "GET /v3/providers"],
-        retired: ["GET /api/marketplace (410)", "GET /api/me/payouts (410)", "GET /me/revenue (410)", ...retiredSocialRoutes(), "POST /verify/:channel/{start,confirm} on the legacy identity slice (410)"],
+        retired: ["GET /api/marketplace (410)", "GET /api/me/payouts (410)", "GET /me/revenue (410)", ...retiredSocialRoutes()],
       },
       manifest_version: MANIFEST_VERSION,
       social: { profiles: true, friends: true, parties: true, teams: true, studios: true, discovery: true, ...social.describe() },
@@ -477,6 +477,20 @@ const server = http.createServer(async (req, res) => {
 
     // ---- REAL AUTH: proxy signup/login to Supabase Auth (returns a real JWT) ----
     const ANON = process.env.SUPABASE_ANON_KEY || KEY;
+    // Without Supabase these fell through to the legacy-auth retirement, which
+    // answers 410 with `superseded_by` naming the route the caller just called.
+    // The retirement is correct — the old handler took a principal id from the
+    // request body with no credential — but a retirement notice is not an
+    // implementation, and pointing it at itself tells a reader the endpoint
+    // moved when in fact nothing is there. Staging and production configure
+    // Supabase, so this bites local and CI runs, which is where someone is most
+    // likely to be trying to understand why login does not work.
+    if (!HAS_SUPA && method === "POST" && (url === "/auth/signup" || url === "/auth/login")) {
+      throw Errors.notConfigured(
+        "email/password authentication (SUPABASE_URL and SUPABASE_ANON_KEY are not set on this deployment)",
+        { correlationId: cid, meta: { auth_mode: auth.mode } }
+      );
+    }
     if (HAS_SUPA && method === "POST" && (url === "/auth/signup" || url === "/auth/login")) {
       const b = await readBody(req);
       const isSignup = url === "/auth/signup";
@@ -634,7 +648,14 @@ const server = http.createServer(async (req, res) => {
     if (url === "/safety/consent/parental" && method === "POST") {
       const me = await mustBe(req, cid);
       const b = await readBody(req);
-      const r = await safety.requestParentalConsent(b.minor_id || me.id, { guardianEmail: b.guardian_email, scope: b.scope || [], isSynthetic: b.is_synthetic !== false });
+      // requestedBy is the AUTHENTICATED caller, never a body field. Without it
+      // safety.mjs refuses the whole route rather than write a consent record
+      // that cannot be attributed to anyone — a forgeable row about a minor is
+      // worse than no row.
+      const r = await safety.requestParentalConsent(b.minor_id || me.id, {
+        guardianEmail: b.guardian_email, scope: b.scope || [],
+        isSynthetic: b.is_synthetic !== false, requestedBy: me.id,
+      });
       return send(res, 201, { ok: true, consent: r, correlation_id: cid });
     }
     if (url === "/safety/consent/media" && method === "POST") {
@@ -1313,10 +1334,32 @@ const server = http.createServer(async (req, res) => {
         // Fully synthetic material is exempt; anything tied to a real person is not.
         if (kind === "voice" || kind === "narration" || kind === "avatar") {
           await safety.requireCapability(me.id, "voice");
+
+          // The source is NOT taken on trust, and it does not default to the
+          // exempt value.
+          //
+          // It used to be `source: b.source || "synthetic"`, and
+          // requireMediaConsent returns permitted immediately for "synthetic".
+          // So the entire voice-and-likeness gate came off by omitting a field —
+          // while `subject_id` could still name a real person and was forwarded
+          // to the provider regardless. A default that disables a consent check
+          // is the wrong default no matter how the field is spelled.
+          //
+          // A claim of "synthetic" is only credible when the material is tied to
+          // nobody. If a subject is named, the claim contradicts itself, and the
+          // contradiction is refused rather than resolved in the caller's favour.
+          const named = b.subject_id ?? null;
+          if (b.source === "synthetic" && named !== null) {
+            throw Errors.validation(
+              "material cannot be declared synthetic while naming a subject; a likeness of a real person needs a recorded consent grant",
+              { correlationId: cid, meta: { subject_id: named, media_kind: kind } }
+            );
+          }
           await safety.requireMediaConsent({
-            subjectId: b.subject_id ?? me.id,
+            subjectId: named ?? me.id,
             mediaKind: kind === "narration" ? "voice" : kind,
-            source: b.source || "synthetic",
+            // Absent means unknown, and unknown is not exempt.
+            source: b.source === "synthetic" ? "synthetic" : (b.source || "unknown"),
           });
         }
 
@@ -1669,7 +1712,15 @@ const server = http.createServer(async (req, res) => {
       const me = await mustBeInternalTester(req, cid);        // creation is a builder surface: internal testers only until 30 Sep 2026
       await safety.requireCapability(me.id, "create");        // A5: age tier must permit creation
       const b = await readBody(req);
-      const world = await generateVia(b.prompt || "Pirate Island"); // adapter seam: Cerebras hybrid when keyed, else seeder (always C1-valid)
+      // A prompt is the whole of what the caller asked for. `b.prompt || "Pirate
+      // Island"` meant {"prompt":""} and {"prompt":null} answered 200 with a
+      // pirate world handed back as the caller's own creation — the one thing a
+      // generator must never do. The generator itself refuses an empty prompt;
+      // this default was the only thing standing between it and the route.
+      if (!b.prompt || typeof b.prompt !== "string" || !b.prompt.trim()) {
+        throw Errors.validation("prompt is required, and describes the world to build", { correlationId: cid });
+      }
+      const world = await generateVia(b.prompt); // adapter seam: Cerebras hybrid when keyed, else seeder (always C1-valid)
       // A4: signing is genuinely optional, but a failure is now logged and reported,
       // not swallowed. An unsigned world is never presented as verified.
       const signed = await optional("atlas-receipt-issue", async () => issueWorldReceipt(world.world_id, me.id), cid);
@@ -1824,10 +1875,17 @@ const server = http.createServer(async (req, res) => {
       logError(e, method + " " + url);
       return send(res, e.httpStatus, { ...e.toJSON(), correlation_id: cid });
     }
-    const wrapped = Errors.internal(String(e?.message || e), { correlationId: cid, cause: e });
-    logError(wrapped, method + " " + url);
+    // The real message is LOGGED, never sent. An unexpected exception carries
+    // whatever the runtime put in it — an ENOENT or EACCES names a container
+    // filesystem path, a database error names relations and columns — and this
+    // is the one path that reaches a client without anyone having decided what
+    // it says. The correlation id is how an operator gets from the client's
+    // report to the full detail in the log.
+    const internal = Errors.internal(String(e?.message || e), { correlationId: cid, cause: e });
+    logError(internal, method + " " + url);
     if (process.env.NODE_ENV !== "production") console.error(e?.stack || e);
-    return send(res, 500, wrapped.toJSON());
+    const safe = Errors.internal("an unexpected error occurred; quote the correlation id", { correlationId: cid });
+    return send(res, 500, safe.toJSON());
   }
 });
 export { server };

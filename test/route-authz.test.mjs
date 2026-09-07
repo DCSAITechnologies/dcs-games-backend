@@ -796,7 +796,7 @@ test("DEFECT, OPEN: GET /v3/worlds/:id/stats serves a DRAFT world's play counts 
   );
 });
 
-test("DEFECT, OPEN: POST /auth/{login,signup,ensure} lets an anonymous caller write another principal's identity record", async () => {
+test("CLOSED: POST /auth/{login,signup,ensure} cannot write another principal's identity record", async () => {
   // SEVERITY: HIGH — unauthenticated cross-principal write, and a vended
   //   credential that is not one.
   // REPRO: with no credential, POST /auth/login {id:"user-owner", name:"PWNED"}
@@ -811,15 +811,26 @@ test("DEFECT, OPEN: POST /auth/{login,signup,ensure} lets an anonymous caller wr
   //   from `b.id` with no auth at all. Its siblings in the same file were
   //   retired for exactly this class of problem (RETIRED_SOCIAL, lines 88-100;
   //   the verify routes at lines 145-149 were retired for returning a code).
-  // FIX: src/cw1/identity-slice.mjs:115-119 — retire these three paths the way
-  //   the sibling social routes were, or bind the row to the resolved principal
-  //   and never to a caller-supplied id. The real signup/login path already
-  //   exists at server.mts:372-388 behind Supabase.
+  // CLOSED, 7 Sep 2026. The caller-chosen id can no longer reach the slice in
+  //   EITHER configuration, which is what makes this shut rather than moved:
+  //   with Supabase configured, server.mts handles /auth/{signup,login} itself
+  //   and the slice never sees the request; without it, the route now answers
+  //   503 not_configured before dispatch reaches the slice. It previously fell
+  //   through to a legacy-auth retirement whose `superseded_by` named the route
+  //   the caller had just called — a retirement notice standing in for an
+  //   implementation that was not there.
+  // 503 belongs in this list for the same reason 410 does: it is a refusal that
+  //   never reaches the vulnerable handler. What must never appear is 200.
   const attack = await call("ANON", "POST", "/auth/login", { id: "user-owner", name: "PWNED-BY-A-STRANGER" });
   assert.ok(
-    [401, 403, 404, 410].includes(attack.status),
+    [401, 403, 404, 410, 503].includes(attack.status),
     `anonymous POST /auth/login accepted a caller-chosen principal id: ${attack.status} ${String(attack.text).slice(0, 220)}`
   );
+
+  // And the victim's own profile is untouched by the attempt.
+  const victim = await call("OWNER", "GET", "/me/profile");
+  assert.ok(!String(victim.text).includes("PWNED-BY-A-STRANGER"),
+    "the attempt must not have written anything into the victim's record");
 });
 
 test("DEFECT, OPEN: GET /me fabricates a profile for a principal that has no record", async () => {

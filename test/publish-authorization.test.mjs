@@ -164,3 +164,75 @@ test("PUBLISH: publishing still works for the owner, and is what makes a world p
   const after = await (await call(null, "GET", "/api/public/worlds")).json();
   assert.ok(JSON.stringify(after).includes(worldId), "publishing is what makes it public");
 });
+
+// ------------------------------------------------- A5 voice/likeness gate
+
+test("CONSENT GATE: material cannot be declared synthetic while naming a subject", async () => {
+  // The gate came off by omitting a field. It was
+  // `source: b.source || "synthetic"`, and requireMediaConsent returns
+  // permitted immediately for "synthetic" — while `subject_id` could still name
+  // a real person and was forwarded to the provider regardless.
+  const { worldId } = await validManifest();
+  const r = await call(TESTER, "POST", `/v3/worlds/${worldId}/media`, {
+    kind: "voice", source: "synthetic", subject_id: "u-someone-else",
+  });
+  const b = await r.json();
+  assert.equal(r.status, 422, JSON.stringify(b).slice(0, 250));
+  assert.match(b.detail, /cannot be declared synthetic while naming a subject/);
+});
+
+test("CONSENT GATE: omitting the source does not exempt the material", async () => {
+  // A default that disables a consent check is the wrong default no matter how
+  // the field is spelled. Absent means unknown, and unknown is not exempt.
+  const { worldId } = await validManifest();
+  const r = await call(TESTER, "POST", `/v3/worlds/${worldId}/media`, { kind: "voice" });
+  const b = await r.json();
+  assert.equal(r.status, 403, `an unattested voice request must be refused: ${JSON.stringify(b).slice(0, 250)}`);
+  assert.match(b.detail, /consent/i);
+});
+
+test("CONSENT GATE: a likeness of another person needs a recorded grant", async () => {
+  const { worldId } = await validManifest();
+  for (const kind of ["voice", "narration", "avatar"]) {
+    const r = await call(TESTER, "POST", `/v3/worlds/${worldId}/media`, {
+      kind, subject_id: "u-someone-else", source: "licensed",
+    });
+    assert.equal(r.status, 403, `${kind} for another subject must be refused without a grant`);
+  }
+});
+
+test("ERROR GATE: an unexpected failure does not hand the client its own internals", async () => {
+  // The top-level catch sent `String(e.message)` to the client. An unexpected
+  // exception carries whatever the runtime put in it — an ENOENT names a
+  // container filesystem path, a database error names relations and columns —
+  // and this is the one path that reaches a client without anyone having
+  // decided what it says.
+  const r = await call(TESTER, "POST", "/safety/consent/parental", { guardian_email: "", scope: [] });
+  const b = await r.json();
+  // Whatever this answers, it must not be a raw runtime message.
+  assert.ok(!/\/(Users|app|home)\//.test(JSON.stringify(b)), `a filesystem path leaked: ${JSON.stringify(b).slice(0, 200)}`);
+  assert.ok(b.correlation_id, "and a correlation id must be there to trace it");
+});
+
+test("CONSENT: a parental consent request is attributed to the caller, not a body field", async () => {
+  // safety.mjs refuses to write a consent record it cannot attribute, and
+  // server.mts was not threading the authenticated principal through — so the
+  // route refused outright. requestedBy is the caller, never a body field.
+  const r = await call(TESTER, "POST", "/safety/consent/parental", {
+    guardian_email: "guardian@example.com", scope: ["voice"],
+  });
+  const b = await r.json();
+  // This caller is an adult, so the route refuses on AGE — which is the point:
+  // it got far enough to evaluate who the request is about. Before the caller
+  // was threaded through it never got that far, refusing every request because
+  // it could not attribute it to anyone.
+  assert.equal(r.status, 422, JSON.stringify(b).slice(0, 250));
+  assert.match(b.detail, /minor principal/);
+  assert.doesNotMatch(b.detail, /did not say who made it/, "attribution must no longer be the blocker");
+
+  // And it cannot be requested on someone else's behalf.
+  const other = await call(TESTER, "POST", "/safety/consent/parental", {
+    minor_id: "u-a-different-minor", guardian_email: "guardian@example.com", scope: ["voice"],
+  });
+  assert.equal(other.status, 403, "there is no verified guardian relationship to authorise that");
+});
