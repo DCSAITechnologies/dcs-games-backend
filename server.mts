@@ -383,7 +383,30 @@ const server = http.createServer(async (req, res) => {
   (res as any).__dcsOrigin = (req.headers.origin as string) || "";
   try {
     if (method === "OPTIONS") return send(res, 204, {});
-    if (url === "/health" && method === "GET") return send(res, 200, {
+    if (url === "/health" && method === "GET") {
+      // A degraded SAFETY collection is not the same kind of news as a degraded
+      // anything-else, and nothing distinguished them. Reports of csam,
+      // grooming and self_harm were failing to reach the durable store for
+      // days, and the only trace was one entry in a list that looks identical
+      // to a degraded cache. It is raised here as a top-level alert and logged
+      // as an error every time /health is read, because the whole point of a
+      // health endpoint is that somebody or something is watching it.
+      const safetyState: any = safety.describe();
+      const safetyDegraded = Array.isArray(safetyState?.degraded) && safetyState.degraded.length > 0;
+      const alerts: any[] = [];
+      if (safetyDegraded) {
+        alerts.push({
+          severity: "critical",
+          subject: "safety_persistence",
+          detail: "safety reports and consent records are NOT reaching the durable store; on a container filesystem they are lost at the next deploy",
+          collections: safetyState.degraded,
+        });
+        console.error(JSON.stringify({
+          level: "error", alert: "SAFETY_PERSISTENCE_DEGRADED",
+          collections: safetyState.degraded, ts: new Date().toISOString(),
+        }));
+      }
+      return send(res, 200, {
       ok: true, service: "dcs-games-backend", payments_live: PAYMENTS_LIVE,
       build: BUILD_INFO,
       cors: { mode: CORS_MODE, allowed: ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS : null },
@@ -427,7 +450,9 @@ const server = http.createServer(async (req, res) => {
       },
       manifest_version: MANIFEST_VERSION,
       social: { profiles: true, friends: true, parties: true, teams: true, studios: true, discovery: true, ...social.describe() },
-      safety_persistence: safety.describe(),
+      safety_persistence: safetyState,
+      // Empty when there is nothing wrong, so a watcher can alert on non-empty.
+      alerts,
       verification: verification.describe(),
       live_state: liveStateSvc.describe(),
       player_progress: playerProgress.describe(),
@@ -461,6 +486,7 @@ const server = http.createServer(async (req, res) => {
       },
       netcode: "ws-separate-service", ts: new Date().toISOString(),
     });
+    }
 
     // A1: resolve once. Anonymous is null; a *bad* credential throws 401 here and
     // never reaches a route, so no handler can be tricked into acting as someone else.

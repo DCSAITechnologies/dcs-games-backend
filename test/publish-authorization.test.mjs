@@ -396,3 +396,20 @@ test("DISCOVERABILITY: the moderation queue carries the actions it accepts", asy
   assert.ok(Array.isArray(b.actions) && b.actions.length > 0, "a console must not have to hard-code the action set");
   assert.ok(Array.isArray(b.states) && b.states.length > 0);
 });
+
+test("HEALTH GATE: a degraded safety collection is raised as a critical alert", async () => {
+  // Reports of csam, grooming and self_harm failed to reach the durable store
+  // for days, and the only trace was one entry in a list that looks identical
+  // to a degraded cache. A degraded SAFETY collection is not the same kind of
+  // news as a degraded anything-else.
+  const h = await (await call(null, "GET", "/health")).json();
+  assert.ok(Array.isArray(h.alerts), "/health must carry an alerts array, empty when nothing is wrong");
+
+  const degraded = h.safety_persistence?.degraded;
+  const isDegraded = Array.isArray(degraded) && degraded.length > 0;
+  const raised = h.alerts.some((a) => a.subject === "safety_persistence" && a.severity === "critical");
+  assert.equal(raised, isDegraded,
+    isDegraded
+      ? "safety persistence is degraded and no critical alert was raised"
+      : "an alert was raised while safety persistence is healthy");
+});
