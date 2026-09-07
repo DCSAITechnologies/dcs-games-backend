@@ -85,8 +85,17 @@ ok("the new world appears in the owner's list",
 const other = process.env.OTHER_JWT;
 if (other) {
   const r = await fetch(U + `/v3/worlds/${W}/manifest`, { headers: { Authorization: "Bearer " + other } });
-  ok("another principal cannot read an unpublished world", r.status === 404,
-     `HTTP ${r.status} (403 would confirm it exists)`);
+  if (r.status === 401) {
+    // Not an ownership result at all. A 401 means OTHER_JWT was not accepted —
+    // Supabase access tokens last an hour — and reporting an expired token as
+    // "ownership is not enforced" would send someone to audit a control that
+    // is working. Say what actually happened.
+    ok("the second principal's token is still valid", false,
+       "OTHER_JWT was rejected (401), so ownership isolation was NOT tested; mint a fresh token and re-run");
+  } else {
+    ok("another principal cannot read an unpublished world", r.status === 404,
+       `HTTP ${r.status} (403 would confirm it exists; 404 must be indistinguishable from a world that is not there)`);
+  }
 }
 const na = await anon(`/v3/worlds/${W}/manifest`);
 ok("an anonymous caller cannot read an unpublished world", na.status === 401 || na.status === 404, `HTTP ${na.status}`);
