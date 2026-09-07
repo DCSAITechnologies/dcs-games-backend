@@ -173,3 +173,79 @@ test("B15: the service reports where it persists and that payments are off", asy
   assert.equal(d.payments_live, false);
   assert.equal(d.persistence, "file");
 });
+
+// =====================================================================
+// "Ownership transferred at zero cost" was a claim that something changed
+// hands. Nothing did.
+//
+// Reproduced 7 Sep 2026 against a booted server, one run:
+//   user-b POST /v3/marketplace/listings/lst_.../acquire -> 200
+//          {"ownership":{"world_id":"w3_b3579c...","acquired_price_minor":0},
+//           "note":"Ownership transferred at zero cost. ..."}
+//   user-b GET  /v3/marketplace/owned            -> 200, the row is there
+//   user-b GET  /v3/worlds/w3_b3579c.../manifest -> 404 "world not found"
+//
+// ownedBy() is read by exactly one route in the estate, GET /v3/marketplace/owned.
+// No permission check consults it — not the world repository, not discovery, not
+// play. The acquisition is a row and nothing else, and the response now says so
+// rather than using a word that invites the reader to assume more.
+// =====================================================================
+
+test("an acquisition states what it confers, and does not claim a transfer", async () => {
+  const m = svc();
+  const l = await m.createListing("seller", { title: "A world", worldId: "w_private", kind: "world" });
+  const r = await m.acquire("buyer", l.id);
+
+  assert.ok(r.confers, "the response must say what the acquirer now has");
+  assert.equal(r.confers.ownership_row, true);
+  assert.equal(r.confers.world_access, false, "acquiring a world listing does not grant the world");
+  assert.equal(r.confers.play_access, false);
+  assert.equal(r.confers.resale, false);
+  assert.equal(r.confers.refund, false);
+  assert.equal(r.confers.listed_in, "GET /v3/marketplace/owned");
+
+  // The old wording — "Ownership transferred at zero cost" — is a positive claim
+  // that something changed hands, and a caller reading it would reasonably
+  // believe the world moved. It must be gone, and the opposite must be stated.
+  assert.doesNotMatch(r.note, /ownership transferred|transferred at/i,
+    "nothing changed hands, so the note must not claim a transfer");
+  assert.match(r.note, /nothing was transferred/i, "it must say so outright, not merely omit the claim");
+  assert.match(r.note, /does not grant access/i, "and must say what is NOT conferred");
+  assert.match(r.note, /no money moved/i, "while still stating the money fact");
+});
+
+test("the idempotent re-acquisition says the same thing, so a retry does not read as more", async () => {
+  const m = svc();
+  const l = await m.createListing("seller", { title: "A world", worldId: "w_private" });
+  await m.acquire("buyer", l.id);
+  const again = await m.acquire("buyer", l.id);
+  assert.equal(again.idempotent, true);
+  assert.equal(again.confers.world_access, false, "a second acquisition confers no more than the first");
+  assert.equal(again.ledger, null, "and writes no second ledger entry");
+});
+
+test("/health states that an acquisition confers no access", async () => {
+  const m = svc();
+  const d = m.describe();
+  assert.equal(d.acquisition_confers.world_access, false);
+  assert.equal(d.payments_live, false);
+  assert.ok(/does not grant access/i.test(d.acquisition_confers.note),
+    "health must not let a reader infer that acquiring something gives them it");
+});
+
+test("the ownership row is honest about being a record and not an entitlement", async () => {
+  // The row itself is unchanged and still real: it is a durable record that this
+  // principal went through the acquisition flow, at zero, in test mode. What
+  // changed is that the response no longer overstates it.
+  const m = svc();
+  const l = await m.createListing("seller", { title: "A world", worldId: "w_private" });
+  const r = await m.acquire("buyer", l.id);
+  assert.equal(r.ownership.owner_id, "buyer");
+  assert.equal(r.ownership.world_id, "w_private");
+  assert.equal(r.ownership.acquired_price_minor, 0);
+  assert.equal(r.ownership.test_mode, true);
+  assert.equal((await m.ownedBy("buyer")).length, 1, "and it is still listed for the acquirer");
+  assert.equal((await m.ownedBy("someone-else")).length, 0, "and only for them");
+  // Money stays dark through the whole flow.
+  assert.deepEqual(await m.assertDark(), { dark: true, problems: [] });
+});

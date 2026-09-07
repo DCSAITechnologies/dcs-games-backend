@@ -22,6 +22,38 @@ export const PLATFORM_BPS = 3000;    // 30%
 
 const id = (p) => p + "_" + crypto.randomBytes(6).toString("hex");
 
+/**
+ * What a test-mode acquisition actually gives you — which is a row, and nothing
+ * else. Stated here once and returned with every acquisition, because the word
+ * "ownership" invites a reader to assume more.
+ *
+ * Reproduced 7 Sep 2026 against a booted server, one run:
+ *   user-b POST /v3/marketplace/listings/lst_.../acquire -> 200
+ *          {"ownership":{"world_id":"w3_b3579c...","acquired_price_minor":0}}
+ *   user-b GET  /v3/marketplace/owned  -> 200, the row is there
+ *   user-b GET  /v3/worlds/w3_b3579c.../manifest -> 404 "world not found"
+ *
+ * market.ownedBy() is read by exactly one route in the estate,
+ * GET /v3/marketplace/owned. No permission check anywhere consults it: not the
+ * world repository, not discovery, not play, not the companion. So an
+ * acquisition entitles the acquirer to precisely nothing, and the response used
+ * to say "Ownership transferred at zero cost", which is a claim that something
+ * changed hands.
+ *
+ * The flow is still worth exercising — that is what building the marketplace
+ * dark is for — but a caller has to be able to tell an exercised flow from a
+ * transfer.
+ */
+const ACQUISITION_CONFERS = {
+  ownership_row: true,
+  listed_in: "GET /v3/marketplace/owned",
+  world_access: false,
+  play_access: false,
+  resale: false,
+  refund: false,
+  note: "A test-mode acquisition records an ownership row and nothing else. It does not grant access to the listed world — a private world stays 404 to the acquirer, and a published one was already readable by everybody — and no permission check in this service reads these rows. Nothing was transferred and no money moved.",
+};
+
 export function createMarketplaceService(env = process.env) {
   const dir = path.join(env.DCS_DATA_DIR || path.join(process.cwd(), ".dcs-data"), "marketplace");
   const mk = (name, table, primaryKey) => createCollection({ dir, name, table, primaryKey, env });
@@ -36,7 +68,13 @@ export function createMarketplaceService(env = process.env) {
 
   const svc = {
     dir,
-    describe: () => ({ ...describeCollections(collections), payments_live: paymentsLive() }),
+    describe: () => ({
+      ...describeCollections(collections),
+      payments_live: paymentsLive(),
+      // /health must not let a reader infer that acquiring something gives them
+      // it. It does not, and this says so where the rest of the honesty lives.
+      acquisition_confers: ACQUISITION_CONFERS,
+    }),
 
     // ------------------------------------------------------------ storefront
     async createStorefront(ownerId, { name, description = null, studioId = null }) {
@@ -123,7 +161,7 @@ export function createMarketplaceService(env = process.env) {
       if (l.seller_id === buyerId) throw Errors.validation("you already own what you listed");
 
       const already = await ownership.one((o) => o.owner_id === buyerId && o.listing_id === listingId);
-      if (already) return { ownership: already, ledger: null, idempotent: true, payments_live: paymentsLive() };
+      if (already) return { ownership: already, ledger: null, idempotent: true, payments_live: paymentsLive(), confers: ACQUISITION_CONFERS };
 
       if (paymentsLive()) {
         // Deliberately unreachable during the internal window. If payments are
@@ -150,7 +188,11 @@ export function createMarketplaceService(env = process.env) {
       };
       await ledger.insert(entry);
 
-      return { ownership: own, ledger: entry, payments_live: false, note: "Ownership transferred at zero cost. No money moved and none can." };
+      return {
+        ownership: own, ledger: entry, payments_live: false,
+        confers: ACQUISITION_CONFERS,
+        note: ACQUISITION_CONFERS.note,
+      };
     },
 
     async ownedBy(principalId) { return await ownership.find((o) => o.owner_id === principalId); },
