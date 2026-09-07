@@ -45,3 +45,44 @@ Only the final SHA should be treated as the banked state, and
 - B4 repair/finding gap closed structurally (8 orphan fixes, UNREPAIRABLE registry)
 - Staging deploy provenance (`deployment_id` verified before any deploy is claimed)
 - Phase 5 + 6: 42/42 real remote staging proofs — `reports/STAGING_PROOFS.md`
+
+
+---
+
+# Final board — 7 Sep 2026
+
+| Lane | Scope | Outcome |
+| --- | --- | --- |
+| Lead | staging, deploys, security, evidence | COMPLETE — 112 commits |
+| A | V2 closure / legacy | COMPLETE — 10 defects, 256→293 owned tests |
+| B | V3 world systems + B4 | COMPLETE — ~25 defects, 350→395 owned tests |
+| C | security / persistence | COMPLETE — 12 holes closed |
+| D | browser / a11y / perf | COMPLETE — 184→207 tests, 4 of 6 reds fixed in-sprint by E |
+| E | dashboard wiring | running at time of writing |
+| F | docs / cutover / release scripts | COMPLETE — 8 documents corrected, cutover + rollback written |
+| G | adversarial review of the Lead | COMPLETE — 13 findings in the Lead's own work, 3 blockers |
+
+## Final state
+
+- backend `9a8663b` on **both** remotes; working tree clean
+- frontend `2c32d0a` on origin (Lane E has work in flight)
+- staging serving `7564a14`, schema **v13**, payments dark, CORS allowlist, 0 alerts
+- **181 assertions against deployed infrastructure, 0 failures**
+- cold rebuild from banked SHAs: 9/11 steps, both failures being deliberate reds
+- rollback bundles re-cut AND restore-tested
+
+## The thing this board got right
+
+Ownership by file, and reviewing separated from writing. Lane G was given one
+job — review the Lead's own code — and found three blockers in work that had
+been written and self-reviewed the same day, including a consent gate that could
+be stepped around by choosing a different word for the same act. Nothing else in
+the arrangement would have caught those.
+
+## The thing it got wrong
+
+All lanes pushed to `origin`, and the private mirror silently fell behind. Every
+push reported success; both remotes existed; the branch names matched. Only the
+cold rebuild — the one step that reads from the banked copy rather than the
+working one — noticed. See §18 of the closure report: the sprint branch is on
+the PUBLIC repository and that needs a founder decision.
