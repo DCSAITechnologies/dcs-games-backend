@@ -169,7 +169,19 @@ jobs:
           # Pinned. An unpinned branch means a CI-equivalent rebuild is not
           # reproducible: the netcode the pipeline tested yesterday is not
           # necessarily the netcode it tests today, and nothing records which.
-          ref: 524a7f61c37313a2437c54f8dae7d9f0daf5424d
+          #
+          # The previous pin, 524a7f61c373…, exists on NO ref in that repository
+          # — `git fetch` answers "upload-pack: not our ref". So this job could
+          # never check out and the anti-cheat gate has never actually run. It
+          # failed loudly rather than silently, which is the right failure mode,
+          # but the effect was the same as the sibling-directory check it
+          # replaced: no anti-cheat evidence.
+          #
+          # Verified 7 Sep 2026: this SHA is HEAD of main and its suite is green
+          # — 186 checks, 0 failures, including the speedhack regression
+          # (gross speedhack rejected, snapped to origin, exactly-at-limit
+          # accepted).
+          ref: 49f103531b6701b64afe03bf89a4615442e9aef3
           path: netcode
       - name: Speedhack regression must stay closed
         run: |
