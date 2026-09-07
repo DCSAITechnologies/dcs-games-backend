@@ -24,6 +24,7 @@ import { hashString } from "../providers/local-planner.mjs";
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const num = (v, d = 0) => (typeof v === "number" && isFinite(v) ? v : d);
+const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const slug = (s, fallback) => {
   const t = String(s ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   return t || fallback;
@@ -130,7 +131,7 @@ export function createAssemblyRouter(env = process.env) {
       });
 
       // ---- compose ------------------------------------------------------
-      const manifest = compose({ req, plan, meta, spatial, assets: assetResult.assets, gameplay, seed, provenance });
+      const manifest = compose({ req, plan, meta, spatial, assets: assetResult.assets, gameplay, seed, provenance, degraded });
 
       // ---- 6. media (optional, never blocking) ---------------------------
       if (req.media) {
@@ -184,7 +185,7 @@ export function createAssemblyRouter(env = process.env) {
 // rather than guessed at — a dangling reference must reach the B4 critic as a
 // missing feature, never as an invented one.
 
-function compose({ req, plan, meta, spatial, assets, gameplay, seed, provenance }) {
+function compose({ req, plan, meta, spatial, assets, gameplay, seed, provenance, degraded = [] }) {
   const m = emptyManifest({
     worldId: req.worldId,
     title: plan.title || "Untitled World",
@@ -215,9 +216,24 @@ function compose({ req, plan, meta, spatial, assets, gameplay, seed, provenance 
     palette: plan.palette || null,
   };
 
-  m.terrain = spatial.terrain;
-  m.physics = { ...m.physics, ...(spatial.physics || {}) };
-  m.navigation = spatial.navigation;
+  // A lane's answer is composed in, never installed wholesale.
+  //
+  // These three took whatever the spatial lane returned, so a provider that
+  // answered without a terrain wrote `undefined` into the manifest and the
+  // world came out with no ground at all — invalid, and rejected downstream for
+  // "terrain is required" rather than for the provider that caused it. Both
+  // spatial adapters do check their own responses today; this is the router
+  // holding to its own rule, which is that the manifest does not change shape
+  // when a vendor does. The empty manifest's flat default is what a world
+  // without terrain data honestly is.
+  const usableTerrain = isObj(spatial?.terrain)
+    && isObj(spatial.terrain.size)
+    && num(spatial.terrain.size.w, 0) > 0
+    && num(spatial.terrain.size.h, 0) > 0;
+  if (usableTerrain) m.terrain = spatial.terrain;
+  else degraded.push({ lane: LANES.SPATIAL, provider: "terrain", reason: "the spatial lane returned no usable terrain; the world keeps its flat default" });
+  m.physics = { ...m.physics, ...(isObj(spatial?.physics) ? spatial.physics : {}) };
+  if (isObj(spatial?.navigation)) m.navigation = spatial.navigation;
 
   // ---- zones ---------------------------------------------------------------
   const zoneById = new Map();
@@ -263,8 +279,14 @@ function compose({ req, plan, meta, spatial, assets, gameplay, seed, provenance 
   const pickZone = (id, i) => zoneById.get(slug(id, "")) || m.zones[i % m.zones.length];
 
   // ---- assets --------------------------------------------------------------
+  // Only rows that are actually assets. `for (const a of assets || [])` iterates
+  // a string one CHARACTER at a time, so an asset lane answering
+  // `{"assets": "none"}` composed four id-less entries into the manifest and the
+  // schema rejected the world for `assets[0].id is required`.
   const assetById = new Map();
-  for (const a of assets || []) if (!assetById.has(a.id)) assetById.set(a.id, a);
+  for (const a of Array.isArray(assets) ? assets : []) {
+    if (isObj(a) && typeof a.id === "string" && a.id && !assetById.has(a.id)) assetById.set(a.id, a);
+  }
   m.assets = Array.from(assetById.values());
 
   const assetFor = (archetype, kindHint) => {
@@ -276,10 +298,12 @@ function compose({ req, plan, meta, spatial, assets, gameplay, seed, provenance 
 
   // ---- structures ----------------------------------------------------------
   const structById = new Map();
+  const structIdsSeen = new Set();
   m.structures = (plan.structures || []).map((s, i) => {
     const zone = pickZone(s.zone, i);
     const id = slug(s.id, `struct_${i}`);
-    if (structById.has(id)) return null;
+    if (structIdsSeen.has(id)) return null;
+    structIdsSeen.add(id);
     const fp = s.footprint || { w: 8, d: 8, h: 6 };
     const ref = assetFor(s.archetype, "building");
     const st = {
@@ -296,16 +320,28 @@ function compose({ req, plan, meta, spatial, assets, gameplay, seed, provenance 
       portals: [],
       owner_id: null,
     };
-    structById.set(id, st);
     return st;
   }).filter((s) => s && s.asset_ref);
+  // Indexed AFTER the filter, not during the map.
+  //
+  // These maps are what `resolves()` consults to decide whether a quest step or
+  // an interaction points at something real, and they used to be filled inside
+  // the map — before the `.filter(asset_ref)` on the next line removed every
+  // entity the asset lane could not supply a model for. So a partially failing
+  // 3D provider dropped an NPC from the manifest while `resolves()` went on
+  // saying it existed, and the quests aimed at it survived as dangling
+  // references: a manifest the schema rejects, produced by the composer whose
+  // stated rule is that an unresolved reference is DROPPED rather than guessed.
+  for (const st of m.structures) structById.set(st.id, st);
 
   // ---- npcs ----------------------------------------------------------------
   const npcById = new Map();
+  const npcIdsSeen = new Set();
   m.npcs = (plan.npcs || []).map((n, i) => {
     const zone = pickZone(n.zone, i);
     const id = slug(n.id, `npc_${i}`);
-    if (npcById.has(id)) return null;
+    if (npcIdsSeen.has(id)) return null;
+    npcIdsSeen.add(id);
     const npc = {
       id, name: n.name || id, role: n.role || null, zone: zone.id,
       spawn: inZone(n.position || n.spawn, zone),
@@ -314,19 +350,21 @@ function compose({ req, plan, meta, spatial, assets, gameplay, seed, provenance 
       dialogue: { seed: n.dialogue_seed || null, lines: [] },
       schedule: [], faction: null, stats: null,
     };
-    npcById.set(id, npc);
     return npc;
   }).filter((n) => n && n.asset_ref);
+  for (const npc of m.npcs) npcById.set(npc.id, npc);
 
   // ---- items ---------------------------------------------------------------
   const itemById = new Map();
+  const itemIdsSeen = new Set();
   m.items = (plan.items || []).map((it, i) => {
     const id = slug(it.id, `item_${i}`);
-    if (itemById.has(id)) return null;
+    if (itemIdsSeen.has(id)) return null;
+    itemIdsSeen.add(id);
     const item = { id, name: it.name || id, kind: it.kind || "misc", asset_ref: assetFor(it.kind, "prop"), stackable: false, effects: [] };
-    itemById.set(id, item);
     return item;
   }).filter((it) => it && it.asset_ref);
+  for (const item of m.items) itemById.set(item.id, item);
 
   const resolves = (ref) => {
     const r = slug(ref, "");

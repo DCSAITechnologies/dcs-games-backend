@@ -485,3 +485,64 @@ test("B1 GATE: a repeated id from a provider becomes one entity, not an invalid 
   assert.equal(m.zones.filter((z) => z.id === "same").length, 1);
   assert.equal(m.structures.filter((s) => s.id === "same").length, 1);
 });
+
+test("B1 GATE: a lane that answers badly degrades the world, it does not invalidate it", async () => {
+  // The router is the parent-owned chokepoint, and its rule is that the manifest
+  // does not change shape when a vendor does. Two ways it did:
+  //
+  //   - `m.terrain = spatial.terrain` installed whatever the lane returned, so a
+  //     provider answering without a terrain wrote `undefined` into the manifest
+  //     and the world came out with no ground at all.
+  //
+  //   - `npcById` / `structById` / `itemById` were filled INSIDE the map, before
+  //     the `.filter(asset_ref)` on the next line removed every entity the asset
+  //     lane could not supply a model for. `resolves()` consults those maps to
+  //     decide whether a quest step points at something real, so a partially
+  //     failing 3D provider dropped an NPC from the manifest while `resolves()`
+  //     went on saying it existed — and the quests aimed at it survived as
+  //     dangling references, in the composer whose stated rule is that an
+  //     unresolved reference is DROPPED rather than guessed at.
+  const badLanes = {
+    [LANES.SPATIAL]: {
+      "no terrain at all": { navigation: { links: [], walkable_zones: [] } },
+      "terrain is a string": { terrain: "flat", navigation: {} },
+      "terrain with no size": { terrain: { kind: "heightmap", data: [[0]] } },
+      "terrain of no extent": { terrain: { kind: "flat", size: { w: 0, h: 0 } } },
+    },
+    [LANES.ASSET_3D]: {
+      "no assets at all": {},
+      "assets is not a list": { assets: "none" },
+      "assets are null": { assets: [null, null] },
+    },
+  };
+
+  for (const [lane, cases] of Object.entries(badLanes)) {
+    for (const [label, value] of Object.entries(cases)) {
+      const r = router();
+      r.lanes[lane].adapters = [
+        {
+          name: "answers-badly", lane, rank: -1, isFallback: false, model: null,
+          async status() { return STATUS.AVAILABLE; },
+          async invoke() { return structuredClone(value); },
+        },
+        ...r.lanes[lane].adapters,
+      ];
+      const out = await r.assemble({ prompt: "a port town", worldId: "w_bad", creatorId: "u1", seed: 1 });
+      const v = validateManifest(out.manifest);
+      assert.ok(v.ok, `${lane} / ${label}: ${JSON.stringify(v.errors.slice(0, 3))}`);
+      // A world always has ground to stand on.
+      assert.ok(out.manifest.terrain?.size?.w > 0 && out.manifest.terrain?.size?.h > 0, `${lane} / ${label}: no terrain`);
+      // And nothing in it points at something that is not there.
+      const ids = new Set([...out.manifest.zones, ...out.manifest.structures, ...out.manifest.npcs, ...(out.manifest.items || [])].map((x) => x.id));
+      for (const q of out.manifest.quests) {
+        if (q.giver_npc) assert.ok(out.manifest.npcs.some((n) => n.id === q.giver_npc), `${lane} / ${label}: quest ${q.id} has a giver that is gone`);
+        for (const st of q.steps) {
+          if (st.target) assert.ok(ids.has(st.target), `${lane} / ${label}: quest step ${st.id} targets '${st.target}', which is not in the world`);
+        }
+      }
+      for (const x of out.manifest.interactions) {
+        assert.ok(ids.has(x.target_ref), `${lane} / ${label}: interaction ${x.id} targets '${x.target_ref}', which is not in the world`);
+      }
+    }
+  }
+});
