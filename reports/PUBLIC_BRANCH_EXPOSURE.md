@@ -1,15 +1,93 @@
-# The public branch — verification, the safe removal, and what cannot be undone
+# The public branch — DELETED 7 Sep 2026
 
-`sprint/2026-09-canonical` exists on **both** the public backend repository and
-the private mirror.
+**`sprint/2026-09-canonical` has been deleted from the PUBLIC backend
+repository**, on founder authorisation. The private mirror is untouched and
+holds the complete history.
 
-    origin  github.com/DCSAITechnologies/dcs-games-backend                 PUBLIC
-    bank    github.com/DCSAITechnologies/dcs-games-backend-sprint-sep2026  PRIVATE
+    origin  github.com/DCSAITechnologies/dcs-games-backend                 PUBLIC   branch REMOVED
+    bank    github.com/DCSAITechnologies/dcs-games-backend-sprint-sep2026  PRIVATE  branch INTACT
 
-**Nothing here has been deleted.** The founder controls that decision and it has
-not been authorised. What follows is the preparation.
+## What was done
+
+    git push origin --delete sprint/2026-09-canonical
+
+behind a pre-flight that refused unless the private mirror already contained the
+public tip. No history was rewritten, no tag was deleted, no force-push was
+used, `main` and `recovery/prod-schema-lineage` were not touched.
+
+## Verified afterwards
+
+| check | result |
+| --- | --- |
+| `sprint/2026-09-canonical` on public origin | **absent** |
+| public `main` | `e979d87b26c1`, unchanged |
+| public `recovery/prod-schema-lineage` | `9937f2247c45`, unchanged |
+| private mirror branch | present, 207 commits |
+| checkpoint tag `DCS_GAMES_V3_CHECKPOINT_07SEP2026` | on the mirror; never on public |
+| frontend repo | `03e8e1f`, private, untouched |
+| netcode repo | pinned `49f10353`, not modified |
+| staging deployment | unchanged by the deletion |
+| Supabase migrations | none run; ledger still at v13 |
+| payments | dark |
+| local branches and tags | unchanged |
+
+## One thing that happened and is worth recording
+
+After the first deletion, a routine `git push origin HEAD` **recreated the
+branch**, because the local branch still tracked the public remote. It was
+deleted again, and the branch's upstream now points at the PRIVATE mirror
+(`bank/sprint/2026-09-canonical`), so an unqualified push goes to the private
+copy rather than re-publishing.
+
+That is worth stating plainly rather than quietly correcting: a deletion is not
+self-sustaining while the tooling still points at the thing deleted.
+
+## What this does NOT do — no cryptographic erasure is claimed
+
+Deleting the branch reduces **current public discoverability**. It does not
+retract anything already taken:
+
+1. **A clone or fetch already made is a complete copy of the history.** Nothing
+   on GitHub's side reaches into it.
+2. **Unreferenced objects can stay reachable by SHA on GitHub for a period**
+   after the ref is gone. A recorded commit URL may keep resolving. Only GitHub
+   Support can force immediate garbage collection, and that must be requested
+   explicitly.
+3. **Forks keep the objects.** They share the repository network.
+4. **Search engines, code-scanning services and archival mirrors may have
+   indexed it.** Deletion issues no retraction to any of them.
+5. **Pull-request refs (`refs/pull/*`) are not removed with a branch.** GitHub
+   offered a PR on every push to this branch; if one was opened its head ref
+   persists independently.
+
+**Treat every vulnerability reproduction that was on that branch as already
+disclosed.** The deletion stops the exposure growing; it is not a reason to slow
+the production cutover, because the reproductions describe defects that are
+FIXED in this branch and still live in the production build. Shipping the fixes
+is what closes the exposure.
+
+## What was exposed while it was public
+
+    178 commits ahead of public main
+    8   test files carrying working vulnerability reproductions
+        (security-regression, route-authz, supabase-paths, lead-review*)
+    6   commit subjects naming a security defect in their first line
+
+Not exposed: the private mirror, the checkpoint tag, the frontend repository
+(private), any secret — the secret scan reads CLEAN across 189 files, and no
+service-role key, anon key or production project ref appears in the branch.
+
+## Restoring it, if that is ever wanted
+
+    git push origin HEAD:refs/heads/sprint/2026-09-canonical
+
+The branch is recreated from the local checkout, which is identical to the
+mirror. Deletion is reversible on the remote; what already left the remote is
+not.
 
 ---
+
+# Appendix — the pre-deletion safety proof
 
 ## 1. The private mirror holds the complete history — verified
 
