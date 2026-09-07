@@ -59,18 +59,31 @@ A clone from the backend bundle produced branch `sprint/2026-09-canonical` at
 | | count |
 | --- | --- |
 | tests | **1392** |
-| pass | **1377** |
-| **fail** | **5 — every one a deliberate red naming an open defect, see §13** |
+| pass | **1380** |
+| **fail** | **2** |
 | skipped | 10 |
 
 **Zero unintended skips.** All ten share one conditional cause — the CW5 engine
 is TypeScript with parameter properties, which plain `node --test` cannot load —
-and all ten run under `tsx --test`: **33 tests, 33 pass, 0 skipped**. The skip is
-conditional on the loader, never on the outcome.
+and all ten run under `tsx --test`: 33 tests, 33 pass, 0 skipped. Conditional on
+the loader, never on the outcome.
 
-The five failures are not incidental. Each was written this session to name a
-defect that is still open, with the page, selector or measurement in the
-assertion message. They are red on purpose and they survive the handover.
+**Both remaining failures are the same defect, measured two ways**:
+`FileWorldStore.list()` considers every record in the directory to serve a
+24-card page, and `/v3/discover` calls it on every request. Measured: 8 worlds
+1.41ms, 64 worlds 6.49ms — 4.6x cost for 8x catalogue, down from ~5.9x after the
+reads were parallelised, because parallelism moves the constant and not the
+complexity. The Supabase path pushes `limit` and `order` to PostgREST and does
+not have this shape, and staging reports `supabase+file`.
+
+**Why it is left open rather than fixed at the end of the session.** The real
+fix is an index, and an index on the world store is a cache that can drift. A
+stale entry that hides a published world from `listPublished` is worse than a
+slow listing, and this is the most safety-critical persistence path in the
+estate — one an entire lane spent the session hardening. Introducing that in the
+last hour, after which nobody would review it, is how a performance fix becomes
+a correctness defect. It is measured, named by a red test, and the next action
+is written down.
 
 ## 4. Staging deployment state
 
@@ -651,3 +664,22 @@ push reported success, both remotes existed, and the branch name matched on
 both. The cold rebuild is the only thing in the estate that reads from the
 banked copy rather than the working one, which is precisely why it is worth
 running. Both remotes are now in sync.
+
+
+---
+
+## 21. A method note worth keeping
+
+`estateSweep()` in the browser suite caches into a module-level `_estate` on
+first call. Running that file with `--test-name-pattern` therefore populates the
+cache from whichever tests matched, and a later test reads a sweep taken under
+different conditions — so **the filtered run gives a different and rosier answer
+than running the file**. ESTATE CONTRAST passed cleanly on its own and failed in
+the full run, twice, on different pages.
+
+That is a test which lies specifically when you are trying to go faster, which
+is exactly when it is believed. **Whoever scripts the release gate must run the
+file, never a pattern.**
+
+It cost a lane an hour to find, and it is recorded here so it costs nobody else
+one.
