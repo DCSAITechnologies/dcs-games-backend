@@ -112,18 +112,48 @@ test("PUBLISH GATE: an unclaimed world id is not a way in", async () => {
   }
 });
 
-test("PUBLISH GATE: an ordinary save does not silently unpublish a published world", async () => {
+test("PUBLISH GATE: a save on a PUBLISHED world returns it to draft, and says so", async () => {
+  // This test used to assert the opposite, and the opposite was wrong.
+  //
+  // Publishing signs an Atlas receipt over a SPECIFIC manifest. Preserving
+  // `published` across a save leaves that receipt attesting to content that is
+  // no longer there — an unreviewed content swap on a live, badged world, with
+  // no publish authorisation and no new signature. Dropping back to draft is
+  // the honest outcome: the world leaves the catalogue until it is published
+  // again, which re-signs it.
   const { worldId, manifest } = await validManifest();
-  const p = await call(TESTER, "POST", `/worlds/${worldId}/publish`, {});
-  assert.equal(p.status, 200, JSON.stringify(await p.json()).slice(0, 250));
+  assert.equal((await call(TESTER, "POST", `/worlds/${worldId}/publish`, {})).status, 200);
 
   const edited = structuredClone(manifest);
   edited.meta.title = "Harbour, revised";
   const s = await call(TESTER, "POST", `/worlds/${worldId}/save`, { manifest: edited });
-  assert.equal(s.status, 200, JSON.stringify(await s.json()).slice(0, 250));
+  const sb = await s.json();
+  assert.equal(s.status, 200, JSON.stringify(sb).slice(0, 250));
+  assert.equal(sb.state, "draft");
+  assert.equal(sb.unpublished, true, "the caller must be told the world left the catalogue");
+  assert.match(sb.unpublished_reason, /receipt/, "and why — the signature no longer describes the content");
 
   const after = await (await call(TESTER, "GET", `/worlds/${worldId}/load`)).json();
-  assert.equal(after.state, "published", "saving an edit must not revert the world to a draft");
+  assert.equal(after.state, "draft");
+  const pub = await (await call(null, "GET", "/api/public/worlds")).json();
+  assert.ok(!JSON.stringify(pub).includes(worldId), "and it is out of the public catalogue");
+});
+
+test("PUBLISH GATE: a save cannot forge the verification badge", async () => {
+  // meta.atlas_signed is rendered directly as the verification badge, and
+  // atlas_receipt_hash is served to anonymous readers. A caller could publish,
+  // then save a manifest claiming any hash it liked and keep the badge.
+  const { worldId, manifest } = await validManifest();
+  const forged = structuredClone(manifest);
+  forged.meta.atlas_signed = true;
+  forged.meta.atlas_receipt_hash = "deadbeefdeadbeefdeadbeefdeadbeef";
+
+  assert.equal((await call(TESTER, "POST", `/worlds/${worldId}/save`, { manifest: forged })).status, 200);
+  const back = await (await call(TESTER, "GET", `/v3/worlds/${worldId}/manifest`)).json();
+  assert.notEqual(back.manifest.meta.atlas_receipt_hash, "deadbeefdeadbeefdeadbeefdeadbeef",
+    "a caller-supplied receipt hash must never be stored");
+  assert.notEqual(back.manifest.meta.atlas_signed, true,
+    "and a caller must not be able to assert that the world is signed");
 });
 
 test("PUBLISH GATE: a V2 manifest still saves — this is the V2 route", async () => {

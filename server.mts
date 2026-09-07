@@ -1553,9 +1553,24 @@ const server = http.createServer(async (req, res) => {
         const rec = await repo.get(mm[1], { requesterId: me.id, requireOwner: true });
         const { manifest } = ensureV3(rec.manifest, { worldVersion: rec.version, creatorId: rec.owner_id });
 
-        // A5 gate: voice and likeness need a recorded, unrevoked consent grant.
-        // Fully synthetic material is exempt; anything tied to a real person is not.
-        if (kind === "voice" || kind === "narration" || kind === "avatar") {
+        // A5 gate. It keys on WHETHER A SUBJECT IS NAMED, not on a list of words.
+        //
+        // It used to gate `voice|narration|avatar` only. MEDIA_KINDS is
+        // [voice, likeness, avatar, name, performance] and /health publishes
+        // that list, so `kind:"likeness"` with subject_id naming another
+        // principal returned 200 while the identical request as "voice"
+        // returned 403 — and `kind:"image"` was ungated too, and stores the
+        // asset IN THE WORLD. subject_id is forwarded to the provider for every
+        // kind regardless. A consent gate that can be stepped around by
+        // choosing a different word for the same act is not a gate.
+        //
+        // So: any request that names a subject needs consent, whatever it calls
+        // itself; and the kinds that are inherently about a person need it even
+        // when the subject is left implicit, because "no subject_id" on a voice
+        // clone means the CALLER, not nobody.
+        const namesASubject = b.subject_id != null && String(b.subject_id).trim() !== "";
+        const inherentlyPersonal = new Set(["voice", "narration", "avatar", "likeness", "name", "performance"]);
+        if (namesASubject || inherentlyPersonal.has(kind)) {
           await safety.requireCapability(me.id, "voice");
 
           // The source is NOT taken on trust, and it does not default to the
@@ -1580,7 +1595,12 @@ const server = http.createServer(async (req, res) => {
           }
           await safety.requireMediaConsent({
             subjectId: named ?? me.id,
-            mediaKind: kind === "narration" ? "voice" : kind,
+            // Map to the recorded consent kinds. An unrecognised kind that names
+            // a subject is treated as a LIKENESS rather than waved through —
+            // the safe reading of an unknown word about a real person.
+            mediaKind: kind === "narration" ? "voice"
+              : (kind === "voice" || kind === "avatar" || kind === "likeness" || kind === "name" || kind === "performance") ? kind
+              : "likeness",
             // Absent means unknown, and unknown is not exempt.
             source: b.source === "synthetic" ? "synthetic" : (b.source || "unknown"),
           });
@@ -2078,8 +2098,43 @@ const server = http.createServer(async (req, res) => {
           throw Errors.validation("manifest must be an object", { correlationId: cid });
         }
         const prior = await repo.get(m[1], { requesterId: me.id }).catch(() => null);
-        const saved = await repo.upsert({ worldId: m[1], ownerId: me.id, manifest: b.manifest, state: prior?.state || "draft", expected_version: b.expected_version ?? null });
-        return send(res, 200, { ok: true, world_id: m[1], world_version: saved.version, manifest_hash: saved.manifest_hash, idempotent: saved.idempotent, persistence_degraded: saved._mirrored === false ? saved._mirror_error : undefined, correlation_id: cid });
+
+        // A save to a PUBLISHED world returns it to draft, and says so.
+        //
+        // Preserving `published` looked like the smaller change than the old
+        // `|| "draft"`, and was worse. Publishing signs an Atlas receipt over a
+        // specific manifest; swapping the manifest underneath while the world
+        // stays published leaves the receipt attesting to content that is no
+        // longer there — an unreviewed content swap on a live, badged world,
+        // with no publish authorisation and no new signature. Dropping to draft
+        // is the honest outcome: the world leaves the catalogue until it is
+        // published again, which re-signs it.
+        const wasPublished = prior?.state === "published";
+
+        // The trust fields are the PUBLISH route's to write, never the
+        // caller's. `meta.atlas_signed` is rendered directly as the
+        // verification badge by /v3/discover, and `atlas_receipt_hash` is
+        // served to anonymous readers — so a caller could publish, then save a
+        // manifest claiming any receipt hash it liked and keep the badge.
+        const incoming = { ...b.manifest, meta: { ...(b.manifest.meta || {}) } };
+        delete incoming.meta.atlas_signed;
+        delete incoming.meta.atlas_receipt_hash;
+        if (prior?.manifest?.meta && !wasPublished) {
+          // A draft keeps whatever it legitimately had; only a live badge is at
+          // stake, and a draft carries none.
+        }
+
+        const saved = await repo.upsert({ worldId: m[1], ownerId: me.id, manifest: incoming, state: "draft", expected_version: b.expected_version ?? null });
+        return send(res, 200, {
+          ok: true, world_id: m[1], world_version: saved.version, manifest_hash: saved.manifest_hash,
+          idempotent: saved.idempotent, state: "draft",
+          unpublished: wasPublished || undefined,
+          unpublished_reason: wasPublished
+            ? "the published Atlas receipt attested to the previous manifest, so this world returned to draft; publish again to re-sign it"
+            : undefined,
+          persistence_degraded: saved._mirrored === false ? saved._mirror_error : undefined,
+          correlation_id: cid,
+        });
       }
       // The runtime-delta path. Two things must be true and neither was checked:
       // the caller must be allowed to shape THIS world, and the delta must only
