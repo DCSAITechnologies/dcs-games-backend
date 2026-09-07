@@ -62,3 +62,46 @@ export function requireChrome(findChrome) {
     "  Or set DCS_ALLOW_MISSING_SITE=1 to skip the browser suites deliberately."
   );
 }
+
+// --------------------------------------------------------- the deployed site
+//
+// A static server in front of a checkout proves the markup. It cannot prove the
+// DEPLOYMENT: which backend the deployed hostname resolves to, whether the API
+// accepts that origin, or which build is answering. Those are only true of a
+// real deploy, and the preview is where they can be asked before production.
+const DEFAULT_PREVIEW = "https://sprint-preview-07sep2026.dcs-games.pages.dev";
+
+/**
+ * The deployed preview to test against. Override with DCS_PREVIEW_URL.
+ *
+ * Same doctrine as resolveSite: a suite that cannot reach what it tests must
+ * FAIL and say what is missing, not pass having measured nothing. The opt-out
+ * is the same single flag — DCS_ALLOW_MISSING_SITE=1 means "this checkout has
+ * no access to the estate", and a network it cannot reach is that.
+ */
+export function resolvePreview() {
+  return (process.env.DCS_PREVIEW_URL || DEFAULT_PREVIEW).replace(/\/$/, "");
+}
+
+/** Reach the preview once, so every test can say the same thing about it. */
+export async function reachPreview(url, { timeoutMs = 20000 } = {}) {
+  try {
+    const r = await fetch(url + "/", { signal: AbortSignal.timeout(timeoutMs) });
+    if (!r.ok) return { ok: false, why: `${url}/ answered HTTP ${r.status}` };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, why: `${url}/ could not be reached: ${e && e.message ? e.message : e}` };
+  }
+}
+
+/** Fail loudly unless the operator said, by name, that there is no network. */
+export function requirePreview(reach, url) {
+  if (reach.ok) return true;
+  if (process.env.DCS_ALLOW_MISSING_SITE === "1") return false;
+  throw new Error(
+    `The deployed preview could not be reached, so the deployment cannot be tested.\n` +
+    `  ${reach.why}\n` +
+    `  Set DCS_PREVIEW_URL to the current preview, or DCS_ALLOW_MISSING_SITE=1 to run\n` +
+    `  without the estate — which is then a decision somebody made, not an accident.`
+  );
+}

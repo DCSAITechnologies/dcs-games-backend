@@ -683,21 +683,48 @@ test("A11Y: the way out of a locked page is readable and hittable", opts, async 
   // The internal gate replaces the whole document and offers exactly one action.
   // It measured 3.14:1 at 14px and was 145x17 — a person who cannot read or hit
   // the way out of a locked page has been locked out twice.
+  //
+  // THIS TEST USED TO ASSERT NOTHING AT ALL, for two compounding reasons, both
+  // measured on 7 Sep 2026:
+  //
+  //   - it called `DCSTruth.renderInternalGate`, which has never existed. The
+  //     gate is rendered by a private showGate() reached through the exported
+  //     DCSTruth.requireInternalTester(), so the ternary took its null branch
+  //     and no gate was ever put on the page.
+  //   - and the evaluated snippet ended in a bare expression rather than a
+  //     `return`, so Page.eval — which wraps the source in an async function —
+  //     handed back `undefined` whatever happened. `if (!gate) return;` then
+  //     bailed out on EVERY run, and a test that had never once reached an
+  //     assertion reported green for as long as it had existed.
+  //
+  // So it now drives the real entry point against the real refusal: the stub
+  // answers /v3/subscriptions/grants with a 404, which is what
+  // requireInternalTester() treats as "not an internal tester", and the gate
+  // that appears is the one a locked-out person actually sees. No conditional
+  // is left in the test: if the gate does not render, that is a failure.
   await page.goto(site.url + "/create-v3.html", { waitMs: 300 });
   const gate = await page.eval(`
-    document.body.innerHTML = "";
-    window.DCSTruth.renderInternalGate
-      ? DCSTruth.renderInternalGate(document.body, { status: 403, body: { error: "not_an_internal_tester" } })
-      : null;
-    !!document.querySelector(".dcs-gate a, a[href='/']");
-  `).catch(() => false);
-  if (!gate) return;                     // the gate is rendered another way; the page tests still cover it
-  const rows = await page.eval(`${HELPERS} return _scanText();`);
-  assert.deepEqual(belowMinimum(rows), [], "the gate's own text must be readable");
-  const box = await page.eval(`
-    const a = document.querySelector("a[href='/']");
-    const r = a && a.getBoundingClientRect();
-    r ? { w: Math.round(r.width), h: Math.round(r.height) } : null;
+    if (!window.DCSTruth || typeof DCSTruth.requireInternalTester !== "function") {
+      return { error: "DCSTruth.requireInternalTester is not exported; the gate has no entry point" };
+    }
+    const allowed = await DCSTruth.requireInternalTester("The world builder");
+    const panel = document.querySelector(".dcs-gate");
+    const exits = Array.prototype.map.call(document.querySelectorAll(".dcs-gate a"), function (a) {
+      const r = a.getBoundingClientRect();
+      return { href: a.getAttribute("href"), text: (a.innerText || "").trim(), w: Math.round(r.width), h: Math.round(r.height) };
+    });
+    return { error: null, allowed: allowed, rendered: !!panel, heading: panel ? (panel.querySelector("h1") || {}).innerText : null, exits: exits };
   `);
-  if (box) assert.ok(box.h >= 44, `the gate's only action must be hittable, got ${box.w}x${box.h}`);
+  assert.equal(gate.error, null, gate.error || "");
+  assert.equal(gate.allowed, false, "a refused grants check must not report the caller as an internal tester");
+  assert.ok(gate.rendered, "a refused internal-tester check must render the gate, not leave the surface open");
+  assert.match(String(gate.heading), /internal tester/i, `the gate must say why it is closed, got ${JSON.stringify(gate.heading)}`);
+
+  const rows = await page.eval(`${HELPERS} return _scanText();`);
+  assert.ok(rows.length >= 4, `the gate's own text must be measurable, got ${rows.length} pieces`);
+  assert.deepEqual(belowMinimum(rows), [], "the gate's own text must be readable");
+
+  assert.ok(gate.exits.length >= 1, "a locked page must offer at least one way out");
+  const small = gate.exits.filter((e) => e.h < 44);
+  assert.deepEqual(small, [], `the gate's only action must be hittable: ${JSON.stringify(gate.exits)}`);
 });

@@ -185,6 +185,7 @@ export class Page {
   }
   async goto(url, { waitMs = 900 } = {}) {
     this.consoleLogs = []; this.pageErrors = []; this.requestFailures = []; this.responses = [];
+    this._urls = new Map();
     const loaded = new Promise((resolve) => {
       const h = (ev) => {
         const m = JSON.parse(ev.data);
@@ -220,6 +221,15 @@ export class Page {
     fs.writeFileSync(file, Buffer.from(r.data, "base64"));
     return file;
   }
+  /**
+   * Every URL the page ASKED for since the last navigation, whether or not it
+   * answered. `responses` only holds requests that came back, so a request to a
+   * host that is refused, blocked by CORS or simply never answers is invisible
+   * there — which is exactly the request you most want to see when the question
+   * is "did this page talk to production?".
+   */
+  requestedUrls() { return this._urls ? Array.from(this._urls.values()) : []; }
+
   /** Errors that indicate a genuinely broken page, ignoring expected offline API calls. */
   realErrors(ignore = []) {
     const pats = [/favicon/i, /fonts\.g(oogleapis|static)/i, ...ignore];
