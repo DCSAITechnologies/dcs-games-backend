@@ -1,3 +1,22 @@
+# Staging proofs — final run
+
+All six suites re-run against deployment `41ff8b0e-57ab-472f-8a41-e38c91f600d2`,
+commit `7564a14c70d173ddc716bb2db41b99c484f70655`, **schema v13**:
+
+| Suite | Result |
+| --- | --- |
+| V3 flagship + persistence | **42 / 42** |
+| V2 surface | **20 / 20** |
+| Atlas provenance, verified trustlessly | **16 / 16** |
+| Remote security posture | **35 / 35** |
+| Concurrency under load (36 writers) | **26 / 26** |
+| Frontend to staging, in a real browser | **42 / 42** |
+| Netcode anti-cheat | **186 checks, 0 fail** |
+
+**181 assertions against deployed infrastructure, 0 failures.**
+
+---
+
 # Staging proofs — real remote infrastructure
 
 Produced by `scripts/staging-proofs.mjs` against the deployed Railway staging
