@@ -306,6 +306,21 @@ export function repair(manifest, findings, { liveState = null } = {}) {
     return true;
   };
 
+  /**
+   * Targets that already have a LIVE interaction on them.
+   *
+   * An interaction whose behaviour does not exist wires nothing — it is a dead
+   * edge that the consistency pass is about to remove. Counting it as wiring
+   * was how clearing a world's behaviours became unrepairable: `add_behaviors`
+   * built the behaviours, saw every NPC and structure already "wired" by the
+   * stale interactions, connected none of them, and then the consistency pass
+   * removed the stale interactions — leaving behaviours nothing triggers.
+   */
+  const liveWired = () => {
+    const have = new Set((m.behaviors || []).map((b) => b.id));
+    return new Set((m.interactions || []).filter((i) => have.has(i.behavior_ref)).map((i) => i.target_ref));
+  };
+
   /** Items some behaviour already grants — the same test validateQuests uses. */
   const obtainableItems = () => {
     const out = new Set();
@@ -479,7 +494,7 @@ export function repair(manifest, findings, { liveState = null } = {}) {
         // fabrication this gate exists to catch.
         m.behaviors = m.behaviors || [];
         m.interactions = m.interactions || [];
-        const wired = new Set(m.interactions.map((i) => i.target_ref));
+        const wired = liveWired();
         const mute = [];
         let added = 0;
         for (const npc of m.npcs || []) {
@@ -527,6 +542,28 @@ export function repair(manifest, findings, { liveState = null } = {}) {
       }
       case "wire_or_drop": {
         if (held.has(f.where)) { skipped.push({ ...f, why: heldNote(f.where) }); break; }
+        // Two findings share this fix and they mean different things, so only
+        // one of them can go stale.
+        //
+        // `orphan_behavior` says "nothing triggers it". Every finding in a batch
+        // is written against the manifest as it was before any of them ran, so
+        // an earlier repair in the same batch may have wired this behaviour up
+        // since — and dropping it then is the pass undoing its own work.
+        // Exactly that happened: `add_interactions` created a talk behaviour and
+        // its trigger, `wire_or_drop` deleted the behaviour a moment later
+        // because it had been an orphan when the round began, and the world
+        // failed for `npcs_not_interactive` round after round while the repair
+        // log reported both repairs as successes.
+        //
+        // `behavior_spec_dangling` says something else entirely: the thing this
+        // behaviour EXISTS for is gone — a pickup with no item, a teleporter
+        // with no destination. Being triggered does not make it work again, so
+        // that reason cannot go stale and the drop stands.
+        if (f.id === "orphan_behavior") {
+          const triggered = (m.interactions || []).some((i) => i.behavior_ref === f.where)
+            || (m.npcs || []).some((n) => n.behavior_ref === f.where);
+          if (triggered) { skipped.push({ ...f, why: "something triggers it now; the finding was written before this round's repairs" }); break; }
+        }
         m.behaviors = m.behaviors.filter((b) => b.id !== f.where);
         applied.push({ fix: "drop_orphan_behavior", target: f.where });
         break;
@@ -550,7 +587,7 @@ export function repair(manifest, findings, { liveState = null } = {}) {
         // lets you.
         m.behaviors = m.behaviors || [];
         m.interactions = m.interactions || [];
-        const wired = new Set(m.interactions.map((i) => i.target_ref));
+        const wired = liveWired();
         let doors = 0;
         for (const st of (m.structures || []).filter((x) => x.enterable)) {
           if (wired.has(st.id)) continue;
@@ -577,7 +614,7 @@ export function repair(manifest, findings, { liveState = null } = {}) {
         // existing cast do anything.
         m.behaviors = m.behaviors || [];
         m.interactions = m.interactions || [];
-        const wired = new Set(m.interactions.map((i) => i.target_ref));
+        const wired = liveWired();
         const have = new Set(m.behaviors.map((b) => b.kind));
         const made = [];
         const wire = (target, bid, kind, spec, prompt) => {
@@ -828,6 +865,26 @@ export function repair(manifest, findings, { liveState = null } = {}) {
   // real content, and inventing a replacement district would be a fabrication.
   // `zone` is optional in the schema but must resolve when present, which is
   // exactly what makes clearing it the correct and sufficient repair.
+  // An item whose model is gone keeps the item and loses the model.
+  //
+  // Deliberately NOT the same answer as for a structure or an NPC. Those get
+  // `missing_asset` as a BLOCKER and are removed, because an invisible building
+  // or an invisible character is worse than none. An item is carried, not
+  // inhabited: it can still be picked up, still complete the quest that wants
+  // it, and still sit in an inventory, so deleting it would destroy a quest
+  // target and possibly something a player is holding over a missing mesh.
+  //
+  // Nothing had ever repaired this. validateStructure checks structures and
+  // NPCs for a missing asset and not items, so losing one prop asset left every
+  // item in the world dangling — a schema BLOCKER with no `fix`, on a world
+  // that was otherwise fine.
+  const assetIds = new Set((m.assets || []).map((a) => a.id));
+  let clearedAssets = 0;
+  for (const it of m.items || []) {
+    if (it.asset_ref && !assetIds.has(it.asset_ref)) { it.asset_ref = null; clearedAssets++; }
+  }
+  if (clearedAssets) applied.push({ fix: "clear_dangling_item_asset_refs", cleared: clearedAssets });
+
   const zoneIds = new Set(m.zones.map((z) => z.id));
   let clearedZones = 0;
   const forgetZone = (holder) => {

@@ -1169,3 +1169,107 @@ test("B4: the consistency pass runs even when no finding names a repair", async 
   assert.ok(r.applied.length > 0, "the consistency pass must still do its work");
   assert.ok(validateManifest(r.manifest).ok, JSON.stringify(validateManifest(r.manifest).errors.slice(0, 3)));
 });
+
+// ------------------------------- a repair may not undo another repair's work
+
+test("B4 GATE: a world whose behaviours were wiped is repaired, not rejected forever", async () => {
+  // Two defects met here and neither was visible alone.
+  //
+  // Clearing the behaviours leaves every interaction pointing at one that is
+  // gone. `add_behaviors` seeded its "already wired" set from those dead
+  // interactions, so it built the behaviours and connected none of them; the
+  // consistency pass then removed the dead interactions, leaving behaviours
+  // nothing triggers. Next round those counted as orphans, and `wire_or_drop`
+  // deleted the very behaviours `add_interactions` had just created in the same
+  // round — because the findings were all written before any of them ran.
+  //
+  // The world failed for `npcs_not_interactive` round after round while the
+  // repair log reported every repair as a success. Twenty out of twenty worlds
+  // in a per-damage sweep.
+  for (const prompt of ["Ashfall Harbour, a rainy nordic port town", "a neon cyberpunk megacity", "a lush jungle temple complex"]) {
+    const m = await goodWorld(prompt, "w_wiped");
+    m.behaviors = [];
+    const out = await playtestAndRepair(m);
+    assert.equal(out.passed, true,
+      `${prompt}: ${out.verdict} — ${JSON.stringify(out.rounds.at(-1).findings.filter((f) => f.severity !== "minor" && f.severity !== "info").map((f) => f.id))}`);
+    assert.ok(validateManifest(out.manifest).ok, JSON.stringify(validateManifest(out.manifest).errors.slice(0, 3)));
+
+    // Repaired for real: the NPCs can be spoken to again.
+    const wired = new Set(out.manifest.interactions.map((i) => i.target_ref));
+    assert.ok(out.manifest.npcs.filter((n) => wired.has(n.id)).length > 0, `${prompt}: no NPC ended up interactive`);
+    const behaviourIds = new Set(out.manifest.behaviors.map((b) => b.id));
+    for (const i of out.manifest.interactions) {
+      assert.ok(behaviourIds.has(i.behavior_ref), `${prompt}: interaction '${i.id}' triggers a behaviour that is gone`);
+    }
+  }
+});
+
+test("B4: wire_or_drop keeps a behaviour something now triggers, and still drops a defunct one", () => {
+  // The two findings that share this fix mean different things. "Nothing
+  // triggers it" can stop being true within a round; "the thing it exists for
+  // is gone" cannot.
+  const m = emptyish();
+  m.npcs = [{ id: "npc_a", name: "A", spawn: { x: 1, y: 0, z: 1 }, dialogue: { seed: "hello", lines: [] } }];
+  m.items = [{ id: "item_a", name: "Thing" }];
+  m.behaviors = [
+    { id: "behavior_talk_npc_a", kind: "npc_ai", spec: { npc: "npc_a" } },
+    { id: "behavior_pickup_ghost", kind: "pickup", spec: { item: "item_that_is_gone" } },
+  ];
+  m.interactions = [
+    { id: "interaction_talk_npc_a", trigger: "interact", target_ref: "npc_a", behavior_ref: "behavior_talk_npc_a" },
+    { id: "interaction_pickup_ghost", trigger: "proximity", target_ref: "npc_a", behavior_ref: "behavior_pickup_ghost" },
+  ];
+
+  const r = repair(m, [
+    { id: "orphan_behavior", severity: "minor", where: "behavior_talk_npc_a", fix: "wire_or_drop" },
+    { id: "behavior_spec_dangling", severity: "blocker", where: "behavior_pickup_ghost", fix: "wire_or_drop" },
+  ]);
+  const ids = r.manifest.behaviors.map((b) => b.id);
+  assert.ok(ids.includes("behavior_talk_npc_a"), "a behaviour something triggers must survive a stale orphan finding");
+  assert.ok(!ids.includes("behavior_pickup_ghost"), "a pickup with no item is defunct however many things trigger it");
+});
+
+test("B4 GATE: losing a prop asset does not dangle every item in the world", async () => {
+  // validateStructure checks structures and NPCs for a missing asset and not
+  // items, and nothing repaired `items[].asset_ref`. So one lost prop asset
+  // left every item dangling — a schema BLOCKER with no `fix` — on a world that
+  // was otherwise perfectly fine.
+  const m = await goodWorld("Item Asset Probe", "w_itemasset");
+  const propRef = m.items.find((it) => it.asset_ref)?.asset_ref;
+  assert.ok(propRef, "the probe needs items that reference an asset");
+  const itemsBefore = m.items.length;
+  m.assets = m.assets.filter((a) => a.id !== propRef);
+  assert.equal(validateManifest(m).ok, false, "the damage must really be a schema error");
+
+  const out = await playtestAndRepair(m);
+  assert.ok(validateManifest(out.manifest).ok, JSON.stringify(validateManifest(out.manifest).errors.slice(0, 3)));
+  // The item survives without its model: it is carried, not inhabited, so it
+  // can still be picked up and still finish the quest that wants it.
+  assert.equal(out.manifest.items.length, itemsBefore, "items were deleted over a missing mesh");
+  for (const it of out.manifest.items) assert.notEqual(it.asset_ref, propRef);
+});
+
+test("B4: add_behaviors connects what it builds, in the round it builds it", async () => {
+  // The half of the previous defect that a multi-round test cannot see, because
+  // a later round covers for it.
+  //
+  // Clearing the behaviours leaves the interactions pointing at behaviours that
+  // are gone. `add_behaviors` seeded its "already wired" set from those dead
+  // interactions, so every NPC looked connected already and it connected none
+  // of them — then reported `added: 10` and success. The consistency pass
+  // removed the dead interactions a moment later and the world came out of the
+  // round with ten behaviours and nothing triggering any of them.
+  const m = await goodWorld("Wiring Probe", "w_wiring");
+  m.behaviors = [];
+  const r = repair(m, [{ id: "no_gameplay", severity: "blocker", fix: "add_behaviors" }]);
+
+  assert.ok(r.applied.some((a) => a.fix === "add_behaviors"), "add_behaviors must run");
+  const wired = new Set(r.manifest.interactions.map((i) => i.target_ref));
+  const talkable = r.manifest.npcs.filter((n) => wired.has(n.id));
+  assert.equal(talkable.length, r.manifest.npcs.length,
+    `add_behaviors reported success having wired ${talkable.length} of ${r.manifest.npcs.length} NPCs`);
+
+  // The consequence, stated as the budget it costs: one round has to be enough.
+  const out = await playtestAndRepair(await (async () => { const x = await goodWorld("Wiring Probe", "w_wiring2"); x.behaviors = []; return x; })(), { maxRounds: 2 });
+  assert.equal(out.passed, true, `a wiped world must not need a third round: ${out.verdict}`);
+});
