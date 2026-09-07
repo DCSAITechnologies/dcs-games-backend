@@ -62,6 +62,17 @@ try {
       const body = await page.text();
       ok(`${path}: the page rendered something`, (body || "").trim().length > 40, `${(body || "").length} chars`);
       ok(`${path}: it is not stuck on a loading state`, !/^\s*(loading|please wait)\W*$/i.test((body || "").trim()));
+
+      // "It rendered something" passes on the 404 page, which is how
+      // /worlds.html sat green in this proof while being a dead link. Cloudflare
+      // Pages serves 404.html with a 200 for an unknown path, so the status code
+      // does not catch it either — the page has to be recognised by what it
+      // says.
+      const title = await page.eval("return document.title || ''");
+      const looks404 = /\b(404|not found|page not found)\b/i.test(title) ||
+                       /\b(404|page not found)\b/i.test((body || "").slice(0, 400));
+      ok(`${path}: is a real page, not the 404 fallback`, !looks404,
+         `title "${title}" — Pages serves 404.html with a 200, so this must be caught by content`);
     } finally {
       await page.close();
     }
