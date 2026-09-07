@@ -215,6 +215,12 @@ const rootDocs = [
   "DCS_GAMES_CONTINUOUS_STATUS.md",
   "DCS_GAMES_ESTATE_PASSPORT.md",
   "DCS_GAMES_EXECUTION_OWNERSHIP.md",
+  // Added 7 Sep 2026. It is the launch-blocker list every other document defers
+  // to, and it existed only at the estate root — which is not a repository. That
+  // is the same exposure A0 closed for the frontend, and leaving the one document
+  // that says what is NOT allowed to ship on a single laptop is the version of it
+  // that matters most.
+  "DCS_GAMES_LAUNCH_REQUIREMENTS.md",
 ];
 const snapDir = path.join(SPRINT, "estate-root-snapshot");
 fs.mkdirSync(snapDir, { recursive: true });
