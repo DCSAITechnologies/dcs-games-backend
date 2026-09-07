@@ -95,10 +95,27 @@ export function createJobService(env = process.env) {
     async get(jobId, requesterId = null) {
       const j = await jobs.one((x) => x.id === jobId);
       if (!j) throw Errors.notFound(`job ${jobId}`);
+      // `undefined`/`null` means no principal was supplied at all: an
+      // unattributed internal read, which is how this service reads its own
+      // jobs. An EMPTY-BUT-PRESENT principal — "", 0, false — is a call site
+      // that meant to pass one and lost it, and the old `if (requesterId && ...)`
+      // treated it as "no check required". That is the fail-open shape the world
+      // store already closed: a falsy principal must never widen access.
+      if (requesterId !== undefined && requesterId !== null && !requesterId) {
+        throw Errors.unauthenticated("a job read was given an empty principal; refusing to treat that as an unattributed read", {
+          meta: { job_id: jobId },
+        });
+      }
       // Same answer as a thing that does not exist. A 403 here confirms the id
       // is real to somebody who may not see it — the existence oracle already
       // closed on worlds and on retained versions, one surface along.
-      if (requesterId && j.owner_id !== requesterId) throw Errors.notFound(`job ${jobId}`);
+      //
+      // owner_id is required to be present as well as equal, matching
+      // worldstore's shape: a row whose owner is null must not be readable by a
+      // principal whose id happens to be null-ish.
+      if (requesterId != null && !(j.owner_id != null && j.owner_id === requesterId)) {
+        throw Errors.notFound(`job ${jobId}`);
+      }
       return withProgress(j);
     },
 
@@ -191,11 +208,31 @@ export function createJobService(env = process.env) {
     return await jobs.update((x) => x.id === jobId, (x) => ({ ...x, stages: x.stages.map((s) => (s.id === stageId ? mut(s) : s)) }));
   }
 
+  /**
+   * Drop the oldest jobs past the retention cap.
+   *
+   * This read the whole table and wrote a truncated copy back — outside the
+   * collection lock, with awaits in between. create() calls it immediately after
+   * jobs.insert(), so two concurrent creations are exactly the case that
+   * triggers it: A inserts, B inserts, then A's prune writes back a table it
+   * read before B's row existed, and B's job is gone while B holds its id and is
+   * polling for it. The same lost-update shape as safety.unblock(); Lane C
+   * pinned the safe primitive in test/collection.test.mjs "LANE C/4".
+   *
+   * remove() does the read, the filter and the write inside the lock, so it
+   * decides what to drop from the table as it actually is at that moment. It is
+   * given a SET OF IDS rather than a predicate over position, so a job inserted
+   * between the read below and the remove is not in the set and survives — the
+   * table may momentarily hold RETAIN + a few, and the next create() trims it.
+   * Retaining slightly too much is harmless; erasing a live job is not.
+   */
   async function prune() {
     const rows = await jobs.all();
     if (rows.length <= RETAIN) return;
-    rows.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
-    await jobs.write(rows.slice(0, RETAIN));
+    const oldestFirst = [...rows].sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+    const doomed = new Set(oldestFirst.slice(RETAIN).map((j) => j.id));
+    if (!doomed.size) return;
+    await jobs.remove((j) => doomed.has(j.id));
   }
 
   return svc;
