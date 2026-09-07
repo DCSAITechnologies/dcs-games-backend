@@ -400,3 +400,76 @@ test("a parental consent that cannot be attributed is refused, not written anony
   );
   assert.deepEqual(await s.consentsFor("minor-y"), []);
 });
+
+// =====================================================================
+// A block nobody withdrew must not disappear because somebody else did.
+//
+// unblock() read the whole blocks table, filtered it in memory and wrote the
+// whole table back, outside the collection lock and with awaits in between.
+// Any block created by anyone during that window was erased — at the primary
+// too — and both callers were told they succeeded.
+//
+// This is the worst place in the estate for a lost update. The person whose
+// block vanished is never told, and the person they blocked can contact them
+// again. test/collection.test.mjs "LANE C/4" pins the safe primitive; these are
+// the call site.
+// =====================================================================
+
+test("A5 GATE: withdrawing one block does not erase blocks made at the same moment", async () => {
+  const s = svc();
+  await s.block("alice", "mallory");
+
+  // One withdrawal racing four unrelated blocks by three other principals.
+  // Before the fix the withdrawal wrote back a table it had read before any of
+  // them existed, and every one of the four vanished.
+  await Promise.all([
+    s.unblock("alice", "mallory"),
+    s.block("bob", "trudy"),
+    s.block("carol", "trudy"),
+    s.block("bob", "mallory"),
+    s.block("dave", "eve"),
+  ]);
+
+  assert.deepEqual((await s.blockList("bob")).sort(), ["mallory", "trudy"], "bob's blocks must survive");
+  assert.deepEqual(await s.blockList("carol"), ["trudy"], "carol's block must survive");
+  assert.deepEqual(await s.blockList("dave"), ["eve"], "dave's block must survive");
+  assert.deepEqual(await s.blockList("alice"), [], "and the one that was actually withdrawn is gone");
+
+  // The relationships themselves, which is what the table is for.
+  assert.equal(await s.isBlocked("bob", "trudy"), true);
+  assert.equal(await s.isBlocked("carol", "trudy"), true);
+  assert.equal(await s.isBlocked("dave", "eve"), true);
+  assert.equal(await s.isBlocked("alice", "mallory"), false);
+});
+
+test("concurrent withdrawals do not erase each other either", async () => {
+  const s = svc();
+  for (const [a, b] of [["u1", "x"], ["u2", "x"], ["u3", "x"], ["u4", "x"], ["u5", "x"]]) await s.block(a, b);
+  await Promise.all([s.unblock("u1", "x"), s.unblock("u2", "x"), s.unblock("u3", "x")]);
+  assert.deepEqual(await s.blockList("u4"), ["x"], "an untouched block must survive three concurrent withdrawals");
+  assert.deepEqual(await s.blockList("u5"), ["x"]);
+  for (const u of ["u1", "u2", "u3"]) assert.deepEqual(await s.blockList(u), [], `${u}'s block was withdrawn`);
+});
+
+test("withdrawing reports whether anything was actually withdrawn", async () => {
+  // 0 and 1 are different facts. Withdrawing a block that was never there is
+  // not a failure, but a caller must be able to tell the difference.
+  const s = svc();
+  await s.block("alice", "mallory");
+  assert.deepEqual(await s.unblock("alice", "mallory"), { blocked: false, removed: 1 });
+  assert.deepEqual(await s.unblock("alice", "mallory"), { blocked: false, removed: 0 });
+  assert.deepEqual(await s.unblock("nobody", "nobody-else"), { blocked: false, removed: 0 });
+});
+
+test("a withdrawal removes exactly one direction, not every block either party holds", async () => {
+  const s = svc();
+  await s.block("alice", "mallory");
+  await s.block("mallory", "alice");
+  await s.block("alice", "trudy");
+  await s.unblock("alice", "mallory");
+  assert.deepEqual(await s.blockList("alice"), ["trudy"], "alice's other block is untouched");
+  assert.deepEqual(await s.blockList("mallory"), ["alice"], "mallory's own block is not withdrawn by alice");
+  // isBlocked is symmetric for visibility, so mallory's surviving block still
+  // hides them from each other. Withdrawing one side must not undo the other.
+  assert.equal(await s.isBlocked("alice", "mallory"), true);
+});

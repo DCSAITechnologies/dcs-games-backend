@@ -345,10 +345,28 @@ export function createSafetyService(env = process.env) {
         { blocker_id: blockerId, blocked_id: blockedId, created_at: new Date().toISOString() });
       return { blocked: true, blocker_id: blockerId, blocked_id: blockedId };
     },
+    /**
+     * Withdraw one block.
+     *
+     * This read the WHOLE blocks table, filtered it in memory, and wrote the
+     * whole thing back — outside the collection lock, with awaits in between.
+     * Every block created by anybody else during that window was erased, at the
+     * primary too, and both callers were told they succeeded. A safety feature
+     * silently discarding other people's blocks is the worst possible place for
+     * a lost update: the person whose block vanished is never told, and the
+     * person they blocked can contact them again.
+     *
+     * remove() does the read, the filter and the write INSIDE the per-collection
+     * lock, so a concurrent block survives. test/collection.test.mjs "LANE C/4"
+     * pins that contract; this is the call site it was pinned for.
+     *
+     * `removed` is reported because 0 and 1 are different facts — withdrawing a
+     * block that was never there is not a failure, but a caller should be able
+     * to tell.
+     */
     async unblock(blockerId, blockedId) {
-      const rows = (await blocks.all()).filter((b) => !(b.blocker_id === blockerId && b.blocked_id === blockedId));
-      await blocks.write(rows);
-      return { blocked: false };
+      const removed = await blocks.remove((b) => b.blocker_id === blockerId && b.blocked_id === blockedId);
+      return { blocked: false, removed };
     },
     async isBlocked(a, b) {
       const rows = await blocks.all();
