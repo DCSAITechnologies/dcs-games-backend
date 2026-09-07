@@ -23,7 +23,10 @@
     "monitor-dark": "node scripts/monitor-dark.mjs",
     "test:load": "node --test test/load-smoke.test.mjs",
     "load-test": "node scripts/load-test.mjs",
-    "test:unit:tsx": "node --import tsx --test test/livestate.test.mjs test/cw5-ownership-failclosed.test.mjs test/lead-review.test.mjs test/lead-review-cors.test.mjs test/lead-review-cost.test.mjs test/lead-review-durability.test.mjs test/lead-review-schema.test.mjs"
+    "test:unit:tsx": "node --import tsx --test test/livestate.test.mjs test/cw5-ownership-failclosed.test.mjs test/lead-review.test.mjs test/lead-review-cors.test.mjs test/lead-review-cost.test.mjs test/lead-review-durability.test.mjs test/lead-review-schema.test.mjs",
+    "acceptance:session": "node scripts/acceptance-session.mjs",
+    "acceptance:engines": "node scripts/acceptance-engines.mjs",
+    "acceptance:webkit": "node scripts/acceptance-webkit.mjs"
   },
   "dependencies": {
     "tsx": "^4.22.4"

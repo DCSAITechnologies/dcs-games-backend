@@ -15,6 +15,39 @@ Re-run against the final checkpoint. Deployment ledger in `reports/DEPLOYMENTS.m
 
 **188 assertions against deployed infrastructure, 0 failures.**
 
+## Acceptance sweeps — added at final closure
+
+| Suite | Result |
+| --- | --- |
+| Session, ownership and gate honesty (`acceptance-session.mjs`, Chromium) | **16 / 16** |
+| Real WebKit (`acceptance-engines.mjs`) | **22 / 22** |
+| Real Gecko (`acceptance-engines.mjs`) | **22 / 22** |
+| WebKit at iPhone width with touch (`acceptance-engines.mjs`) | **8 / 8** |
+| Safari.app via safaridriver (`acceptance-webkit.mjs`) | **NOT RUN — exits 2** |
+
+**68 further assertions against the deployed preview and staging backend, 0
+failures.**
+
+Two engines had never run this code before this sweep. The estate's entire
+browser proof was Chromium, and the one engine-specific defect found all sprint
+(`::placeholder` opacity, which Gecko dims of its own accord) had been reasoned
+about rather than observed. Both engines now assert it directly, along with the
+`background-clip:text` fallback — the failure mode there is INVISIBLE text, not
+merely low contrast, so an unsupported engine would have shipped a blank
+headline.
+
+`acceptance-webkit.mjs` drives Safari.app itself and covers what a Playwright
+WebKit build cannot: Safari's own chrome and Intelligent Tracking Prevention.
+It exits **2** — never 0 — while `Safari → Develop → Allow Remote Automation` is
+off, so an engine that did not run can never be mistaken for one that passed.
+
+`playwright-core` is deliberately not a dependency: adding it would change
+`npm ci` and the cold-rebuild proof for a check that is not part of the build.
+The engines script resolves it from `PW_CORE` and exits 2 when it is absent.
+Version 1.61.0 is the release whose pinned WebKit (2311) and Gecko (1532)
+revisions match the browsers already cached on this machine, so nothing is
+downloaded.
+
 ## Cold rebuild from the PRIVATE mirror — 11 / 11 steps
 
     clone backend             from the private mirror
