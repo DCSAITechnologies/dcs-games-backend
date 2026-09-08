@@ -153,3 +153,88 @@ test("a visible Supabase session is still copied into the local token", opts, as
     assert.equal(after, TOKEN, "sync() must still adopt the live Supabase access token");
   } finally { await p.close(); }
 });
+
+// ---------------------------------------------------------------------------
+// loadProfile and the difference between "you are not signed in" and
+// "the server fell over for a moment".
+//
+// Carried open as a P3 from the 7 Sep closure report. `loadProfile` ended with:
+//
+//   if (!r.ok) { setUser(null); return null; }
+//
+// `r.ok` is false for 500, 502, 503 and 504 exactly as it is for 401. So a
+// transient upstream blip cleared the cached identity and the account menu
+// dropped back to a neutral glyph for a visitor whose session was never in
+// question — the UI reporting "we do not know who you are" because one request
+// out of many did not come back.
+//
+// The session itself survived (that is a separate defect, fixed above), so this
+// is cosmetic in the sense that nothing is lost. It is not cosmetic in the
+// sense that matters: the surface said something untrue about the visitor's
+// state.
+//
+// A real 401 or 403 must still clear it. That is the server saying this token
+// does not identify anyone, and continuing to show a name for it would be the
+// opposite failure.
+const USER_KEY = "dcsgames.user";
+
+async function pageWithProfileStatus(status) {
+  const p = await Page.open(browser);
+  await p.send("Page.addScriptToEvaluateOnNewDocument", {
+    source: `
+      window.DCS_SUPABASE_URL = "https://stub.supabase.co";
+      window.DCS_SUPABASE_ANON_KEY = "stub-anon-key";
+      window.DCS_API_BASE = "https://stub.api.invalid";
+      window.supabase = { createClient: function () { return { auth: {
+        getSession: function () { return Promise.resolve({ data: { session: null }, error: null }); },
+        onAuthStateChange: function () { return { data: { subscription: { unsubscribe: function () {} } } }; },
+        signOut: function () { return Promise.resolve({ error: null }); } } }; } };
+      // Every /me/profile call answers with the status under test.
+      var realFetch = window.fetch;
+      window.fetch = function (url, opts) {
+        if (String(url).indexOf("/me/profile") !== -1) {
+          return Promise.resolve(new Response(
+            ${JSON.stringify(status)} === 200 ? JSON.stringify({ ok: true, principal_id: "p_1", username: "realname", display_name: "Real Name", level: 3 }) : "server error",
+            { status: ${JSON.stringify(status)}, headers: { "Content-Type": "application/json" } }));
+        }
+        return realFetch.apply(this, arguments);
+      };`,
+  });
+  return p;
+}
+
+test("REGRESSION: a transient 5xx must not erase who the visitor is", opts, async () => {
+  const p = await pageWithProfileStatus(503);
+  try {
+    await p.goto(server.url + "/index.html", { waitMs: 300 });
+    // A visitor with a known identity already cached.
+    await p.eval(`localStorage.setItem(${JSON.stringify(USER_KEY)}, JSON.stringify({ id: "p_1", username: "realname", display_name: "Real Name", level: 3 })); return 1;`);
+    await p.goto(server.url + "/player-home.html", { waitMs: 300 });
+    const status = await p.eval(`
+      return (async function () {
+        await DCSAuth.loadProfile("some-token");
+        return localStorage.getItem(${JSON.stringify(USER_KEY)}) || "";
+      })();`);
+    assert.notEqual(status, "",
+      "a 503 on /me/profile cleared the cached identity: the surface now says it does not know " +
+      "who the visitor is, because one request did not come back");
+    assert.match(status, /Real Name/, "the cached identity should be untouched by a server error");
+  } finally { await p.close(); }
+});
+
+test("the other direction: a 401 MUST clear the cached identity", opts, async () => {
+  const p = await pageWithProfileStatus(401);
+  try {
+    await p.goto(server.url + "/index.html", { waitMs: 300 });
+    await p.eval(`localStorage.setItem(${JSON.stringify(USER_KEY)}, JSON.stringify({ id: "p_1", display_name: "Real Name" })); return 1;`);
+    await p.goto(server.url + "/player-home.html", { waitMs: 300 });
+    const after = await p.eval(`
+      return (async function () {
+        await DCSAuth.loadProfile("a-token-the-server-rejects");
+        return localStorage.getItem(${JSON.stringify(USER_KEY)}) || "";
+      })();`);
+    assert.equal(after, "",
+      "the server said this token identifies nobody; continuing to show a name for it would be worse " +
+      "than the defect being fixed");
+  } finally { await p.close(); }
+});
