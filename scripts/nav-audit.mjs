@@ -55,6 +55,7 @@ async function controls() {
     });
     Array.prototype.forEach.call(document.querySelectorAll("header .nav-right > a[href]"), function(a){ push("actions", a); });
     Array.prototype.forEach.call(document.querySelectorAll("[data-nav-panel] a[href]"), function(a){ push("mobile-menu", a); });
+    Array.prototype.forEach.call(document.querySelectorAll("footer a[href]"), function(a){ push("footer", a); });
     return JSON.stringify(out);`));
   await p.close();
   return list;
@@ -68,7 +69,12 @@ async function probe(href) {
   const rel = key.replace(/^\//, "");
   const exists = fs.existsSync(path.join(SITE, rel));
   const p = await Page.open(browser);
-  const r = { exists, requested: [], apis: [], title: "", chars: 0, gate: false, sample: false, landed: "" };
+  const r = { exists, requested: [], apis: [], title: "", chars: 0, gate: false, sample: false, landed: "",
+              httpStatus: null, offEnv: [] };
+  try {
+    const head = await fetch(PREVIEW + "/" + rel, { method: "GET", redirect: "follow" });
+    r.httpStatus = head.status;
+  } catch (e) { r.httpStatus = 0; }
   if (exists) {
     // Signed OUT first: an auth gate is a real behaviour, not a defect.
     await p.goto(PREVIEW + "/" + rel, { waitMs: 3200 });
@@ -82,10 +88,34 @@ async function probe(href) {
       var t = (main ? main.innerText : "").slice(0, 700);
       return /you need to sign in|sign in to|internal tester|not authorised|not authorized|limited to authorized/i.test(t);`);
     r.sample = await p.eval(`return !!document.querySelector(".dcs-banner-sample")`);
+    // A page can render no API traffic for two very different reasons: nobody
+    // wired it, or there is nothing on this backend to wire and the page says
+    // so. The truth layer's unknown marker and an explicit role="status"
+    // explanation are how this estate states the second one, so look for them
+    // rather than reporting both as the same gap.
+    r.truthful = await p.eval(`
+      var main = document.querySelector("#pd-view, #site-view, main, #main") || document.body;
+      var t = main.innerText || "";
+      var hasStatus = !!main.querySelector('[role="status"]');
+      var hasUnknown = t.indexOf("\u2014") !== -1;
+      var saysSo = /(no |not )(crew ranking|season|collection|code redemption|world in this genre|documentation|prices)|does not exist|no .* exists|nothing on this build|is not instrumented|sign in to see/i.test(t);
+      return hasStatus || saysSo || hasUnknown;`);
     r.apis = p.requestedUrls()
       .map((u) => { try { return new URL(u).pathname; } catch { return ""; } })
       .filter((path) => /^\/(v3|me|api|social|safety|atlas|worlds|profiles|verify)\b/.test(path));
     r.apis = [...new Set(r.apis)];
+    // Anything the page fetched that is NOT staging: production hosts, a
+    // developer's localhost, or a service nobody meant to call from here.
+    const OK_HOSTS = [
+      "sprint-preview-07sep2026.dcs-games.pages.dev",
+      "dcs-games-backend-staging.up.railway.app",
+      "nemmayskbjugulrncufd.supabase.co",
+      "fonts.googleapis.com", "fonts.gstatic.com",
+      "cdn.jsdelivr.net", "cdnjs.cloudflare.com", "unpkg.com",
+    ];
+    r.offEnv = [...new Set(p.requestedUrls()
+      .map((u) => { try { return new URL(u).host; } catch { return ""; } })
+      .filter((h) => h && !OK_HOSTS.includes(h)))];
   }
   await p.close();
   seen.set(key, r);
@@ -102,21 +132,28 @@ for (const c of await controls()) {
 /** The classification the founder asked for, argued from the evidence above. */
 function classify(r) {
   if (!r.href) return "DEFECT";
+  if (r.httpStatus && r.httpStatus >= 400) return "DEFECT";
+  if (r.offEnv && r.offEnv.length) return "DEFECT";
   if (r.href === "#" || (r.href.startsWith("#") )) return "DEFECT";
   if (!r.exists) return "DEFECT";
   if (r.chars < 40) return "DEFECT";
   if (r.gate) return "AUTH_GATED";
   if (r.apis.length > 0) return "WORKING_REAL";
   if (r.sample) return "WORKING_FRONTEND_ONLY";
+  // Renders no API traffic, and says plainly that there is nothing to render.
+  if (r.truthful) return "INTENTIONALLY_DISABLED";
   return "BACKEND_WIRING_REQUIRED";
 }
 
 const out = [];
-out.push("| CONTROL | ROUTE | TARGET EXISTS | CLICK WORKS | AUTH | BACKEND CONTRACT | STATUS |");
-out.push("| --- | --- | --- | --- | --- | --- | --- |");
+out.push("| CONTROL | SOURCE | TARGET | HTTP | AUTH STATE | BACKEND CONTRACT | OFF-ENV HOSTS | STATUS |");
+out.push("| --- | --- | --- | --- | --- | --- | --- | --- |");
 for (const r of rows) {
   const st = classify(r);
-  out.push(`| ${r.group === "top" || r.group === "actions" || r.group === "mobile-menu" ? "**" + r.label + "**" : r.group + " › " + r.label} | \`${r.href}\` | ${r.exists ? "yes" : "**NO**"} | ${r.chars >= 40 ? "yes" : "**NO**"} | ${r.gate ? "gated" : "public"} | ${r.apis.length ? r.apis.slice(0, 3).map((a) => "`" + a + "`").join(" ") : "—"} | ${st} |`);
+  const src = r.group === "top" ? "header nav" : r.group === "actions" ? "header actions"
+            : r.group === "mobile-menu" ? "mobile menu" : r.group === "footer" ? "footer"
+            : "dropdown: " + r.group;
+  out.push(`| ${r.label} | ${src} | \`${r.href}\` | ${r.httpStatus ?? "—"} | ${r.gate ? "gated" : "public"} | ${r.apis.length ? r.apis.slice(0, 3).map((a) => "`" + a + "`").join(" ") : "—"} | ${r.offEnv && r.offEnv.length ? "**" + r.offEnv.join(" ") + "**" : "none"} | ${st} |`);
 }
 
 const counts = {};

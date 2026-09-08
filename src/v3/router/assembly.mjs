@@ -18,6 +18,45 @@ import { architectAdapters, fastAdapters, gameplayAdapters } from "../providers/
 import { asset3dAdapters } from "../providers/asset3d.mjs";
 import { mediaAdapters } from "../providers/media.mjs";
 import { spatialAdapters } from "../providers/spatial.mjs";
+import { WEATHERS } from "../manifest/schema.mjs";
+
+/**
+ * The model's weather word, mapped onto the eight the schema allows.
+ *
+ * This used to be `plan.environment?.weather || "clear"` — whatever the model
+ * said, unvalidated — while `maturity` two lines above was checked against its
+ * own enum with a fallback. The consequence was not a cosmetic default: an
+ * unrecognised word failed WorldManifestV3 validation, and the whole generation
+ * came back as `server_error: the assembled world did not satisfy
+ * WorldManifestV3`. A person who described a world lost it because a language
+ * model wrote "overcast" instead of "cloudy".
+ *
+ * Observed in staging on 8 Sep 2026, non-deterministically: two runs generated
+ * cleanly and the third failed on environment.weather.
+ *
+ * Synonyms are mapped because they are the same concept in a different word,
+ * which is normalisation rather than invention. Anything genuinely unrecognised
+ * falls back to "clear" — the same value used when the field is absent, and the
+ * field is optional in the schema, so nothing is being asserted that the model
+ * did not say.
+ */
+const WEATHER_SYNONYMS = {
+  overcast: "cloudy", cloud: "cloudy", clouds: "cloudy", partly_cloudy: "cloudy",
+  rainy: "rain", raining: "rain", drizzle: "rain", showers: "rain", rainfall: "rain",
+  stormy: "storm", thunderstorm: "storm", thunder: "storm", squall: "storm",
+  snowy: "snow", snowing: "snow", snowfall: "snow", blizzard: "snow",
+  mist: "fog", misty: "fog", foggy: "fog", haze: "fog", hazy: "fog",
+  sand: "sandstorm", dust: "sandstorm", duststorm: "sandstorm", sandstorms: "sandstorm",
+  ashfall: "ash", ashen: "ash", ashes: "ash",
+  sunny: "clear", sun: "clear", fair: "clear", calm: "clear", clearing: "clear",
+};
+
+export function normaliseWeather(raw) {
+  if (raw === null || raw === undefined) return "clear";
+  const key = String(raw).trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (WEATHERS.includes(key)) return key;
+  return WEATHER_SYNONYMS[key] || "clear";
+}
 import { visionAdapters, VISION_LANE, validateImage, conditionPrompt, readingToConstraints } from "../providers/vision.mjs";
 import { emptyManifest, validateManifest, MANIFEST_VERSION } from "../manifest/schema.mjs";
 import { hashString } from "../providers/local-planner.mjs";
@@ -211,7 +250,7 @@ function compose({ req, plan, meta, spatial, assets, gameplay, seed, provenance,
 
   m.environment = {
     ...m.environment,
-    weather: plan.environment?.weather || "clear",
+    weather: normaliseWeather(plan.environment?.weather),
     time_of_day: clamp(num(plan.environment?.time_of_day, 0.5), 0, 1),
     palette: plan.palette || null,
   };
