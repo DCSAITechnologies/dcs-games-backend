@@ -3,13 +3,17 @@
 // score every sample headless and in a real browser, and write the lane's
 // evidence into docs/games-d/.
 //
-//   node tools/gamesd-bench.mjs [--only <game_id>] [--no-browser] [--out <dir>] [--limit N] [--fps-seconds S]
+//   node tools/gamesd-bench.mjs [--only <game_id>] [--no-browser] [--gpu] [--no-cpu] [--out <dir>] [--limit N] [--fps-seconds S]
+//
+//   --gpu     add a hardware-GL browser pass (ANGLE/Metal); only its FPS gates `playable`
+//   --no-cpu  skip the SwiftShader pass (the advisory cpu_worst_case numbers)
 //
 // Writes
 //   <out>/DCS_GAMES_LOCAL_SAMPLE_REPORT.md       per-sample table, totals, variety
 //   <out>/DCS_GAMES_PROCEDURAL_PRESET_MATRIX.csv  presetMatrix() (samples/matrix.mjs) or a minimal one
 //   <out>/evidence/bench.json                     everything, machine-readable
-//   <out>/evidence/<game_id>.png                  one screenshot per sample (browser)
+//   <out>/evidence/<game_id>.png                  one screenshot per sample (GPU pass, else CPU pass)
+//   <out>/evidence/cpu/<game_id>.png              SwiftShader screenshot when both passes ran
 //   games-b-runtime/games/fallback/<game_id>/package.json
 //
 // Exit code is 0 whenever the bench ran; the numbers say how good the result is.
@@ -30,6 +34,8 @@ const OUT = path.resolve(ROOT, opt("--out", "docs/games-d"));
 const ONLY = opt("--only");
 const LIMIT = opt("--limit") ? Number(opt("--limit")) : null;
 const NO_BROWSER = flag("--no-browser");
+const GPU = flag("--gpu") && !NO_BROWSER;
+const NO_CPU = flag("--no-cpu");
 const FPS_SECONDS = Number(opt("--fps-seconds", "4"));
 const EVIDENCE = path.join(OUT, "evidence");
 const GAMES_DIR = path.join(ROOT, "games-b-runtime/games/fallback");
@@ -43,7 +49,7 @@ const { LAYOUTS } = await import("../src/gamesd/missions/layouts.mjs");
 const { LIGHTING } = await import("../src/gamesd/world/lighting.mjs");
 const { DIFFICULTY_LEVELS } = await import("../src/gamesd/difficulty.mjs");
 const { scoreSample, varietyReport } = await import("../src/gamesd/quality/score.mjs");
-const { ASSET_BUDGET, PERF_BUDGET } = await import("../src/gamesd/budgets.mjs");
+const { ASSET_BUDGET, PERF_BUDGET, CPU_PERF_BUDGET } = await import("../src/gamesd/budgets.mjs");
 
 // ------------------------------------------------------------ recipes
 
@@ -178,27 +184,38 @@ if (!ONLY && !LIMIT && fs.existsSync(GAMES_DIR)) {
   for (const d of fs.readdirSync(GAMES_DIR)) if (!keep.has(d) && d.startsWith("fb_")) fs.rmSync(path.join(GAMES_DIR, d), { recursive: true, force: true });
 }
 
-let browserRun = { available: false, reason: NO_BROWSER ? "--no-browser" : null, results: {} };
+// Two browser passes. CPU (SwiftShader) is the default and gives the advisory
+// cpu_worst_case; --gpu adds a hardware-GL pass, the only one whose FPS can
+// gate `playable` against PERF_BUDGET. --no-cpu drops the CPU pass.
+const passRun = { cpu: null, gpu: null };
 const loadBefore = hostLoad();
 if (!NO_BROWSER) {
   const { benchPackages } = await import("../src/gamesd/quality/browser-bench.mjs");
   const entries = samples.filter((s) => s.pkgPath).map((s) => ({ game_id: s.build.pkg.game_id, pkgPath: s.pkgPath }));
-  browserRun = await benchPackages(entries, { evidenceDir: EVIDENCE, fpsSeconds: FPS_SECONDS, log: (m) => log(m) });
-  if (!browserRun.available) log(`browser skipped: ${browserRun.reason}`);
+  if (GPU) passRun.gpu = await benchPackages(entries, { gpu: true, evidenceDir: EVIDENCE, fpsSeconds: FPS_SECONDS, log: (m) => log(m) });
+  if (!NO_CPU) passRun.cpu = await benchPackages(entries, { gpu: false, evidenceDir: GPU ? path.join(EVIDENCE, "cpu") : EVIDENCE, fpsSeconds: FPS_SECONDS, log: (m) => log(m) });
+  for (const [k, r] of Object.entries(passRun)) if (r && !r.available) log(`${k} browser pass skipped: ${r.reason}`);
 }
 const loadAfter = hostLoad();
 const overloaded = Math.max(loadBefore.ratio, loadAfter.ratio) > OVERLOADED_RATIO;
-if (overloaded && browserRun.available) log(`host overloaded (load ${loadBefore.loadavg_1m}→${loadAfter.loadavg_1m} on ${loadAfter.ncpu} cores): frame-time budgets reported but not gated`);
+const ran = (k) => !!passRun[k]?.available;
+const anyBrowser = ran("cpu") || ran("gpu");
+if (overloaded && anyBrowser) log(`host overloaded (load ${loadBefore.loadavg_1m}→${loadAfter.loadavg_1m} on ${loadAfter.ncpu} cores): SwiftShader numbers recorded but not compared`);
 
+const resultFor = (k, id) => (ran(k) ? passRun[k].results[id] || { ok: false, reason: "not benched", errors: ["not benched"] } : null);
+const brief = (b) => b ? { ok: b.ok, reason: b.reason, renderer: b.renderer, gpu: b.gpu, gpu_note: b.gpu_note, attempts: b.attempts, load_ms: b.load_ms, fps: b.fps, save_reload: b.save_reload, play: b.play, screenshot: b.screenshot ? path.relative(OUT, b.screenshot) : null, audio: b.audio, console_errors: b.console_errors } : null;
 const scores = [];
 for (const s of samples) {
   if (!s.build) {
     scores.push({ game_id: s.game_id, recipe: s.recipe, playable: false, reasons: [`build failed: ${s.error}`], errors: [s.error] });
     continue;
   }
-  const browser = browserRun.available ? browserRun.results[s.build.pkg.game_id] || { ok: false, reason: "not benched", errors: ["not benched"] } : null;
-  const sc = await scoreSample(s.build, { browser, rebuild: s.rebuild, perfGate: !overloaded });
-  sc.browser = browser ? { ok: browser.ok, reason: browser.reason, load_ms: browser.load_ms, fps: browser.fps, save_reload: browser.save_reload, play: browser.play, screenshot: browser.screenshot ? path.relative(OUT, browser.screenshot) : null, audio: browser.audio, console_errors: browser.console_errors } : null;
+  const gpuRes = resultFor("gpu", s.build.pkg.game_id), cpuRes = resultFor("cpu", s.build.pkg.game_id);
+  // GPU frame limits always gate when a hardware pass ran (a pass that clears
+  // them on a loaded host clears them on a quiet one). CPU numbers are advisory
+  // and are not even compared when the host is overloaded.
+  const sc = await scoreSample(s.build, { browser: gpuRes, browserCpu: cpuRes, rebuild: s.rebuild, perfGate: true, cpuCompare: !overloaded });
+  sc.browser = { gpu: brief(gpuRes), cpu: brief(cpuRes) };
   sc.headless_playtest = { won: s.build.playtest?.won, sim_seconds: s.build.playtest?.sim_seconds, plan_source: s.build.playtest?.plan_source, reason: s.build.playtest?.reason ?? null };
   scores.push(sc);
   log(`scored ${sc.game_id}: ${sc.playable ? "PLAYABLE" : "not playable: " + sc.reasons.join(" | ")}`);
@@ -208,8 +225,15 @@ for (const s of samples) {
 
 const ok = scores.filter((s) => s.visual_signature);
 const variety = varietyReport(ok);
-const fpsVals = ok.map((s) => s.fps?.fps).filter((v) => typeof v === "number");
 const mean = (a) => (a.length ? Math.round((a.reduce((x, y) => x + y, 0) / a.length) * 100) / 100 : null);
+const nums = (f) => ok.map(f).filter((v) => typeof v === "number");
+const renderers = (f) => [...new Set(ok.map(f).filter(Boolean))];
+const gpuRenderers = renderers((s) => s.fps?.renderer);
+const cpuRenderers = renderers((s) => s.fps_cpu_worst_case?.renderer);
+const fpsVals = nums((s) => s.fps?.fps);
+const cpuFpsVals = nums((s) => s.fps_cpu_worst_case?.fps);
+const perfVerified = ok.filter((s) => s.budgets.perf_gate === "gpu" && !s.budgets.over.some((o) => ["fps", "frame_ms_p95", "load_ms"].includes(o.key))).length;
+const gpuRequestedSoftware = ran("gpu") ? ok.filter((s) => s.browser?.gpu && s.browser.gpu.gpu === false).length : 0;
 const totals = {
   SAMPLES_CREATED: ok.length,
   SAMPLES_ATTEMPTED: scores.length,
@@ -217,39 +241,50 @@ const totals = {
   WORLD_VARIANTS: variety.world_variants,
   GAMEPLAY_VARIANTS: variety.gameplay_variants,
   AVG_FPS: mean(fpsVals),
+  AVG_FPS_RENDERER: gpuRenderers.length ? gpuRenderers.join("; ") : ran("gpu") ? "GPU pass ran but got no hardware renderer" : "not measured (no --gpu pass)",
+  PERF_VERIFIED_ON_GPU: `${perfVerified}/${ok.length}`,
+  CPU_WORST_CASE_AVG_FPS: mean(cpuFpsVals),
+  CPU_WORST_CASE_RENDERER: cpuRenderers.join("; ") || (ran("cpu") ? "unknown" : "not run"),
   SAVE_RELOAD_PASS: `${ok.filter((s) => s.save_reload.headless_ok && s.save_reload.browser_ok !== false).length}/${ok.length}`,
-  SAVE_RELOAD_BROWSER_PASS: browserRun.available ? `${ok.filter((s) => s.save_reload.browser_ok === true).length}/${ok.length}` : "not run",
+  SAVE_RELOAD_BROWSER_PASS: anyBrowser ? `${ok.filter((s) => s.save_reload.browser_ok === true).length}/${ok.length}` : "not run",
   DETERMINISTIC_REBUILD: `${ok.filter((s) => s.deterministic.rebuild_sha_equal === true).length}/${ok.length}`,
   WON_HEADLESS: `${ok.filter((s) => s.objective_completion.won).length}/${ok.length}`,
-  BROWSER_LAUNCH_OK: browserRun.available ? `${ok.filter((s) => s.launch.browser_ok === true).length}/${ok.length}` : "not run",
+  BROWSER_LAUNCH_OK: anyBrowser ? `${ok.filter((s) => s.launch.browser_ok === true).length}/${ok.length}` : "not run",
   BUDGET_OK: `${ok.filter((s) => s.budgets.ok).length}/${ok.length}`,
   INSIDE_SOLID_SAMPLES: ok.reduce((a, s) => a + (s.collision.player_inside_solid_samples || 0), 0),
   MIN_PAIRWISE_VISUAL_DISTANCE: variety.min_pairwise,
   MEAN_PAIRWISE_VISUAL_DISTANCE: variety.mean_pairwise,
   NEAR_DUPLICATE_PAIRS: variety.near_duplicates.length,
 };
-const fpsSummary = fpsVals.length ? {
-  min_fps: Math.min(...fpsVals), max_fps: Math.max(...fpsVals), avg_fps: mean(fpsVals),
-  avg_p95_ms: mean(ok.map((s) => s.fps?.frame_ms_p95).filter((v) => typeof v === "number")),
-  avg_load_ms: mean(ok.map((s) => s.launch.load_ms).filter((v) => typeof v === "number")),
-  avg_draw_calls: mean(ok.map((s) => s.fps?.draw_calls).filter((v) => typeof v === "number")),
-  max_draw_calls: Math.max(...ok.map((s) => s.fps?.draw_calls || 0)),
-  max_triangles: Math.max(...ok.map((s) => s.fps?.triangles || 0)),
-} : null;
+const summary = (key, loadKey) => {
+  const v = nums((s) => s[key]?.fps);
+  if (!v.length) return null;
+  return {
+    min_fps: Math.min(...v), max_fps: Math.max(...v), avg_fps: mean(v),
+    avg_p50_ms: mean(nums((s) => s[key]?.frame_ms_p50)), avg_p95_ms: mean(nums((s) => s[key]?.frame_ms_p95)),
+    avg_load_ms: mean(nums((s) => s.launch[loadKey])),
+    avg_draw_calls: mean(nums((s) => s[key]?.draw_calls)), max_draw_calls: Math.max(...nums((s) => s[key]?.draw_calls)),
+    max_triangles: Math.max(...nums((s) => s[key]?.triangles)),
+  };
+};
+const fpsSummary = { gpu: summary("fps", "load_ms"), cpu_worst_case: summary("fps_cpu_worst_case", "cpu_load_ms") };
 
 const bench = {
-  bench_version: "1.0.0",
+  bench_version: "1.1.0",
   generated_at: new Date().toISOString(),
   wall_seconds: Math.round((Date.now() - t0) / 1000),
   git: (() => { try { const g = (a) => execFileSync("git", a, { cwd: ROOT, encoding: "utf8" }).trim(); return { head: g(["rev-parse", "--short", "HEAD"]), branch: g(["rev-parse", "--abbrev-ref", "HEAD"]), dirty: g(["status", "--porcelain"]).split("\n").filter(Boolean).length }; } catch { return null; } })(),
   recipe_source: recipeSource,
-  options: { only: ONLY, limit: LIMIT, no_browser: NO_BROWSER, fps_seconds: FPS_SECONDS },
-  host: { platform: `${os.platform()} ${os.arch()}`, cpus: os.cpus()[0]?.model, ncpu: os.cpus().length, load_before: loadBefore, load_after: loadAfter, overloaded, overloaded_ratio: OVERLOADED_RATIO, renderer: "SwiftShader (headless Chrome, CPU)" },
-  browser: { available: browserRun.available, reason: browserRun.reason || null },
-  budgets: { ASSET_BUDGET, PERF_BUDGET, perf_gated: !overloaded },
+  options: { only: ONLY, limit: LIMIT, no_browser: NO_BROWSER, gpu: GPU, no_cpu: NO_CPU, fps_seconds: FPS_SECONDS },
+  host: { platform: `${os.platform()} ${os.arch()}`, cpus: os.cpus()[0]?.model, ncpu: os.cpus().length, load_before: loadBefore, load_after: loadAfter, overloaded, overloaded_ratio: OVERLOADED_RATIO },
+  browser: {
+    gpu: passRun.gpu ? { available: passRun.gpu.available, reason: passRun.gpu.reason || null, renderers: gpuRenderers, requested_but_software: gpuRequestedSoftware } : { available: false, reason: GPU ? "not run" : "no --gpu flag" },
+    cpu: passRun.cpu ? { available: passRun.cpu.available, reason: passRun.cpu.reason || null, renderers: cpuRenderers } : { available: false, reason: NO_BROWSER ? "--no-browser" : "--no-cpu" },
+  },
+  budgets: { ASSET_BUDGET, PERF_BUDGET, CPU_PERF_BUDGET, gpu_perf_gates_playable: true, cpu_advisory_compared: !overloaded },
   totals, fps: fpsSummary,
   variety: { ...variety, distances: variety.distances.map(({ a, b, d }) => ({ a, b, d })) },
-  samples: scores.map((s) => ({ ...s, visual_signature: s.visual_signature ? { labels: s.visual_signature.labels, groups: { ...s.visual_signature.groups } } : null })),
+  samples: scores,
 };
 fs.writeFileSync(path.join(EVIDENCE, "bench.json"), JSON.stringify(bench, null, 1) + "\n");
 
@@ -259,33 +294,43 @@ const yn = (v) => (v === true ? "yes" : v === false ? "**no**" : "–");
 const num = (v, d = 1) => (typeof v === "number" ? (Number.isInteger(v) ? String(v) : v.toFixed(d)) : "–");
 const md = [];
 md.push("# DCS Games local fallback: sample report", "");
-md.push(`Generated ${bench.generated_at} by \`node tools/gamesd-bench.mjs${args.length ? " " + args.join(" ") : ""}\` in ${bench.wall_seconds} s. Zero paid APIs: every build ran with \`DCS_PROVIDERS_OFFLINE=1\` through \`buildFromRecipe()\`.`, "");
+md.push(`Generated ${bench.generated_at} by \`node tools/gamesd-bench.mjs${args.length ? " " + args.join(" ") : ""}\` in ${bench.wall_seconds} s${bench.git ? ` on ${bench.git.branch} @ ${bench.git.head} (${bench.git.dirty} uncommitted paths)` : ""}. Zero paid APIs: every build ran with \`DCS_PROVIDERS_OFFLINE=1\` through \`buildFromRecipe()\`.`, "");
 md.push(`Recipes: ${recipeSource}. Preset matrix: see \`DCS_GAMES_PROCEDURAL_PRESET_MATRIX.csv\`. Raw data: \`evidence/bench.json\`.`, "");
 md.push("## Totals", "", "| metric | value |", "|---|---|");
 for (const [k, v] of Object.entries(totals)) md.push(`| ${k} | ${v ?? "–"} |`);
 md.push("");
-md.push(`Host: ${bench.host.platform}, ${bench.host.ncpu} cores, load average ${loadBefore.loadavg_1m} before and ${loadAfter.loadavg_1m} after the browser pass. Renderer: ${bench.host.renderer}.`);
-if (!browserRun.available) md.push("", `**Browser pass not run** (${browserRun.reason}); FPS, browser launch and browser save/reload are blank.`);
-else if (overloaded) md.push("", `**The host was overloaded** (load per core above ${OVERLOADED_RATIO}), so wall-clock frame times measure the machine's queue as much as the game. FPS, p95 frame time, load time and build time were measured and are reported, but they were **not** used to decide \`playable\`; draw calls and triangles (load-independent) still were. The per-sample \`budgets.perf_advisory\` in bench.json lists what would have failed. Rerun on a quiet machine for FPS that can gate.`);
+md.push(`**AVG_FPS renderer:** ${totals.AVG_FPS_RENDERER}. AVG_FPS is the only frame rate that can make a sample playable or not (PERF_BUDGET floor: ${PERF_BUDGET.small.min_fps}/${PERF_BUDGET.medium.min_fps}/${PERF_BUDGET.large.min_fps} fps small/medium/large, p95 ≤ ${PERF_BUDGET.small.max_frame_ms_p95}/${PERF_BUDGET.medium.max_frame_ms_p95}/${PERF_BUDGET.large.max_frame_ms_p95} ms). CPU_WORST_CASE_AVG_FPS is SwiftShader (software WebGL in headless Chrome): advisory only, compared with CPU_PERF_BUDGET for regression detection.`);
+if (ran("gpu") && fpsSummary.gpu && fpsSummary.gpu.max_fps <= 61) md.push("", "Headless Chrome paces requestAnimationFrame to a 60 Hz display, so a GPU figure near 60 fps is the vsync cap, not the renderer's limit.");
+if (gpuRequestedSoftware) md.push("", `**${gpuRequestedSoftware} GPU-pass sample(s) got a software renderer** despite hardware GL flags; their frame rate did not gate.`);
+md.push("", `Host: ${bench.host.platform}, ${bench.host.ncpu} cores, load average ${loadBefore.loadavg_1m} before and ${loadAfter.loadavg_1m} after the browser passes.`);
+if (!anyBrowser) md.push("", "**No browser pass ran**; FPS, browser launch and browser save/reload are blank.");
+else if (!ran("gpu")) md.push("", "**No GPU pass ran** (`--gpu` not given or unavailable), so no sample's frame rate was checked against the playability floor: `playable` below covers every other criterion, and PERF_VERIFIED_ON_GPU is 0.");
+if (overloaded && anyBrowser) md.push("", `**The host was overloaded** (load per core above ${OVERLOADED_RATIO}): SwiftShader wall-clock numbers measure the machine's queue as much as the game, so they are reported but were not compared with CPU_PERF_BUDGET. Hardware-GL numbers were still gated.`);
 md.push("");
 
 md.push("## Per-sample results", "");
-md.push("| game_id | theme | template | layout | diff | light | scale | playable | won | obj | sim s | stuck | falls | in-solid | save H/B | det | fps | p95 ms | draws | tris | load ms | build ms | budget |");
-md.push("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+md.push("| game_id | theme | template | layout | diff | light | scale | playable | won | obj | sim s | stuck | falls | in-solid | save H/B | det | fps (GPU) | p95 ms | cpu_worst_case fps | draws | tris | load ms | build ms | budget |");
+md.push("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
 for (const s of scores) {
   const r = s.recipe || {};
-  if (!s.visual_signature) { md.push(`| ${s.game_id} | ${r.theme} | ${r.template} | ${r.layout} | ${r.difficulty} | ${r.lighting ?? "–"} | ${r.scale ?? "–"} | **no** | – | – | – | – | – | – | – | – | – | – | – | – | – | – | – |`); continue; }
-  const oc = s.objective_completion, c = s.collision, f = s.fps;
-  md.push(`| ${s.game_id} | ${r.theme} | ${r.template} | ${r.layout} | ${r.difficulty} | ${s.lighting ?? "–"} | ${s.scale} | ${s.playable ? "yes" : "**no**"} | ${yn(oc.won)} | ${oc.done}/${oc.required} | ${num(oc.sim_seconds)} | ${c.stuck_recoveries ?? "–"} | ${c.falls ?? "–"} | ${c.player_inside_solid_samples ?? "–"}/${c.samples} | ${yn(s.save_reload.headless_ok)}/${yn(s.save_reload.browser_ok)} | ${yn(s.deterministic.rebuild_sha_equal)} | ${num(f?.fps, 2)} | ${num(f?.frame_ms_p95, 0)} | ${f?.draw_calls ?? "–"} | ${f?.triangles ?? "–"} | ${s.launch.load_ms ?? "–"} | ${s.build_ms ?? "–"} | ${s.budgets.ok ? "ok" : "**over**"} |`);
+  if (!s.visual_signature) { md.push(`| ${s.game_id} | ${r.theme} | ${r.template} | ${r.layout} | ${r.difficulty} | ${r.lighting ?? "–"} | ${r.scale ?? "–"} | **no** |${" – |".repeat(16)}`); continue; }
+  const oc = s.objective_completion, c = s.collision, f = s.fps, fc = s.fps_cpu_worst_case, g = f || fc;
+  md.push(`| ${s.game_id} | ${r.theme} | ${r.template} | ${r.layout} | ${r.difficulty} | ${s.lighting ?? "–"} | ${s.scale} | ${s.playable ? "yes" : "**no**"} | ${yn(oc.won)} | ${oc.done}/${oc.required} | ${num(oc.sim_seconds)} | ${c.stuck_recoveries ?? "–"} | ${c.falls ?? "–"} | ${c.player_inside_solid_samples ?? "–"}/${c.samples} | ${yn(s.save_reload.headless_ok)}/${yn(s.save_reload.browser_ok)} | ${yn(s.deterministic.rebuild_sha_equal)} | ${num(f?.fps, 1)} | ${num(f?.frame_ms_p95, 1)} | ${num(fc?.fps, 2)} | ${g?.draw_calls ?? "–"} | ${g?.triangles ?? "–"} | ${s.launch.load_ms ?? s.launch.cpu_load_ms ?? "–"} | ${s.build_ms ?? "–"} | ${s.budgets.ok ? "ok" : "**over**"} |`);
 }
 md.push("");
-md.push("Columns: *obj* required objectives done by the headless playtest agent; *in-solid* steps the player ended inside a solid collider / steps with a collider nearby (collision probe); *save H/B* headless / browser save-reload; *det* a second build of the same recipe has the same `integrity.sha256`; *fps*, *p95 ms* real `requestAnimationFrame` rendering in headless Chrome (SwiftShader) while the player walks; *load ms* page navigation to runtime ready.", "");
+md.push("Columns: *obj* required objectives done by the headless playtest agent; *in-solid* steps the player ended inside a solid collider / steps with a collider nearby (collision probe); *save H/B* headless / browser save-reload (every browser pass that ran); *det* a second build of the same recipe has the same `integrity.sha256`; *fps (GPU)*, *p95 ms* real `requestAnimationFrame` rendering on hardware GL while the player walks; *cpu_worst_case fps* the same on SwiftShader (advisory); *load ms* page navigation to runtime ready (GPU pass, else CPU pass).", "");
 
 const failed = scores.filter((s) => !s.playable);
 md.push("## Samples that are not playable", "");
-if (!failed.length) md.push("None: every sample met every criterion.");
+if (!failed.length) md.push(`None: every sample met every measured criterion${ran("gpu") ? "" : " (frame rate not measured on a GPU in this run)"}.`);
 else for (const s of failed) md.push(`- **${s.game_id}**: ${s.reasons.join("; ")}`);
 md.push("");
+const cpuAdv = ok.filter((s) => (s.budgets.cpu_advisory || []).length);
+if (cpuAdv.length) {
+  md.push("## cpu_worst_case advisories (SwiftShader, not gating)", "");
+  for (const s of cpuAdv) md.push(`- ${s.game_id}: ${s.budgets.cpu_advisory.map((o) => `${o.key} ${o.value} vs ${o.limit}`).join(", ")}`);
+  md.push("");
+}
 
 md.push("## Variety", "");
 md.push(`- ${variety.n} samples, ${variety.pairs} pairs compared on the visual signature (palette and sky/fog colours in CIE Lab, lighting, terrain height histograms and relief, scatter and placement asset mix, placement footprint, biome/shape/weather/material labels${ok.some((s) => s.visual_signature.groups.screen) ? ", and a 64-bin colour histogram of a real rendered frame" : ""}); distance is 0 (identical) to 1.`);
@@ -294,17 +339,19 @@ md.push(`- Near-duplicate threshold ${variety.near_duplicate_threshold}: ${varie
 md.push(`- World variants (distinct theme × biome × terrain shape × lighting): **${variety.world_variants}**. Gameplay variants (distinct required-objective kind sequences): **${variety.gameplay_variants}**.`);
 md.push(`- Distinct: ${Object.entries(variety.distinct).map(([k, v]) => `${k} ${v}`).join(", ")}.`);
 md.push("");
-if (fpsSummary) {
-  md.push("## Browser performance (SwiftShader, CPU)", "");
-  md.push(`FPS min ${num(fpsSummary.min_fps, 2)}, avg ${num(fpsSummary.avg_fps, 2)}, max ${num(fpsSummary.max_fps, 2)}; average p95 frame ${num(fpsSummary.avg_p95_ms, 0)} ms; average load ${num(fpsSummary.avg_load_ms, 0)} ms; draw calls avg ${num(fpsSummary.avg_draw_calls, 0)} / max ${fpsSummary.max_draw_calls}; max triangles ${fpsSummary.max_triangles}.`, "");
+md.push("## Browser performance", "");
+for (const [k, label] of [["gpu", `GPU (${gpuRenderers.join("; ") || "not run"})`], ["cpu_worst_case", `cpu_worst_case (${cpuRenderers.join("; ") || "not run"}), advisory`]]) {
+  const f = fpsSummary[k];
+  md.push(f ? `- **${label}**: FPS min ${num(f.min_fps, 2)}, avg ${num(f.avg_fps, 2)}, max ${num(f.max_fps, 2)}; average p50 ${num(f.avg_p50_ms, 1)} ms, p95 ${num(f.avg_p95_ms, 1)} ms; average load ${num(f.avg_load_ms, 0)} ms; draw calls avg ${num(f.avg_draw_calls, 0)} / max ${f.max_draw_calls}; max triangles ${f.max_triangles}.` : `- **${label}**: not measured.`);
 }
+md.push("");
 md.push("## Metric definitions", "");
-md.push("- **playable** = headless launch ok, browser launch ok (when run), headless playtest won, save/reload ok headless and in the browser (when run), rebuild byte-identical, within budget (`src/gamesd/budgets.mjs`), no player step inside a solid, and no errors.");
-md.push("- **launch**: headless = the package validated and `createSim` started; browser = `play.html` reached `ready` in play mode with no page, hook or console errors.");
+md.push("- **playable** = headless launch ok, every browser pass that ran launched and played without errors, headless playtest won, save/reload ok headless and in every browser pass, rebuild byte-identical, within budget (`src/gamesd/budgets.mjs`: assets, draw calls, triangles, build time, and — only from a hardware-GL pass — FPS, p95 frame time and load time), no player step inside a solid, and no errors.");
+md.push("- **launch**: headless = the package validated and `createSim` started; browser = `play.html` reached `ready` in play mode with no page, hook or console errors. The page's WebGL renderer string is recorded for every pass.");
 md.push("- **objective completion**: the Games-B headless playtest agent (walks, never teleports) against the required objectives.");
 md.push("- **collision**: the playtest is re-run with `resolveCapsule` observed; every settled player position with a collider nearby is checked against the solid colliders (XZ containment plus vertical overlap). *stuck* is the agent's stuck recoveries, *falls* the sim's fall-outs.");
-md.push("- **save/reload**: headless = snapshot → restore → identical snapshot and identical continuation (the playtest's midpoint save, or a fresh sim after 3 s when there are too few objectives); browser = `save()` → walk away → `load()` from localStorage → position within 0.25 m and re-saved snapshot equal apart from `saved_at`.");
-md.push("- **fps**: frames per second of real rAF rendering over at least " + FPS_SECONDS + " s and 12 frames (capped at 45 s) while W is held; p50/p95 frame intervals from the same frames.");
+md.push("- **save/reload**: headless = snapshot → restore → identical snapshot and identical continuation (the playtest's midpoint save, or a fresh sim after 3 s when there are too few objectives); browser = `save()` → walk at least 0.5 m away → `load()` from localStorage → position within 0.25 m and re-saved snapshot equal apart from `saved_at`.");
+md.push("- **fps**: frames per second of real rAF rendering over at least " + FPS_SECONDS + " s and 12 frames (capped at 45 s) while W is held; p50/p95 frame intervals from the same frames. GPU pass: headless Chrome with ANGLE/Metal hardware GL; CPU pass: SwiftShader.");
 md.push("- **variety**: see *Variety*; world and gameplay variants are counts of distinct label tuples.");
 md.push("");
 fs.mkdirSync(OUT, { recursive: true });
@@ -316,5 +363,5 @@ bench.matrix_source = matrix.source;
 fs.writeFileSync(path.join(EVIDENCE, "bench.json"), JSON.stringify(bench, null, 1) + "\n");
 
 log("totals", JSON.stringify(totals));
-if (fpsSummary) log("fps", JSON.stringify(fpsSummary));
+log("fps", JSON.stringify(fpsSummary));
 log(`wrote ${path.relative(ROOT, OUT)}/DCS_GAMES_LOCAL_SAMPLE_REPORT.md, DCS_GAMES_PROCEDURAL_PRESET_MATRIX.csv (${matrix.source}), evidence/bench.json`);

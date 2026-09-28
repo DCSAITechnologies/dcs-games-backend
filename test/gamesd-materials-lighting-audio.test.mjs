@@ -66,7 +66,8 @@ test("styles: every named theme and every theme in THEMES has a style; unknown i
   for (const t of Object.values(THEMES)) {
     const sid = styleIdFor(t);
     assert.ok(MATERIAL_STYLES[sid], `theme ${t.id} → ${sid}`);
-    if (MATERIAL_STYLES[t.material_style || t.id]) assert.notEqual(sid, DEFAULT_STYLE_ID);
+    assert.ok(MATERIAL_STYLES[t.material_style || t.id], `theme ${t.id} has no dedicated material style`);
+    assert.notEqual(sid, DEFAULT_STYLE_ID);
   }
   assert.equal(styleIdFor({ id: "no_such_theme" }), DEFAULT_STYLE_ID);
   assert.equal(styleIdFor(null), DEFAULT_STYLE_ID);
@@ -218,6 +219,7 @@ const fakeWorld = {
 
 test("audio: every theme has a preset; audioFor is deterministic, valid and theme-specific", () => {
   for (const id of NAMED_THEMES) assert.ok(AUDIO_PRESETS[id], `no audio preset for ${id}`);
+  for (const t of Object.values(THEMES)) assert.ok(AUDIO_PRESETS[t.audio || t.id], `theme ${t.id} has no dedicated audio preset`);
   const beds = new Map();
   for (const t of [...Object.values(THEMES), { id: "no_such_theme" }]) {
     const ctx = { theme: t, recipe: { seed: 4 }, world: fakeWorld, notes: [] };

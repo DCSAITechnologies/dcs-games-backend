@@ -31,10 +31,11 @@ const r2 = (v) => (typeof v === "number" && Number.isFinite(v) ? Math.round(v * 
  *   browserCpu: a benchPackage() result from the SwiftShader pass (cpu_worst_case, advisory)
  *   A result whose renderer is a software rasteriser counts as the CPU pass whichever slot it is in.
  *   Only a hardware-GL result supplies `fps` and can gate on PERF_BUDGET.
+ *   cpuCompare=false skips the CPU_PERF_BUDGET comparison (overloaded host).
  *   rebuild: a second buildFromRecipe() result for the same recipe; true (default) rebuilds here; false skips
  * @returns {Promise<object>} SampleScore
  */
-export async function scoreSample(res, { browser = null, browserCpu = null, rebuild = true, probe = true, maxSimSeconds, perfGate = true } = {}) {
+export async function scoreSample(res, { browser = null, browserCpu = null, rebuild = true, probe = true, maxSimSeconds, perfGate = true, cpuCompare = true } = {}) {
   const passes = [browser, browserCpu].filter(Boolean);
   const gpuRun = passes.find((p) => p.gpu === true) || null;
   const cpuRun = passes.find((p) => p !== gpuRun) || null;
@@ -137,7 +138,7 @@ export async function scoreSample(res, { browser = null, browserCpu = null, rebu
   const perf = fps ? { fps: fps.fps, frame_ms_p95: fps.frame_ms_p95, draw_calls: fps.draw_calls, triangles: fps.triangles, load_ms: launch.load_ms, renderer: fps.renderer } : null;
   const geom = perf || fps_cpu_worst_case;
   const loadFree = geom ? { draw_calls: geom.draw_calls, triangles: geom.triangles } : null;
-  const cpuPerf = fps_cpu_worst_case && perfGate ? { ...fps_cpu_worst_case, load_ms: launch.cpu_load_ms } : null;
+  const cpuPerf = fps_cpu_worst_case && cpuCompare ? { ...fps_cpu_worst_case, load_ms: launch.cpu_load_ms } : null;
   const budgets = pkg ? checkBudgets(pkg, { perf: perfGate && perf ? perf : loadFree, cpuPerf, build_ms: perfGate ? res.build_ms ?? null : null, expandScatter: deps.expandScatter })
     : { ok: false, over: [{ key: "package", value: null, limit: null }] };
   if (pkg) {
