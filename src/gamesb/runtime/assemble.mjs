@@ -51,8 +51,9 @@ export function seal(pkg) {
  * @param {object[]} a.assets AssetRecord[]
  * @param {object[]} [a.provenance] ProvenanceStage[]
  * @param {string} [a.createdAt] fixed timestamp for byte-identical rebuilds
+ * @param {object} [a.extras] optional add-only top-level fields (e.g. `audio`); never overrides a contract field
  */
-export function assemblePackage({ gameId, version = 1, concept, world, scene, assets, gameplay, characters, provenance = [], createdAt, hooks } = {}) {
+export function assemblePackage({ gameId, version = 1, concept, world, scene, assets, gameplay, characters, provenance = [], createdAt, hooks, extras } = {}) {
   if (!gameId) throw new Error("assemblePackage: gameId is required");
   const records = Array.isArray(assets) ? assets : assets?.records || [];
   const pkg = {
@@ -75,5 +76,6 @@ export function assemblePackage({ gameId, version = 1, concept, world, scene, as
       stages: [...provenance, { stage: "assemble", lane: "local", provider: "local", model: "deterministic", status: "AVAILABLE", latency_ms: 0, cost_usd: 0, at: createdAt || new Date().toISOString() }],
     },
   };
+  for (const [k, v] of Object.entries(extras || {})) if (!(k in pkg) && v !== undefined && v !== null) pkg[k] = v;
   return seal(pkg);
 }

@@ -41,9 +41,11 @@ function slug(s) {
  * @param {object} [opts.env]       provider environment; `{ DCS_PROVIDERS_OFFLINE: "1" }` forces the local path
  * @param {string} [opts.gameId]
  * @param {object} [opts.cache]     passed to resolveAssets
- * @param {string} [opts.createdAt] fixed timestamp for byte-identical rebuilds
+ * @param {string} [opts.createdAt] fixed timestamp for byte-identical rebuilds: provenance `at` is pinned to it
+ *                                  and provenance `latency_ms` is zeroed (real timings stay in the returned `timings`)
  * @param {object} [opts.overrides] { concept: object|fn, world|characters|assets|gameplay|scene: fn(value, ctx) → value }
- *                                  — an object `concept` replaces generation (flagship authoring); functions patch a stage's output
+ *                                  — an object `concept` replaces generation (flagship authoring); functions patch a stage's output.
+ *                                  `extras: fn({concept, world, characters, gameplay}) → object` adds optional top-level package fields.
  * @param {boolean} [opts.playtest=true]
  * @param {object} [opts.deps]      sim deps for the playtest (defaults to runtime/deps.mjs)
  * @returns {Promise<{ok, pkg, validation, playtest, reachability, timings}>}
@@ -119,9 +121,12 @@ export async function buildGame(prompt, { seed, env = process.env, gameId, cache
     return patch("scene", s, { concept, world, characters, assets });
   });
 
-  // 7. assemble
+  // 7. assemble. With a pinned createdAt the provenance carries no wall-clock
+  // values, otherwise two builds of the same input differ in `at`/`latency_ms`.
+  const provenance = stages.filter(Boolean).map((s) => (createdAt ? { ...s, at: createdAt, latency_ms: 0 } : s));
+  const extras = typeof overrides.extras === "function" ? overrides.extras({ concept, world, characters, gameplay }) : null;
   const pkg = await time("assemble", async () => assemblePackage({
-    gameId: id, version: 1, concept, world, scene, assets: assets.records, gameplay, characters, provenance: stages.filter(Boolean), createdAt,
+    gameId: id, version: 1, concept, world, scene, assets: assets.records, gameplay, characters, provenance, createdAt, extras,
   }));
 
   // 8. validate

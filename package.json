@@ -3,7 +3,7 @@
   "version": "3.1.0",
   "private": true,
   "type": "module",
-  "description": "DCS Games Core API \u2014 CW1 identity + CW2 generation + CW5 persistence + CW7 atlas + V3 world stack. Money DARK.",
+  "description": "DCS Games Core API — CW1 identity + CW2 generation + CW5 persistence + CW7 atlas + V3 world stack. Money DARK.",
   "scripts": {
     "start": "tsx server.mts",
     "dev": "tsx server.mts",
@@ -33,7 +33,9 @@
     "test:gamesb": "DCS_PROVIDERS_OFFLINE=1 node --test test/gamesb-assets-pipeline.test.mjs test/gamesb-assets.test.mjs test/gamesb-characters-brain.test.mjs test/gamesb-characters.test.mjs test/gamesb-concept.test.mjs test/gamesb-gameplay.test.mjs test/gamesb-hooks.test.mjs test/gamesb-iso-lint.test.mjs test/gamesb-pipeline.test.mjs test/gamesb-runtime-gates.test.mjs test/gamesb-runtime.test.mjs test/gamesb-world-nav-collision.test.mjs test/gamesb-world-scene.test.mjs test/gamesb-world-spec.test.mjs test/gamesb-world-stale-nav.test.mjs",
     "test:gamesb:browser": "DCS_PROVIDERS_OFFLINE=1 node --test --test-concurrency=1 test/gamesb-browser.test.mjs test/gamesb-flagship.test.mjs",
     "gamesb:build": "node scripts/gamesb-build.mjs",
-    "gamesb:flagship": "node src/gamesb/flagship/build.mjs"
+    "gamesb:flagship": "node src/gamesb/flagship/build.mjs",
+    "test:gamesd": "DCS_PROVIDERS_OFFLINE=1 node --test test/gamesd-*.test.mjs",
+    "gamesd:bench": "node tools/gamesd-bench.mjs"
   },
   "dependencies": {
     "tsx": "^4.22.4"
