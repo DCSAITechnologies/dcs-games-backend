@@ -63,6 +63,7 @@ const MEASURE = `
     var b = el.getBoundingClientRect();
     return {
       t: (el.textContent || "").trim().slice(0, 24),
+      avatar: el.classList.contains("avatar"),
       w: Math.round(b.width), h: Math.round(b.height),
       x: Math.round(b.left), right: Math.round(b.right),
       top: Math.round(b.top), bottom: Math.round(b.bottom),
@@ -121,7 +122,9 @@ test("HEADER: the buttons share one height and one vertical centre line", opts, 
   for (const w of DESKTOP) {
     const m = await headerAt(w);
     // The avatar is a circle and is allowed its own size; the BUTTONS must match.
-    const btns = m.controls.filter((c) => c.t !== "OV" && c.w > 0);
+    // Identified by its class: it used to read "OV" for everyone (fake initials),
+    // and now carries the signed-in person's own initials or a neutral glyph.
+    const btns = m.controls.filter((c) => !c.avatar && c.w > 0);
     const hs = btns.map((c) => c.h);
     const cys = btns.map((c) => c.cy);
     const hSpread = Math.max(...hs) - Math.min(...hs);

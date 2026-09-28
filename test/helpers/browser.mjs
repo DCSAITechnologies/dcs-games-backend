@@ -65,6 +65,16 @@ export function serveStatic(dir, port = 0) {
       if (r.code === 200) p = r.to;
       else { res.writeHead(r.code, { Location: r.to }); return res.end(); }
     }
+    // Cloudflare Pages answers a directory asked for without its trailing slash
+    // with a redirect to `dir/`. The /legal route used to be served here only by a
+    // _redirects rule to /legal/index.html — which on Pages meets its own
+    // index.html -> dir/ rule and loops. Mirror Pages instead of needing the rule.
+    if (!p.endsWith("/")) {
+      const d = path.join(dir, p);
+      if (d.startsWith(dir) && fs.existsSync(d) && fs.statSync(d).isDirectory() && fs.existsSync(path.join(d, "index.html"))) {
+        res.writeHead(308, { Location: p + "/" }); return res.end();
+      }
+    }
     if (p.endsWith("/")) p += "index.html";
     const file = path.join(dir, p);
     if (!file.startsWith(dir) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
@@ -219,7 +229,7 @@ export class Page {
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
       this.ws.send(JSON.stringify({ id, method, params }));
-      setTimeout(() => { if (this.pending.has(id)) { this.pending.delete(id); reject(new Error(`CDP timeout: ${method}`)); } }, 60000);
+      setTimeout(() => { if (this.pending.has(id)) { this.pending.delete(id); reject(new Error(`CDP timeout: ${method}` + (this.lastUrl ? ` (page: ${this.lastUrl})` : ""))); } }, 60000);
     });
   }
   static async open(browser) {
@@ -246,6 +256,7 @@ export class Page {
       this.ws.addEventListener("message", h);
       setTimeout(() => { this.ws.removeEventListener("message", h); resolve(); }, 30000);
     });
+    this.lastUrl = url;   // named in a CDP timeout, so a hang says WHERE it hung
     await this.send("Page.navigate", { url });
     await loaded;
     await new Promise((r) => setTimeout(r, waitMs));

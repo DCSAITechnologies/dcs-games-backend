@@ -1,0 +1,19 @@
+{
+ "routes": 191,
+ "green": 190,
+ "broken": 1,
+ "broken_routes": [
+  "/profile-v3"
+ ],
+ "js_error_routes": [],
+ "scroll_fail": [],
+ "api_err_routes": {
+  "/auth-callback": "/v3/discover NETERR x2; /api/public/events NETERR x1",
+  "/genre-adventure": "/v3/discover NETERR x1",
+  "/genre-coop": "/v3/discover NETERR x2",
+  "/genre-education": "/v3/discover NETERR x2",
+  "/profile-v3": "/profiles/founder 404 x5"
+ },
+ "dead_link_routes": 36,
+ "sample_routes": 131
+}
