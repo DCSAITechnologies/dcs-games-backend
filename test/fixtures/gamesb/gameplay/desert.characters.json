@@ -1,0 +1,102 @@
+{
+ "character_spec_version": "1.0.0",
+ "characters": [
+  {
+   "id": "caravan_master_kai",
+   "name": "Caravan Master Kai",
+   "role": "quest_giver",
+   "kind": "humanoid",
+   "body": {
+    "height": 1.7,
+    "build": "average",
+    "palette": {
+     "skin": "#c68642",
+     "primary": "#ca803a",
+     "secondary": "#e6c386",
+     "accent": "#379e89"
+    },
+    "accessories": []
+   },
+   "asset_ref": "char:caravan_master_kai",
+   "spawn_ref": "spawn_npc_caravan_master_kai",
+   "behavior": {
+    "initial": "idle",
+    "patrol": [],
+    "wander_radius": 4,
+    "speed": 2,
+    "sight_radius": 10,
+    "hostile": false,
+    "leash_radius": 20
+   },
+   "dialogue_ref": "dlg_caravan_master_kai",
+   "interaction_radius": 2.5,
+   "companion": false,
+   "invulnerable": true
+  },
+  {
+   "id": "guide_bram",
+   "name": "Bram the Guide",
+   "role": "companion",
+   "kind": "humanoid",
+   "body": {
+    "height": 1.7,
+    "build": "average",
+    "palette": {
+     "skin": "#c68642",
+     "primary": "#ca803a",
+     "secondary": "#e6c386",
+     "accent": "#379e89"
+    },
+    "accessories": []
+   },
+   "asset_ref": "char:guide_bram",
+   "spawn_ref": "spawn_npc_guide_bram",
+   "behavior": {
+    "initial": "idle",
+    "patrol": [],
+    "wander_radius": 4,
+    "speed": 2,
+    "sight_radius": 10,
+    "hostile": false,
+    "leash_radius": 20
+   },
+   "dialogue_ref": "dlg_guide_bram",
+   "interaction_radius": 2.5,
+   "companion": true,
+   "invulnerable": true
+  },
+  {
+   "id": "trader_piet",
+   "name": "Piet the Trader",
+   "role": "merchant",
+   "kind": "humanoid",
+   "body": {
+    "height": 1.7,
+    "build": "average",
+    "palette": {
+     "skin": "#c68642",
+     "primary": "#ca803a",
+     "secondary": "#e6c386",
+     "accent": "#379e89"
+    },
+    "accessories": []
+   },
+   "asset_ref": "char:trader_piet",
+   "spawn_ref": "spawn_npc_trader_piet",
+   "behavior": {
+    "initial": "idle",
+    "patrol": [],
+    "wander_radius": 4,
+    "speed": 2,
+    "sight_radius": 10,
+    "hostile": false,
+    "leash_radius": 20
+   },
+   "dialogue_ref": "dlg_trader_piet",
+   "interaction_radius": 2.5,
+   "companion": false,
+   "invulnerable": true
+  }
+ ],
+ "dialogues": []
+}

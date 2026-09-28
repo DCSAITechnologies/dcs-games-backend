@@ -1,0 +1,76 @@
+{
+ "character_spec_version": "1.0.0",
+ "characters": [
+  {
+   "id": "keeper_maren",
+   "name": "Maren",
+   "role": "quest_giver",
+   "kind": "humanoid",
+   "body": {
+    "height": 1.7,
+    "build": "slim",
+    "palette": {
+     "skin": "#e0b090",
+     "primary": "#2f5d8a",
+     "secondary": "#5a4a3a",
+     "accent": "#f2c14e"
+    },
+    "accessories": [
+     "hat",
+     "lantern",
+     "scarf"
+    ]
+   },
+   "asset_ref": "char:keeper_maren",
+   "spawn_ref": "spawn_npc_keeper_maren",
+   "behavior": {
+    "initial": "idle",
+    "patrol": [],
+    "wander_radius": 0,
+    "speed": 1.2,
+    "sight_radius": 8,
+    "hostile": false,
+    "leash_radius": 10
+   },
+   "dialogue_ref": null,
+   "interaction_radius": 2,
+   "companion": false,
+   "invulnerable": true
+  },
+  {
+   "id": "fox",
+   "name": "Ember Fox",
+   "role": "companion",
+   "kind": "creature",
+   "body": {
+    "height": 0.6,
+    "build": "slim",
+    "palette": {
+     "skin": "#f0d0b0",
+     "primary": "#d0662a",
+     "secondary": "#3a2a20",
+     "accent": "#ffd27a"
+    },
+    "accessories": [
+     "scarf"
+    ]
+   },
+   "asset_ref": "char:fox",
+   "spawn_ref": "spawn_npc_fox",
+   "behavior": {
+    "initial": "follow_player",
+    "patrol": [],
+    "wander_radius": 4,
+    "speed": 3,
+    "sight_radius": 12,
+    "hostile": false,
+    "leash_radius": 20
+   },
+   "dialogue_ref": null,
+   "interaction_radius": 2,
+   "companion": true,
+   "invulnerable": true
+  }
+ ],
+ "dialogues": []
+}

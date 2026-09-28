@@ -1,0 +1,29 @@
+{
+  "concept_version": "1.0.0",
+  "title": "Relay Nine",
+  "logline": "A research relay on a dead moon has stopped answering, and its last engineer is still inside.",
+  "source_prompt": "sci-fi base mission with a helper drone and patrolling security robots",
+  "prompt_hash": "0000000000000000000000000000000000000000000000000000000000000002",
+  "seed": 77,
+  "genre": "mission",
+  "biome": "scifi_base",
+  "scale": "small",
+  "mood": "tense",
+  "time_of_day": 0.1,
+  "weather": "clear",
+  "palette": { "primary": "#2b2d42", "secondary": "#8d99ae", "accent": "#00f5d4", "ground": "#4a4e69", "sky": "#0b0c10", "water": "#1f4e5f" },
+  "player_fantasy": "the rescue technician",
+  "key_locations": [
+    { "id": "ops_deck", "name": "Ops Deck", "kind": "hub", "description": "The command ring, lights on emergency red." },
+    { "id": "reactor", "name": "Reactor Well", "kind": "landmark", "description": "A shaft of humming coils that should not still be running." },
+    { "id": "hangar", "name": "Hangar Three", "kind": "camp", "description": "A cold hangar where the last shuttle never left." }
+  ],
+  "characters": [
+    { "id": "engineer_ada", "name": "Engineer Ada", "role": "quest_giver", "description": "Holed up on the ops deck, running on coffee and spite." },
+    { "id": "bolt", "name": "Bolt", "role": "companion", "description": "A small repair drone." },
+    { "id": "sec_unit", "name": "Security Unit", "role": "enemy", "description": "A patrolling security robot with a cracked optic." },
+    { "id": "quartermaster_jo", "name": "Jo", "role": "merchant", "description": "Trades spare parts." }
+  ],
+  "objectives_outline": ["Reach the ops deck", "Restore reactor power"],
+  "hazards": ["radiation near the reactor"]
+}

@@ -1,0 +1,134 @@
+{
+ "character_spec_version": "1.0.0",
+ "characters": [
+  {
+   "id": "keeper_maren",
+   "name": "Keeper Maren",
+   "role": "quest_giver",
+   "kind": "humanoid",
+   "body": {
+    "height": 1.7,
+    "build": "average",
+    "palette": {
+     "skin": "#c68642",
+     "primary": "#2a625f",
+     "secondary": "#81846f",
+     "accent": "#c88e16"
+    },
+    "accessories": []
+   },
+   "asset_ref": "char:keeper_maren",
+   "spawn_ref": "spawn_npc_keeper_maren",
+   "behavior": {
+    "initial": "idle",
+    "patrol": [],
+    "wander_radius": 4,
+    "speed": 2,
+    "sight_radius": 10,
+    "hostile": false,
+    "leash_radius": 20
+   },
+   "dialogue_ref": "dlg_keeper_maren",
+   "interaction_radius": 2.5,
+   "companion": false,
+   "invulnerable": true
+  },
+  {
+   "id": "deckhand_nadia",
+   "name": "Nadia the Deckhand",
+   "role": "companion",
+   "kind": "humanoid",
+   "body": {
+    "height": 1.7,
+    "build": "average",
+    "palette": {
+     "skin": "#c68642",
+     "primary": "#2a625f",
+     "secondary": "#81846f",
+     "accent": "#c88e16"
+    },
+    "accessories": []
+   },
+   "asset_ref": "char:deckhand_nadia",
+   "spawn_ref": "spawn_npc_deckhand_nadia",
+   "behavior": {
+    "initial": "idle",
+    "patrol": [],
+    "wander_radius": 4,
+    "speed": 2,
+    "sight_radius": 10,
+    "hostile": false,
+    "leash_radius": 20
+   },
+   "dialogue_ref": "dlg_deckhand_nadia",
+   "interaction_radius": 2.5,
+   "companion": true,
+   "invulnerable": true
+  },
+  {
+   "id": "reef_crab",
+   "name": "Reef Crab",
+   "role": "creature",
+   "kind": "creature",
+   "body": {
+    "height": 1.7,
+    "build": "average",
+    "palette": {
+     "skin": "#c68642",
+     "primary": "#2a625f",
+     "secondary": "#81846f",
+     "accent": "#c88e16"
+    },
+    "accessories": []
+   },
+   "asset_ref": "char:reef_crab",
+   "spawn_ref": "spawn_npc_reef_crab",
+   "behavior": {
+    "initial": "patrol",
+    "patrol": [],
+    "wander_radius": 4,
+    "speed": 2,
+    "sight_radius": 10,
+    "hostile": true,
+    "leash_radius": 20
+   },
+   "dialogue_ref": null,
+   "interaction_radius": 2.5,
+   "companion": false,
+   "invulnerable": false
+  },
+  {
+   "id": "trader_odo",
+   "name": "Odo the Trader",
+   "role": "merchant",
+   "kind": "humanoid",
+   "body": {
+    "height": 1.7,
+    "build": "average",
+    "palette": {
+     "skin": "#c68642",
+     "primary": "#2a625f",
+     "secondary": "#81846f",
+     "accent": "#c88e16"
+    },
+    "accessories": []
+   },
+   "asset_ref": "char:trader_odo",
+   "spawn_ref": "spawn_npc_trader_odo",
+   "behavior": {
+    "initial": "idle",
+    "patrol": [],
+    "wander_radius": 4,
+    "speed": 2,
+    "sight_radius": 10,
+    "hostile": false,
+    "leash_radius": 20
+   },
+   "dialogue_ref": "dlg_trader_odo",
+   "interaction_radius": 2.5,
+   "companion": false,
+   "invulnerable": true
+  }
+ ],
+ "dialogues": []
+}

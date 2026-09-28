@@ -1,0 +1,27 @@
+{
+  "concept_version": "1.0.0",
+  "title": "Glass Dunes Expedition",
+  "logline": "Cross the glass dunes, recover three relic shards and reach the buried obelisk before the sandstorm.",
+  "source_prompt": "desert survival with a camp, a cave and an obelisk",
+  "prompt_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+  "seed": 9001,
+  "genre": "survival",
+  "biome": "desert",
+  "scale": "small",
+  "mood": "harsh, shimmering",
+  "time_of_day": 0.32,
+  "weather": "sandstorm",
+  "palette": { "primary": "#c98b4a", "secondary": "#8a5a2b", "accent": "#5ad1e6", "ground": "#d8b27a", "sky": "#e8c79a", "water": "#3a8fa8" },
+  "player_fantasy": "a lone surveyor braving the sandstorm",
+  "key_locations": [
+    { "id": "base_camp", "name": "Base Camp", "kind": "hub", "description": "Tents and a campfire." },
+    { "id": "wind_cave", "name": "Wind Cave", "kind": "cave", "description": "A cave that sings in the wind." },
+    { "id": "buried_obelisk", "name": "Buried Obelisk", "kind": "landmark", "description": "An obelisk half under sand." }
+  ],
+  "characters": [
+    { "id": "guide_sefa", "name": "Sefa", "role": "companion", "description": "An old dune guide." },
+    { "id": "dune_stalker", "name": "Dune Stalker", "role": "creature", "description": "A beast of the sands." }
+  ],
+  "objectives_outline": ["Find the shards", "Reach the obelisk"],
+  "hazards": ["sandstorm"]
+}

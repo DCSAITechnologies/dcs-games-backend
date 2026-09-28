@@ -1,0 +1,79 @@
+{
+ "concept_version": "1.0.0",
+ "title": "The Mirages of Torbridune",
+ "logline": "On sand-scoured, epic Torbridune, you unravel the mechanisms to recover the sun shards and restore the Sun Shrine.",
+ "source_prompt": "a small puzzle of sun shrines in the desert",
+ "prompt_hash": "51125edd77c147f03ce68c78de40f35190ab0427cfbbfafbd29dc17dcd11952e",
+ "seed": 1544755157,
+ "genre": "puzzle",
+ "biome": "desert",
+ "scale": "small",
+ "mood": "epic",
+ "time_of_day": 0.4,
+ "weather": "sandstorm",
+ "palette": {
+  "primary": "#ca803a",
+  "secondary": "#e6c386",
+  "accent": "#379e89",
+  "ground": "#d7b070",
+  "sky": "#eecf92",
+  "water": "#519293"
+ },
+ "player_fantasy": "You are a wanderer who arrives at Oasis Market and becomes the one who brings the Sun Shrine back to life.",
+ "key_locations": [
+  {
+   "id": "oasis_market",
+   "name": "Oasis Market",
+   "kind": "hub",
+   "description": "The start: palms and awnings around a spring."
+  },
+  {
+   "id": "nomad_camp",
+   "name": "Nomad Camp",
+   "kind": "camp",
+   "description": "Nomad Camp: a camp of Torbridune, reached by the trail from Oasis Market."
+  },
+  {
+   "id": "scorpion_grotto",
+   "name": "Scorpion Grotto",
+   "kind": "cave",
+   "description": "Scorpion Grotto: a cave of Torbridune, reached by the trail from Oasis Market."
+  },
+  {
+   "id": "sun_shrine",
+   "name": "Sun Shrine",
+   "kind": "shrine",
+   "description": "The sun shrine at the heart of the story, standing beyond Oasis Market."
+  }
+ ],
+ "characters": [
+  {
+   "id": "caravan_master_kai",
+   "name": "Caravan Master Kai",
+   "role": "quest_giver",
+   "description": "Waits in Oasis Market and knows why the Sun Shrine fell silent."
+  },
+  {
+   "id": "guide_bram",
+   "name": "Bram the Guide",
+   "role": "companion",
+   "description": "Follows you from Oasis Market and points out anything glinting nearby."
+  },
+  {
+   "id": "trader_piet",
+   "name": "Piet the Trader",
+   "role": "merchant",
+   "description": "Trades gossip about Torbridune for anything shiny."
+  }
+ ],
+ "objectives_outline": [
+  "Speak with Caravan Master Kai in Oasis Market",
+  "Recover the sun shards hidden across Nomad Camp, Scorpion Grotto",
+  "Wake the Nomad Camp",
+  "Wake the Scorpion Grotto",
+  "Restore the Sun Shrine"
+ ],
+ "hazards": [
+  "Sandstorm sweeping the exposed ground around the Sun Shrine"
+ ]
+}

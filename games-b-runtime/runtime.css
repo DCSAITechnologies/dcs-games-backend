@@ -1,0 +1,179 @@
+/* Games-B runtime HUD. Dusk-warm glass panels over the 3D view; everything is
+   positioned against the viewport edges (with safe-area insets) so it holds on a
+   phone in landscape as well as a desktop. */
+:root {
+  --ink: #fff6ea;
+  --muted: #cdbfae;
+  --glass: rgba(16, 18, 30, 0.58);
+  --edge: rgba(255, 214, 160, 0.22);
+  --amber: #ffb347;
+  --gold: #ffcf5a;
+  --good: #8fe0a0;
+  --bad: #ff8a7a;
+  --sky: #8fd0ff;
+  --gap: 14px;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0d16; color: var(--ink);
+  font: 14px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-user-select: none; user-select: none; }
+#scene { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; touch-action: none; cursor: grab; }
+#scene:active { cursor: grabbing; }
+[hidden] { display: none !important; }
+kbd { display: inline-block; min-width: 1.5em; padding: 0 5px; margin: 0 2px; border-radius: 5px; border: 1px solid rgba(255,255,255,.35);
+  background: rgba(255,255,255,.1); font: 600 12px/1.6 ui-monospace, Menlo, monospace; text-align: center; color: var(--ink); }
+.panel { background: var(--glass); border: 1px solid var(--edge); border-radius: 12px; backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+  box-shadow: 0 6px 24px rgba(0,0,0,.25); }
+#hud { position: fixed; inset: 0; pointer-events: none; }
+#hud button, #hud .panel, #dialogue { pointer-events: auto; }
+
+#objectives { position: absolute; top: calc(var(--gap) + env(safe-area-inset-top)); left: calc(var(--gap) + env(safe-area-inset-left));
+  width: min(320px, 44vw); padding: 10px 12px; pointer-events: none; }
+#objectives header { display: flex; justify-content: space-between; align-items: center; font-weight: 700; letter-spacing: .02em; color: var(--gold); margin-bottom: 6px; }
+.pill { font-size: 12px; padding: 1px 8px; border-radius: 999px; background: rgba(255,207,90,.16); color: var(--gold); }
+#objective-list { list-style: none; margin: 0; padding: 0; }
+#objective-list li { padding: 5px 0 5px 20px; position: relative; border-top: 1px solid rgba(255,255,255,.06); }
+#objective-list li:first-child { border-top: 0; }
+#objective-list li::before { content: "◇"; position: absolute; left: 2px; top: 5px; color: var(--amber); }
+#objective-list li.done { color: var(--good); text-decoration: line-through; opacity: .8; }
+#objective-list li.done::before { content: "✓"; color: var(--good); }
+#objective-list li.optional b::after { content: " (optional)"; font-weight: 400; color: var(--muted); font-size: 12px; }
+#objective-list small { display: block; color: var(--muted); font-size: 12px; }
+#objective-list .prog { color: var(--gold); font-weight: 700; }
+#objective-list .muted { color: var(--muted); }
+
+#compass { position: absolute; top: calc(var(--gap) + env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); width: min(420px, 40vw); height: 30px;
+  background: linear-gradient(90deg, transparent, var(--glass) 18%, var(--glass) 82%, transparent); border-radius: 8px; overflow: hidden; }
+#compass-strip { position: absolute; inset: 0; }
+#compass .cp { position: absolute; top: 6px; transform: translateX(-50%); font: 600 12px/1 system-ui; color: var(--muted); }
+#compass .cp.major { color: var(--ink); font-size: 14px; top: 5px; }
+#compass .cp.obj { color: var(--gold); font-size: 14px; top: 3px; text-shadow: 0 0 6px rgba(255,190,80,.8); }
+#compass .cp.obj small { display: block; font-size: 9px; text-align: center; margin-top: 1px; }
+#compass .tick { position: absolute; left: 50%; bottom: 0; width: 2px; height: 6px; background: var(--amber); transform: translateX(-1px); }
+
+#map-box { position: absolute; top: calc(var(--gap) + env(safe-area-inset-top)); right: calc(var(--gap) + env(safe-area-inset-right)); padding: 8px; width: 178px; }
+#minimap { display: block; width: 160px; height: 160px; border-radius: 8px; image-rendering: auto; }
+#timer { margin-top: 6px; text-align: center; font: 700 13px/1.4 ui-monospace, Menlo, monospace; color: var(--sky); letter-spacing: .04em; }
+#timer.urgent { color: var(--bad); animation: pulse 1s infinite; }
+.btn-row { display: flex; gap: 4px; margin-top: 6px; }
+.hud-btn { flex: 1; padding: 5px 0; border-radius: 7px; border: 1px solid var(--edge); background: rgba(255,255,255,.08); color: var(--ink);
+  font: 600 12px system-ui; cursor: pointer; }
+.hud-btn:hover { background: rgba(255,179,71,.25); }
+
+#vitals { position: absolute; left: calc(var(--gap) + env(safe-area-inset-left)); bottom: calc(var(--gap) + env(safe-area-inset-bottom)); width: 250px; padding: 9px 12px; pointer-events: none; }
+#vitals .row { display: flex; justify-content: space-between; margin-bottom: 5px; }
+#lives { color: #ff6b6b; letter-spacing: 2px; font-size: 16px; text-shadow: 0 0 6px rgba(255,80,80,.5); }
+#level { color: var(--muted); font-size: 12px; }
+#health-bar { position: relative; height: 14px; border-radius: 7px; background: rgba(255,255,255,.1); overflow: hidden; }
+#health-fill { height: 100%; width: 100%; background: linear-gradient(90deg, #d9534f, #ff9a5a); transition: width .25s; }
+#health-fill.low { animation: pulse .8s infinite; }
+#health-text { position: absolute; inset: 0; text-align: center; font: 700 10px/14px system-ui; color: #fff; text-shadow: 0 1px 2px #000; }
+
+#inventory { position: absolute; bottom: calc(var(--gap) + env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%); display: flex; gap: 6px; }
+#inventory .slot { position: relative; width: 50px; height: 50px; border-radius: 10px; background: var(--glass); border: 1px solid var(--edge);
+  display: grid; place-items: center; animation: pop .35s ease-out; }
+#inventory .slot img { width: 36px; height: 36px; filter: drop-shadow(0 0 6px rgba(143,208,255,.6)); }
+#inventory .slot span { font-weight: 700; color: var(--gold); }
+#inventory .slot i { position: absolute; right: 4px; bottom: 2px; font: 700 11px system-ui; font-style: normal; }
+
+#prompt { position: absolute; left: 50%; bottom: 96px; transform: translateX(-50%); padding: 8px 16px; border-radius: 999px; background: var(--glass);
+  border: 1px solid rgba(255,207,90,.5); font-weight: 600; white-space: nowrap; box-shadow: 0 0 18px rgba(255,190,80,.25); }
+
+#toasts { position: absolute; top: 58px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 6px; width: min(520px, 90vw); }
+.toast { padding: 7px 14px; border-radius: 10px; background: var(--glass); border: 1px solid var(--edge); animation: slidein .3s ease-out; transition: opacity .5s, transform .5s; text-align: center; }
+.toast.good { border-color: rgba(143,224,160,.6); color: var(--good); }
+.toast.bad { border-color: rgba(255,138,122,.6); color: var(--bad); }
+.toast.out { opacity: 0; transform: translateY(-8px); }
+
+#dialogue { position: absolute; left: 50%; bottom: 84px; transform: translateX(-50%); width: min(640px, 92vw); padding: 14px 18px; }
+#dialogue-speaker { color: var(--gold); font-weight: 800; letter-spacing: .03em; }
+#dialogue-text { margin: 6px 0 10px; font-size: 16px; line-height: 1.45; }
+#dialogue-choices { display: flex; flex-direction: column; gap: 6px; }
+.choice { text-align: left; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--edge); background: rgba(255,255,255,.06); color: var(--ink); font: 500 14px system-ui; cursor: pointer; }
+.choice:hover, .choice:focus-visible { background: rgba(255,179,71,.22); outline: none; }
+
+#help { position: absolute; right: calc(var(--gap) + env(safe-area-inset-right)); bottom: calc(var(--gap) + env(safe-area-inset-bottom)); padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); max-width: 360px; pointer-events: none; }
+#help b { color: var(--ink); }
+#debug { position: absolute; left: calc(var(--gap) + env(safe-area-inset-left)); bottom: 90px; margin: 0; padding: 8px 10px; background: rgba(0,0,0,.6);
+  border-radius: 8px; font: 11px/1.4 ui-monospace, Menlo, monospace; color: #9fe; white-space: pre; }
+
+#touch-ui { display: none; }
+body.touch #touch-ui { display: block; }
+body.touch #help { display: none; }
+#touch-stick { position: absolute; left: 30px; bottom: 110px; width: 120px; height: 120px; border-radius: 50%; border: 2px solid rgba(255,255,255,.25);
+  background: rgba(255,255,255,.06); opacity: .55; }
+#touch-stick.active { opacity: 1; }
+#touch-knob { position: absolute; left: 35px; top: 35px; width: 50px; height: 50px; border-radius: 50%; background: rgba(255,179,71,.6); }
+.touch-btn { position: absolute; pointer-events: auto; width: 68px; height: 68px; border-radius: 50%; border: 2px solid var(--edge); background: var(--glass);
+  color: var(--ink); font: 700 16px system-ui; touch-action: none; }
+#btn-jump { right: 30px; bottom: 110px; }
+#btn-interact { right: 110px; bottom: 150px; background: rgba(255,179,71,.35); }
+
+#overlay, #loading, #error { position: fixed; inset: 0; display: grid; place-items: center; z-index: 20; }
+#overlay { background: radial-gradient(ellipse at center, rgba(10,10,20,.35), rgba(5,5,12,.85)); animation: fade .6s ease-out; }
+#overlay .card, #loading .card, #error .card { text-align: center; padding: 28px 36px; border-radius: 18px; background: rgba(14,16,28,.82);
+  border: 1px solid var(--edge); max-width: min(560px, 92vw); }
+#overlay h1 { margin: 0 0 8px; font-size: 44px; letter-spacing: .06em; }
+#overlay.won h1 { color: var(--gold); text-shadow: 0 0 24px rgba(255,190,80,.7); }
+#overlay.lost h1 { color: var(--bad); }
+#overlay-stats { color: var(--muted); }
+#btn-restart, #error a { display: inline-block; margin-top: 10px; padding: 10px 22px; border-radius: 999px; border: 0; background: var(--amber); color: #1b1206;
+  font: 700 15px system-ui; cursor: pointer; text-decoration: none; }
+#loading { background: radial-gradient(ellipse at 50% 60%, #3a2a3a, #120e1c 70%); transition: opacity .6s; }
+#loading.done { opacity: 0; pointer-events: none; }
+#loading .brand { font: 800 22px system-ui; letter-spacing: .2em; color: var(--gold); text-transform: uppercase; margin-bottom: 12px; }
+#loading-label { color: var(--muted); margin-bottom: 10px; min-height: 1.3em; }
+#loading .bar { width: 280px; max-width: 70vw; height: 6px; border-radius: 3px; background: rgba(255,255,255,.1); overflow: hidden; }
+#loading-fill { height: 100%; width: 0; background: linear-gradient(90deg, var(--amber), var(--gold)); transition: width .2s; }
+#error { background: #120e1c; }
+#error h1 { color: var(--bad); font-size: 22px; }
+#error pre { white-space: pre-wrap; text-align: left; color: var(--muted); font-size: 13px; }
+
+body.view-only #vitals, body.view-only #inventory, body.view-only #objectives { opacity: .5; }
+
+@keyframes pulse { 50% { opacity: .45; } }
+@keyframes pop { from { transform: scale(.6); opacity: 0; } }
+@keyframes slidein { from { transform: translateY(-10px); opacity: 0; } }
+@keyframes fade { from { opacity: 0; } }
+
+@media (max-width: 760px) {
+  :root { --gap: 8px; }
+  #objectives { width: 52vw; font-size: 12px; }
+  #compass { display: none; }
+  #map-box { width: 118px; }
+  #minimap { width: 100px; height: 100px; }
+  #vitals { width: 180px; }
+  #inventory .slot { width: 40px; height: 40px; }
+  #toasts { top: 40px; }
+}
+#objective-list li.more::before { content: "+"; color: var(--muted); }
+#objective-list li.more { font-size: 12px; }
+
+/* Phones in landscape: height is the scarce axis. Drop the compass, shrink the
+   map, keep objective titles only, and park the touch controls in the bottom
+   corners clear of every panel. */
+@media (max-height: 520px) {
+  :root { --gap: 8px; }
+  #compass { display: none; }
+  #objectives { width: min(260px, 38vw); padding: 6px 9px; font-size: 12px; }
+  #objective-list small { display: none; }
+  #objective-list li { padding: 3px 0 3px 18px; }
+  #map-box { width: 104px; padding: 5px; }
+  #minimap { width: 92px; height: 92px; }
+  #timer { font-size: 11px; margin-top: 3px; }
+  .btn-row { flex-wrap: wrap; gap: 3px; }
+  .hud-btn { padding: 3px 0; font-size: 11px; flex-basis: 40%; }
+  #vitals { width: 170px; padding: 6px 9px; }
+  #inventory .slot { width: 38px; height: 38px; }
+  #inventory .slot img { width: 28px; height: 28px; }
+  #prompt { bottom: 62px; }
+  #dialogue { bottom: 8px; padding: 9px 12px; width: min(560px, 62vw); }
+  #dialogue-text { font-size: 14px; margin: 4px 0 6px; }
+  #toasts { top: 8px; width: min(380px, 44vw); }
+  #touch-stick { left: 200px; bottom: 14px; width: 104px; height: 104px; }
+  #touch-knob { left: 27px; top: 27px; }
+  .touch-btn { width: 58px; height: 58px; font-size: 14px; }
+  #btn-jump { right: 14px; bottom: 14px; }
+  #btn-interact { right: 82px; bottom: 40px; }
+}

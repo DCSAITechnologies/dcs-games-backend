@@ -226,7 +226,9 @@ This is the payload shape that `assets/mesh-recipes.mjs` produces and the runtim
 
 The stages run in this order:
 
-`generateConcept` → `generateWorldSpec` → `generateCharacters` → `resolveAssets` → `generateGameplay` → `compileSceneGraph` → `assemblePackage` → `validatePackage` → `headlessPlaytest`
+`generateConcept` → `generateWorldSpec` → `generateCharacters` → `generateGameplay` → `resolveAssets` → `compileSceneGraph` → `assemblePackage` → `validatePackage` → `headlessPlaytest`
+
+Gameplay runs before assets (amended at integration) so that `resolveAssets` receives `gameplay.inventory.items` and every `icon:<item_id>` ref resolves.
 
 The stage signatures:
 

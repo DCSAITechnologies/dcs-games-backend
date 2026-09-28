@@ -1,0 +1,94 @@
+{
+ "concept_version": "1.0.0",
+ "title": "The Beacons of Orport",
+ "logline": "On storm-lashed, eerie Orport, you set out to recover the lantern cores and restore the Old Lighthouse.",
+ "source_prompt": "A haunted lighthouse on a stormy island at night",
+ "prompt_hash": "99ae137bbc31db3d466dff6d99984b9722ae4fffa076b72dc11aae1261f4f090",
+ "seed": 4003247653,
+ "genre": "adventure",
+ "biome": "island",
+ "scale": "medium",
+ "mood": "eerie",
+ "time_of_day": 0.9,
+ "weather": "storm",
+ "palette": {
+  "primary": "#2a625f",
+  "secondary": "#81846f",
+  "accent": "#c88e16",
+  "ground": "#72725c",
+  "sky": "#567d8d",
+  "water": "#225869"
+ },
+ "player_fantasy": "You are a wanderer who arrives at Harbour Village and becomes the one who brings the Old Lighthouse back to life.",
+ "key_locations": [
+  {
+   "id": "harbour_village",
+   "name": "Harbour Village",
+   "kind": "hub",
+   "description": "The start: the fishing village and its quay."
+  },
+  {
+   "id": "sea_cave",
+   "name": "Sea Cave",
+   "kind": "cave",
+   "description": "Sea Cave: a cave of Orport, reached by the trail from Harbour Village."
+  },
+  {
+   "id": "sunken_ruins",
+   "name": "Sunken Ruins",
+   "kind": "ruin",
+   "description": "Sunken Ruins: a ruin of Orport, reached by the trail from Harbour Village."
+  },
+  {
+   "id": "gull_peak",
+   "name": "Gull Peak",
+   "kind": "summit",
+   "description": "Gull Peak: a summit of Orport, reached by the trail from Harbour Village."
+  },
+  {
+   "id": "old_lighthouse",
+   "name": "Old Lighthouse",
+   "kind": "tower",
+   "description": "The old lighthouse at the heart of the story, standing beyond Harbour Village."
+  }
+ ],
+ "characters": [
+  {
+   "id": "keeper_maren",
+   "name": "Keeper Maren",
+   "role": "quest_giver",
+   "description": "Waits in Harbour Village and knows why the Old Lighthouse fell silent."
+  },
+  {
+   "id": "deckhand_nadia",
+   "name": "Nadia the Deckhand",
+   "role": "companion",
+   "description": "Follows you from Harbour Village and points out anything glinting nearby."
+  },
+  {
+   "id": "reef_crab",
+   "name": "Reef Crab",
+   "role": "creature",
+   "description": "A crab the size of a cart, snapping at anyone near the rocks. Keep your distance."
+  },
+  {
+   "id": "trader_odo",
+   "name": "Odo the Trader",
+   "role": "merchant",
+   "description": "Trades gossip about Orport for anything shiny."
+  }
+ ],
+ "objectives_outline": [
+  "Speak with Keeper Maren in Harbour Village",
+  "Recover the lantern cores hidden across Sea Cave, Sunken Ruins, Gull Peak",
+  "Wake the Sea Cave",
+  "Wake the Sunken Ruins",
+  "Wake the Gull Peak",
+  "Restore the Old Lighthouse"
+ ],
+ "hazards": [
+  "Storm sweeping the exposed ground around the Old Lighthouse",
+  "Deep water beyond the shore",
+  "Reef Crab patrolling the wilds"
+ ]
+}

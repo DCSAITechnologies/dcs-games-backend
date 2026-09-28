@@ -1,0 +1,65 @@
+{
+ "concept_version": "1.0.0",
+ "title": "The Last Lantern",
+ "logline": "Relight the lighthouse.",
+ "source_prompt": "a lighthouse island adventure",
+ "prompt_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+ "seed": 42,
+ "genre": "adventure",
+ "biome": "island",
+ "scale": "small",
+ "mood": "hopeful",
+ "time_of_day": 0.62,
+ "weather": "cloudy",
+ "palette": {
+  "primary": "#2f5d8a",
+  "secondary": "#c9b27a",
+  "accent": "#f2c14e",
+  "ground": "#6f8f4a",
+  "sky": "#8fb8de",
+  "water": "#1f6f8f"
+ },
+ "player_fantasy": "keeper",
+ "key_locations": [
+  {
+   "id": "harbour",
+   "name": "Harbour",
+   "kind": "hub",
+   "description": ""
+  },
+  {
+   "id": "lighthouse",
+   "name": "Old Light",
+   "kind": "landmark",
+   "description": ""
+  },
+  {
+   "id": "ruins",
+   "name": "Sunken Ruins",
+   "kind": "ruin",
+   "description": ""
+  },
+  {
+   "id": "grove",
+   "name": "Whisper Grove",
+   "kind": "grove",
+   "description": ""
+  }
+ ],
+ "characters": [
+  {
+   "id": "keeper_maren",
+   "name": "Maren",
+   "role": "quest_giver",
+   "description": ""
+  },
+  {
+   "id": "fox",
+   "name": "Ember Fox",
+   "role": "companion",
+   "description": ""
+  }
+ ],
+ "objectives_outline": [],
+ "hazards": []
+}

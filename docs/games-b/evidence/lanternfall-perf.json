@@ -1,0 +1,13 @@
+{
+  "renderer": "SwiftShader (headless Chrome, CPU)",
+  "frames": 300,
+  "frame_ms_p50": 331.39999997615814,
+  "frame_ms_p95": 742.8999999761581,
+  "fps": 3.017501508967842,
+  "draw_calls": 258,
+  "triangles": 166712,
+  "textures": 59,
+  "geometries": 281,
+  "programs": 27,
+  "requested": 300
+}

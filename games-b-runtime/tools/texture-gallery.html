@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Games-B Asset Gallery</title>
+<style>
+  :root { --bg: #f3f5f8; --panel: #ffffff; --ink: #1b1f27; --muted: #5d6573; --line: #d8dde5; --accent: #2f6fb0; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #12151b; --panel: #1b2029; --ink: #e8ecf3; --muted: #9aa3b2; --line: #2c3340; --accent: #7fb2ea; } }
+  :root[data-theme="dark"] { --bg: #12151b; --panel: #1b2029; --ink: #e8ecf3; --muted: #9aa3b2; --line: #2c3340; --accent: #7fb2ea; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, sans-serif; }
+  header { padding: 16px; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+  h1 { font-size: 18px; margin: 0 12px 0 0; }
+  h2 { font-size: 15px; margin: 24px 16px 8px; }
+  label { color: var(--muted); display: inline-flex; gap: 6px; align-items: center; }
+  select, input { font: inherit; padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); max-width: 120px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; padding: 0 16px 16px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px; min-width: 0; }
+  .card h3 { margin: 0 0 6px; font-size: 13px; display: flex; justify-content: space-between; gap: 8px; }
+  .card h3 span { color: var(--muted); font-weight: 400; }
+  .maps { display: grid; grid-template-columns: 2fr 1fr; gap: 6px; }
+  .maps canvas { width: 100%; height: auto; image-rendering: pixelated; border-radius: 4px; display: block; }
+  .side { display: grid; gap: 6px; }
+  .cap { color: var(--muted); font-size: 11px; }
+  .mesh svg { width: 100%; height: auto; display: block; border-radius: 6px; }
+  #status { color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Games-B asset gallery</h1>
+  <label>size <select id="size"><option>64</option><option>128</option><option selected>256</option><option>512</option></select></label>
+  <label>seed <input id="seed" type="number" value="7"></label>
+  <label>palette <select id="pal"><option value="">none</option><option value="island">island</option><option value="ember">ember</option><option value="frost">frost</option></select></label>
+  <span id="status"></span>
+</header>
+
+<h2>Texture generators <span class="cap">(left: albedo tiled 2×2 to expose seams · right: normal, roughness)</span></h2>
+<div class="grid" id="tex"></div>
+
+<h2>Materials <span class="cap">(the tinted albedo each mat: ref ships with)</span></h2>
+<div class="grid" id="mats"></div>
+
+<h2>Mesh library <span class="cap">(orthographic silhouettes · parts · est. triangles · bounds)</span></h2>
+<div class="grid" id="meshes"></div>
+
+<h2>Characters</h2>
+<div class="grid" id="chars"></div>
+
+<script type="module">
+  import { synthesizeTexture, TEXTURE_GENERATORS } from "../../src/gamesb/assets/texture-synth.mjs";
+  import { buildMeshRecipe, buildCharacterRecipe, LIB_NAMES, libRole } from "../../src/gamesb/assets/mesh-recipes.mjs";
+  import { buildMaterialSpec, MATERIAL_NAMES } from "../../src/gamesb/assets/materials.mjs";
+  import { recipeToSvg } from "../../src/gamesb/assets/preview.mjs";
+
+  const PALETTES = {
+    island: { primary: "#2f5d8a", secondary: "#c9b27a", accent: "#f2c14e", ground: "#6f8f4a", sky: "#8fb8de", water: "#1f6f8f" },
+    ember:  { primary: "#7a2f24", secondary: "#3a2a24", accent: "#ff8a3c", ground: "#4a3a30", sky: "#b8704a", water: "#3a4a50" },
+    frost:  { primary: "#4a6f9a", secondary: "#d8e0e8", accent: "#8fe3ff", ground: "#c8d4dc", sky: "#b8d0e8", water: "#2a5a7a" },
+  };
+  const $ = (id) => document.getElementById(id);
+
+  function toCanvas(w, h, data, tiles = 1) {
+    const c = document.createElement("canvas");
+    c.width = w * tiles; c.height = h * tiles;
+    const ctx = c.getContext("2d");
+    const img = new ImageData(new Uint8ClampedArray(data), w, h);
+    for (let y = 0; y < tiles; y++) for (let x = 0; x < tiles; x++) ctx.putImageData(img, x * w, y * h);
+    return c;
+  }
+
+  function card(title, meta) {
+    const d = document.createElement("div");
+    d.className = "card";
+    const h = document.createElement("h3");
+    h.textContent = title;
+    const s = document.createElement("span"); s.textContent = meta; h.append(s);
+    d.append(h);
+    return d;
+  }
+
+  function texCard(title, recipe) {
+    const t0 = performance.now();
+    const t = synthesizeTexture(recipe);
+    const ms = performance.now() - t0;
+    const d = card(title, `${t.width}² · ${ms.toFixed(1)} ms`);
+    const maps = document.createElement("div"); maps.className = "maps";
+    const side = document.createElement("div"); side.className = "side";
+    side.append(toCanvas(t.width, t.height, t.normal), toCanvas(t.width, t.height, t.roughness));
+    maps.append(toCanvas(t.width, t.height, t.albedo, 2), side);
+    d.append(maps);
+    return { el: d, ms };
+  }
+
+  function render() {
+    const size = +$("size").value, seed = (+$("seed").value) | 0, palette = PALETTES[$("pal").value] || null;
+    let total = 0;
+    $("tex").replaceChildren(...TEXTURE_GENERATORS.map((g) => { const r = texCard(g, { generator: g, size, seed, scale: 1, params: {} }); total += r.ms; return r.el; }));
+    $("mats").replaceChildren(...MATERIAL_NAMES.map((n) => {
+      const spec = buildMaterialSpec(n, { palette, textureSize: size });
+      if (!spec.textures.length) {
+        const d = card(`mat:${n}`, `flat ${spec.material.color}${spec.material.emissive ? " · emissive" : ""}`);
+        const sw = document.createElement("div");
+        sw.style.cssText = `height:120px;border-radius:6px;background:${spec.material.color};box-shadow:0 0 24px ${spec.material.emissive || "transparent"} inset`;
+        d.append(sw);
+        return d;
+      }
+      const r = texCard(`mat:${n}`, { ...spec.textures[0].recipe });
+      total += r.ms;
+      return r.el;
+    }));
+    $("meshes").replaceChildren(...LIB_NAMES.map((n) => {
+      const r = buildMeshRecipe(n, { seed, palette, biome: $("pal").value === "frost" ? "snow" : null });
+      const d = card(n, `${libRole(n)} · ${r.parts.length} parts · ~${r.est_triangles} tris · ${r.bounds.w}×${r.bounds.h}×${r.bounds.d} m`);
+      const m = document.createElement("div"); m.className = "mesh";
+      m.innerHTML = recipeToSvg(r, { palette, size: 200, title: n });   // generated by our own code, no user input
+      d.append(m);
+      return d;
+    }));
+    const chars = [
+      { id: "keeper", kind: "humanoid", body: { height: 1.7, build: "slim", palette: { primary: palette?.primary || "#2f5d8a" }, accessories: ["hat", "lantern", "scarf"] } },
+      { id: "ranger", kind: "humanoid", body: { height: 1.85, build: "broad", accessories: ["hood", "cape", "staff", "satchel"] } },
+      { id: "fox", kind: "creature", body: { height: 0.6, build: "slim", palette: { primary: "#d0662a", secondary: "#3a2a20" }, accessories: ["scarf"] } },
+      { id: "sentinel", kind: "robot", body: { height: 2.1, build: "broad", accessories: ["backpack", "goggles"] } },
+      { id: "wisp", kind: "spirit", body: { height: 1.4 } },
+    ];
+    $("chars").replaceChildren(...chars.map((c) => {
+      const r = buildCharacterRecipe(c);
+      const d = card(`${c.id} (${c.kind})`, `${r.parts.length} parts · ~${r.est_triangles} tris · rig ${r.rig.kind}: ${Object.keys(r.rig.joints).join(", ")}`);
+      const m = document.createElement("div"); m.className = "mesh";
+      m.innerHTML = recipeToSvg(r, { palette, size: 200, title: c.id });
+      d.append(m);
+      return d;
+    }));
+    $("status").textContent = `synthesized ${TEXTURE_GENERATORS.length + MATERIAL_NAMES.length} textures in ${total.toFixed(0)} ms`;
+  }
+
+  for (const id of ["size", "seed", "pal"]) $(id).addEventListener("change", render);
+  render();
+</script>
+</body>
+</html>

@@ -1,0 +1,33 @@
+{
+  "concept_version": "1.0.0",
+  "title": "Lanterns of Saltmere",
+  "logline": "The lighthouse lanterns of Saltmere went dark the night the tide stopped turning.",
+  "source_prompt": "a cosy island adventure where you relight old lanterns with a fox companion",
+  "prompt_hash": "0000000000000000000000000000000000000000000000000000000000000001",
+  "seed": 4242,
+  "genre": "adventure",
+  "biome": "island",
+  "scale": "small",
+  "mood": "wistful and salt-worn",
+  "time_of_day": 0.72,
+  "weather": "fog",
+  "palette": { "primary": "#3d5a80", "secondary": "#e0c9a6", "accent": "#f4a259", "ground": "#8a9a5b", "sky": "#98c1d9", "water": "#2a6f97" },
+  "player_fantasy": "the returning lamplighter",
+  "key_locations": [
+    { "id": "harbor", "name": "Saltmere Harbor", "kind": "hub", "description": "A ring of stone piers where the fishing boats wait for a tide that no longer comes." },
+    { "id": "shrine", "name": "Gull Shrine", "kind": "shrine", "description": "A salt-crusted shrine where the keepers once trimmed the first flame." },
+    { "id": "ruins", "name": "Drowned Arches", "kind": "ruin", "description": "Half-sunk arches of the old sea wall, green with weed." },
+    { "id": "summit", "name": "Beacon Summit", "kind": "summit", "description": "The high point of the island and the great lantern that answered every ship." }
+  ],
+  "characters": [
+    { "id": "keeper_maren", "name": "Keeper Maren", "role": "quest_giver", "description": "The last lantern keeper, patient and weathered." },
+    { "id": "pip", "name": "Pip", "role": "companion", "description": "A small sea fox with a lantern-bright tail." },
+    { "id": "trader_oska", "name": "Oska", "role": "merchant", "description": "A travelling trader stranded by the still tide." },
+    { "id": "warden_bram", "name": "Warden Bram", "role": "guard", "description": "Keeps watch over the shrine path." },
+    { "id": "tide_sentinel", "name": "Tide Sentinel", "role": "enemy", "description": "A hovering stone spirit that guards the drowned arches." },
+    { "id": "reef_crab", "name": "Reef Crab", "role": "creature", "description": "A crab the size of a cart, territorial." },
+    { "id": "fisher_lio", "name": "Lio", "role": "ambient", "description": "A fisher mending nets." }
+  ],
+  "objectives_outline": ["Meet the keeper", "Recover three lantern cores", "Relight the beacon"],
+  "hazards": ["cold fog that hides the cliff edges"]
+}

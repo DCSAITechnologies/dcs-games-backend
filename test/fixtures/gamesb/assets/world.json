@@ -1,0 +1,525 @@
+{
+ "world_spec_version": "1.0.0",
+ "id": "w_fixture",
+ "title": "Fixture Isle",
+ "seed": 42,
+ "size": {
+  "w": 160,
+  "h": 160
+ },
+ "biome": "island",
+ "environment": {
+  "time_of_day": 0.62,
+  "weather": "cloudy",
+  "sky": {
+   "top": "#4a7fb8",
+   "horizon": "#cfe0ee",
+   "bottom": "#9ab0c0"
+  },
+  "fog": {
+   "color": "#c8d4dc",
+   "near": 40,
+   "far": 220
+  },
+  "sun": {
+   "azimuth_deg": 220,
+   "elevation_deg": 28,
+   "color": "#ffe8c0",
+   "intensity": 1.1,
+   "shadows": true
+  },
+  "ambient": {
+   "color": "#a0b0c0",
+   "ground_color": "#4a5a3a",
+   "intensity": 0.5
+  },
+  "water": {
+   "enabled": true,
+   "level": 0,
+   "color": "#1f6f8f",
+   "opacity": 0.8
+  }
+ },
+ "terrain": {
+  "kind": "heightfield",
+  "shape": "island",
+  "cols": 9,
+  "rows": 9,
+  "cell": 20,
+  "heights": [
+   -3,
+   -3,
+   -3,
+   -3,
+   -2,
+   -3,
+   -3,
+   -3,
+   -3,
+   -3,
+   -3,
+   1,
+   4,
+   5,
+   4,
+   1,
+   -3,
+   -3,
+   -3,
+   1,
+   6,
+   9,
+   10,
+   9,
+   6,
+   1,
+   -3,
+   -3,
+   4,
+   9,
+   12,
+   13,
+   12,
+   9,
+   4,
+   -3,
+   -2,
+   5,
+   10,
+   13,
+   14,
+   13,
+   10,
+   5,
+   -2,
+   -3,
+   4,
+   9,
+   12,
+   13,
+   12,
+   9,
+   4,
+   -3,
+   -3,
+   1,
+   6,
+   9,
+   10,
+   9,
+   6,
+   1,
+   -3,
+   -3,
+   -3,
+   1,
+   4,
+   5,
+   4,
+   1,
+   -3,
+   -3,
+   -3,
+   -3,
+   -3,
+   -3,
+   -2,
+   -3,
+   -3,
+   -3,
+   -3
+  ],
+  "min_y": -3,
+  "max_y": 14,
+  "material_layers": [
+   {
+    "material_ref": "mat:sand",
+    "min_h": -5,
+    "max_h": 1.5,
+    "max_slope_deg": 90
+   },
+   {
+    "material_ref": "mat:rock",
+    "min_h": -5,
+    "max_h": 100,
+    "max_slope_deg": 90
+   },
+   {
+    "material_ref": "mat:grass",
+    "min_h": 1.5,
+    "max_h": 100,
+    "max_slope_deg": 30
+   }
+  ]
+ },
+ "regions": [
+  {
+   "id": "region_harbour",
+   "name": "Harbour",
+   "kind": "district",
+   "bounds": [
+    60,
+    60,
+    100,
+    100
+   ],
+   "center": {
+    "x": 80,
+    "y": 6,
+    "z": 80
+   },
+   "location_ref": "harbour"
+  },
+  {
+   "id": "region_lighthouse",
+   "name": "Old Light",
+   "kind": "landmark",
+   "bounds": [
+    110,
+    40,
+    150,
+    80
+   ],
+   "center": {
+    "x": 130,
+    "y": 6,
+    "z": 60
+   },
+   "location_ref": "lighthouse"
+  },
+  {
+   "id": "region_ruins",
+   "name": "Sunken Ruins",
+   "kind": "landmark",
+   "bounds": [
+    20,
+    100,
+    60,
+    140
+   ],
+   "center": {
+    "x": 40,
+    "y": 6,
+    "z": 120
+   },
+   "location_ref": "ruins"
+  },
+  {
+   "id": "region_grove",
+   "name": "Whisper Grove",
+   "kind": "wilderness",
+   "bounds": [
+    100,
+    110,
+    140,
+    150
+   ],
+   "center": {
+    "x": 120,
+    "y": 6,
+    "z": 130
+   },
+   "location_ref": "grove"
+  }
+ ],
+ "paths": [],
+ "placements": [
+  {
+   "id": "pl_lighthouse",
+   "asset_ref": "lib:lighthouse",
+   "region": "region_lighthouse",
+   "position": {
+    "x": 130,
+    "y": 6,
+    "z": 60
+   },
+   "rotation_y": 0,
+   "scale": 1,
+   "role": "landmark",
+   "collider": {
+    "shape": "box",
+    "size": {
+     "x": 2,
+     "y": 2,
+     "z": 2
+    },
+    "solid": true
+   },
+   "tags": []
+  },
+  {
+   "id": "pl_cottage_a",
+   "asset_ref": "lib:cottage",
+   "region": "region_harbour",
+   "position": {
+    "x": 70,
+    "y": 6,
+    "z": 75
+   },
+   "rotation_y": 0,
+   "scale": 1,
+   "role": "structure",
+   "collider": {
+    "shape": "box",
+    "size": {
+     "x": 2,
+     "y": 2,
+     "z": 2
+    },
+    "solid": true
+   },
+   "tags": []
+  },
+  {
+   "id": "pl_cottage_b",
+   "asset_ref": "lib:cottage",
+   "region": "region_harbour",
+   "position": {
+    "x": 88,
+    "y": 6,
+    "z": 72
+   },
+   "rotation_y": 0,
+   "scale": 1,
+   "role": "structure",
+   "collider": {
+    "shape": "box",
+    "size": {
+     "x": 2,
+     "y": 2,
+     "z": 2
+    },
+    "solid": true
+   },
+   "tags": []
+  },
+  {
+   "id": "pl_arch",
+   "asset_ref": "lib:ruin_arch",
+   "region": "region_ruins",
+   "position": {
+    "x": 40,
+    "y": 6,
+    "z": 120
+   },
+   "rotation_y": 0,
+   "scale": 1,
+   "role": "landmark",
+   "collider": {
+    "shape": "box",
+    "size": {
+     "x": 2,
+     "y": 2,
+     "z": 2
+    },
+    "solid": true
+   },
+   "tags": []
+  },
+  {
+   "id": "pl_dock",
+   "asset_ref": "lib:dock",
+   "region": "region_harbour",
+   "position": {
+    "x": 80,
+    "y": 6,
+    "z": 95
+   },
+   "rotation_y": 0,
+   "scale": 1,
+   "role": "structure",
+   "collider": {
+    "shape": "box",
+    "size": {
+     "x": 2,
+     "y": 2,
+     "z": 2
+    },
+    "solid": true
+   },
+   "tags": []
+  },
+  {
+   "id": "pl_pickup_1",
+   "asset_ref": "lib:gem",
+   "region": "region_ruins",
+   "position": {
+    "x": 35,
+    "y": 6,
+    "z": 125
+   },
+   "rotation_y": 0,
+   "scale": 1,
+   "role": "pickup",
+   "collider": {
+    "shape": "box",
+    "size": {
+     "x": 2,
+     "y": 2,
+     "z": 2
+    },
+    "solid": false
+   },
+   "tags": []
+  },
+  {
+   "id": "pl_pickup_2",
+   "asset_ref": "lib:key",
+   "region": "region_grove",
+   "position": {
+    "x": 120,
+    "y": 6,
+    "z": 130
+   },
+   "rotation_y": 0,
+   "scale": 1,
+   "role": "pickup",
+   "collider": {
+    "shape": "box",
+    "size": {
+     "x": 2,
+     "y": 2,
+     "z": 2
+    },
+    "solid": false
+   },
+   "tags": []
+  },
+  {
+   "id": "pl_pickup_3",
+   "asset_ref": "lib:lantern_core",
+   "region": "region_lighthouse",
+   "position": {
+    "x": 125,
+    "y": 6,
+    "z": 55
+   },
+   "rotation_y": 0,
+   "scale": 1,
+   "role": "pickup",
+   "collider": {
+    "shape": "box",
+    "size": {
+     "x": 2,
+     "y": 2,
+     "z": 2
+    },
+    "solid": false
+   },
+   "tags": []
+  }
+ ],
+ "scatter": [
+  {
+   "id": "sc_pines",
+   "asset_ref": "lib:pine_tree",
+   "region": "region_grove",
+   "count": 30,
+   "min_scale": 0.8,
+   "max_scale": 1.3,
+   "seed": 7,
+   "avoid_paths": true,
+   "collider_radius": 0.5
+  },
+  {
+   "id": "sc_rocks",
+   "asset_ref": "lib:rock_small",
+   "region": null,
+   "count": 40,
+   "min_scale": 0.6,
+   "max_scale": 1.4,
+   "seed": 8,
+   "avoid_paths": true,
+   "collider_radius": 0
+  },
+  {
+   "id": "sc_grass",
+   "asset_ref": "lib:grass_tuft",
+   "region": null,
+   "count": 120,
+   "min_scale": 0.8,
+   "max_scale": 1.2,
+   "seed": 9,
+   "avoid_paths": false,
+   "collider_radius": 0
+  }
+ ],
+ "spawn_points": [
+  {
+   "id": "spawn_player",
+   "kind": "player",
+   "position": {
+    "x": 80,
+    "y": 6,
+    "z": 80
+   },
+   "rotation_y": 0.5,
+   "region": "region_harbour"
+  },
+  {
+   "id": "spawn_npc_keeper_maren",
+   "kind": "npc",
+   "position": {
+    "x": 84,
+    "y": 6,
+    "z": 80
+   },
+   "rotation_y": 0,
+   "region": "region_harbour"
+  },
+  {
+   "id": "spawn_npc_fox",
+   "kind": "npc",
+   "position": {
+    "x": 78,
+    "y": 6,
+    "z": 84
+   },
+   "rotation_y": 0,
+   "region": "region_harbour"
+  }
+ ],
+ "camera": {
+  "mode": "third_person",
+  "distance": 6,
+  "height": 2.5,
+  "fov": 60,
+  "min_pitch": -0.4,
+  "max_pitch": 1.1,
+  "collide": true
+ },
+ "interactables": [
+  {
+   "id": "pickup_1",
+   "placement_ref": "pl_pickup_1",
+   "kind": "pickup",
+   "radius": 1.5,
+   "prompt": "Take",
+   "item_ref": "item_1"
+  },
+  {
+   "id": "pickup_2",
+   "placement_ref": "pl_pickup_2",
+   "kind": "pickup",
+   "radius": 1.5,
+   "prompt": "Take",
+   "item_ref": "item_2"
+  },
+  {
+   "id": "pickup_3",
+   "placement_ref": "pl_pickup_3",
+   "kind": "pickup",
+   "radius": 1.5,
+   "prompt": "Take",
+   "item_ref": "item_3"
+  }
+ ],
+ "navigation": {
+  "cell": 20,
+  "cols": 1,
+  "rows": 1,
+  "max_slope_deg": 40,
+  "step_height": 0.4,
+  "walkable": "1"
+ }
+}

@@ -1,0 +1,40 @@
+{
+ "gameplay_version": "1.0.0",
+ "inventory": {
+  "slots": 8,
+  "items": [
+   {
+    "id": "item_1",
+    "name": "Tide Gem",
+    "kind": "collectible",
+    "stackable": false,
+    "max_stack": 1,
+    "icon_ref": null
+   },
+   {
+    "id": "item_2",
+    "name": "Rusty Key",
+    "kind": "key",
+    "stackable": false,
+    "max_stack": 1,
+    "icon_ref": null
+   },
+   {
+    "id": "item_3",
+    "name": "Lantern Core",
+    "kind": "quest",
+    "stackable": false,
+    "max_stack": 1,
+    "icon_ref": null
+   },
+   {
+    "id": "item_4",
+    "name": "Salt Herb",
+    "kind": "consumable",
+    "stackable": true,
+    "max_stack": 5,
+    "icon_ref": null
+   }
+  ]
+ }
+}

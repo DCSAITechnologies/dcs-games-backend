@@ -1,0 +1,31 @@
+{
+  "concept_version": "1.0.0",
+  "title": "The Lantern Keeper of Gull Isle",
+  "logline": "Relight the five lanterns of a storm-battered island before the tide of shadow rises.",
+  "source_prompt": "a cozy island adventure where you relight old lanterns and meet the islanders",
+  "prompt_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "seed": 424242,
+  "genre": "adventure",
+  "biome": "island",
+  "scale": "medium",
+  "mood": "hopeful, windswept",
+  "time_of_day": 0.68,
+  "weather": "cloudy",
+  "palette": { "primary": "#3f7f5a", "secondary": "#c9a66b", "accent": "#ffcc55", "ground": "#6f8f4e", "sky": "#8cc4ec", "water": "#2f7fa6" },
+  "player_fantasy": "a young keeper bringing light back to a forgotten island",
+  "key_locations": [
+    { "id": "harbour_village", "name": "Harbour Village", "kind": "hub", "description": "Fishing cottages around a well." },
+    { "id": "old_lighthouse", "name": "Old Lighthouse", "kind": "tower", "description": "A cracked lighthouse on the point." },
+    { "id": "sunken_ruins", "name": "Sunken Ruins", "kind": "ruin", "description": "Pillars half-swallowed by dunes." },
+    { "id": "moss_shrine", "name": "Moss Shrine", "kind": "shrine", "description": "A quiet shrine under old trees." },
+    { "id": "gull_dock", "name": "Gull Dock", "kind": "dock", "description": "A rickety dock where the ferry once came." }
+  ],
+  "characters": [
+    { "id": "keeper_maren", "name": "Keeper Maren", "role": "quest_giver", "description": "The retired lighthouse keeper." },
+    { "id": "pip", "name": "Pip", "role": "companion", "description": "A curious gull." },
+    { "id": "trader_osk", "name": "Osk", "role": "merchant", "description": "Sells rope and oil." },
+    { "id": "shade_crab", "name": "Shade Crab", "role": "enemy", "description": "A shadowy crab guarding the ruins." }
+  ],
+  "objectives_outline": ["Talk to Keeper Maren", "Collect the lantern cores", "Relight the lighthouse"],
+  "hazards": ["deep water", "shadow crab"]
+}

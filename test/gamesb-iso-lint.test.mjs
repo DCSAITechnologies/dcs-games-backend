@@ -18,6 +18,8 @@ const ISO = [
   "src/gamesb/assets/texture-synth.mjs",
   "src/gamesb/assets/mesh-recipes.mjs",
   "src/gamesb/gameplay/rules-engine.mjs",
+  "src/gamesb/gameplay/solver.mjs",
+  "src/gamesb/concept/concept.schema.mjs",
   "src/gamesb/characters/npc-brain.mjs",
   "src/gamesb/characters/dialogue.mjs",
   "src/gamesb/runtime/sim-core.mjs",
