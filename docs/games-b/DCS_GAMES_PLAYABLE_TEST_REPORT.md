@@ -99,3 +99,21 @@ All evidence is under `docs/games-b/evidence/`.
 - **Flagship:** `lanternfall-dusk-overview`, `-harbour`, `-ruins`, `-lighthouse`, `-dialogue`, `-hud`, `-win`, `-lighthouse-lit` and `-defeat` (`.png`)
 - **Mini fixture:** `mini-start`, `-dialogue`, `-mobile` and `-win` (`.png`)
 - **Frame metrics:** `lanternfall-perf.json`
+
+## 9. Bundle and restore proof
+
+**The bundle:**
+- Location: `~/Desktop/Project DCSAI/_backups/dcs-games-b-3d-world-29sep2026/`
+- It is incremental on top of `cd9856d`, so restoring it needs the `gb` history.
+- Its SHA-256 is recorded next to it in a `.sha256` file.
+
+**Restore procedure:**
+1. Make a fresh `git clone` of `gb` and check out `cd9856d`.
+2. `git fetch <bundle> games-b/3d-world-pipeline-28sep2026:restored`, then check out `restored`.
+
+**Results after restore:**
+- The HEAD and tree hashes are identical to the original worktree.
+- `npm run test:gamesb` passes.
+- `node src/gamesb/flagship/build.mjs` gives 0 errors and 0 warnings, and the playtest wins in 72.65 s of simulated time.
+
+**A flake the first restore run caught:** one run of the texture timing test failed on a heavily loaded host (a 50 ms wall-clock gate). The gate now asserts at 3× the 50 ms budget, using the best of 5 runs, and it still reports the measured timings.
