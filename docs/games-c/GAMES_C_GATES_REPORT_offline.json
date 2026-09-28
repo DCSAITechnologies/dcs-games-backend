@@ -1,0 +1,206 @@
+{
+  "report_version": "1",
+  "world_id": "w_qa_cli",
+  "manifest_hash": "sha256:db7afcc543ad7cb7f65dc43ff7815b66ba1796035a10b9b3b9f611294c7f145a",
+  "started_at": "2026-09-28T18:20:21.477Z",
+  "finished_at": "2026-09-28T18:20:21.592Z",
+  "playtest_verdict": "PASSED",
+  "overall": "INCOMPLETE",
+  "summary": {
+    "pass": 10,
+    "fail": 0,
+    "skipped": 3,
+    "total": 13
+  },
+  "modules": {
+    "patch": "loaded",
+    "memory": "loaded",
+    "publish": "loaded",
+    "companion": "loaded",
+    "multiplayer": "loaded"
+  },
+  "gates": [
+    {
+      "gate": "launch",
+      "status": "PASS",
+      "evidence": {
+        "mode": "headless (schema + guard + spawn); browser boot added when DCS_GAMESC_BROWSER_GATES=1",
+        "schema_ok": true,
+        "schema_errors": [],
+        "guard_ok": true,
+        "guard_blocking": [],
+        "has_spawn": true
+      },
+      "duration_ms": 8
+    },
+    {
+      "gate": "navigation",
+      "status": "PASS",
+      "evidence": {
+        "validator": "validators.validateNavigation",
+        "findings": []
+      },
+      "duration_ms": 0
+    },
+    {
+      "gate": "movement",
+      "status": "PASS",
+      "evidence": {
+        "simulator": "agent.simulatePlaythrough",
+        "ok": true,
+        "visited_cells": 2150,
+        "coverage": 1,
+        "step_m": 7,
+        "truncated": false,
+        "thresholds": {
+          "minCoverage": 0.05,
+          "minVisitedCells": 2
+        }
+      },
+      "duration_ms": 0
+    },
+    {
+      "gate": "collision",
+      "status": "PASS",
+      "evidence": {
+        "checks": [
+          "asset_no_collision",
+          "spawn_inside_structure",
+          "structure_out_of_bounds"
+        ],
+        "findings": [],
+        "overlaps_minor": 0,
+        "blocked_by_solids": "simulatePlaythrough treats structure footprints as solid (agent.mjs)",
+        "visited_cells": 2150
+      },
+      "duration_ms": 0
+    },
+    {
+      "gate": "objective_reachability",
+      "status": "PASS",
+      "evidence": {
+        "simulator": "agent.simulateQuests",
+        "quests": [
+          {
+            "quest": "quest_arrival",
+            "completable": true,
+            "blocked": []
+          },
+          {
+            "quest": "quest_errand",
+            "completable": true,
+            "blocked": []
+          }
+        ],
+        "validator_findings": []
+      },
+      "duration_ms": 0
+    },
+    {
+      "gate": "asset_load",
+      "status": "PASS",
+      "evidence": {
+        "mode": "headless (refs resolve, url policy, bomb limits); network load checked in browser mode",
+        "assets": 6,
+        "formats": [
+          "instanced"
+        ],
+        "totals": {
+          "bytes": 0,
+          "triangles": 0,
+          "instances": 0
+        },
+        "problems": []
+      },
+      "duration_ms": 0
+    },
+    {
+      "gate": "fps",
+      "status": "SKIPPED",
+      "reason": "browser gates disabled; set DCS_GAMESC_BROWSER_GATES=1 (needs Chrome + frontend at DCS_SITE_DIR; loads three.js from cdnjs)",
+      "evidence": {}
+    },
+    {
+      "gate": "memory",
+      "status": "SKIPPED",
+      "reason": "browser gates disabled; set DCS_GAMESC_BROWSER_GATES=1 (needs Chrome + frontend at DCS_SITE_DIR; loads three.js from cdnjs)",
+      "evidence": {}
+    },
+    {
+      "gate": "console_errors",
+      "status": "SKIPPED",
+      "reason": "browser gates disabled; set DCS_GAMESC_BROWSER_GATES=1 (needs Chrome + frontend at DCS_SITE_DIR; loads three.js from cdnjs)",
+      "evidence": {}
+    },
+    {
+      "gate": "save_reload",
+      "status": "PASS",
+      "evidence": {
+        "module": "gamesc/memory.createWorldMemoryV2 (in-memory adapter)",
+        "saved_version": 1,
+        "idempotent_resave": true,
+        "hash_before": "sha256:58894be5b1d4710e78064cc7e7acea191aadfcb8e9f1aa10477ac69357790aa4",
+        "hash_after_reload": "sha256:58894be5b1d4710e78064cc7e7acea191aadfcb8e9f1aa10477ac69357790aa4",
+        "integrity_ok": true
+      },
+      "duration_ms": 12
+    },
+    {
+      "gate": "edit_retest",
+      "status": "PASS",
+      "evidence": {
+        "module": "gamesc/patch",
+        "probe_source": "companion",
+        "probe_text": "make it stormy",
+        "patch_id": "p_647aba15a0158098a9daac9c",
+        "ops": [
+          {
+            "op": "set",
+            "path": "environment.weather",
+            "value": "storm"
+          }
+        ],
+        "verdict_before": "PASSED",
+        "verdict_after": "PASSED",
+        "coverage_after": 1,
+        "inverse_round_trip": true,
+        "guard_after_ok": true
+      },
+      "duration_ms": 42
+    },
+    {
+      "gate": "publish_package",
+      "status": "PASS",
+      "evidence": {
+        "module": "gamesc/publish.buildStagingPackage",
+        "package_id": "16ed3b80bdaff7ae02f02eb45d0dd59e3fcd4489fed596d4cbc9d9790608a633",
+        "files": [
+          "manifest.json",
+          "game-package.json"
+        ],
+        "archive_bytes": 36857,
+        "manifest_hash": "sha256:db7afcc543ad7cb7f65dc43ff7815b66ba1796035a10b9b3b9f611294c7f145a",
+        "playtest": "PASSED",
+        "descriptor_guard_ok": true
+      },
+      "duration_ms": 28
+    },
+    {
+      "gate": "reopen_published_preview",
+      "status": "PASS",
+      "evidence": {
+        "module": "gamesc/publish.createStagingRegistry + openPreview",
+        "preview_url": "http://127.0.0.1:8788/preview/w_qa_cli/16ed3b80bdaff7ae02f02eb45d0dd59e3fcd4489fed596d4cbc9d9790608a633/",
+        "channel_current": "16ed3b80bdaff7ae02f02eb45d0dd59e3fcd4489fed596d4cbc9d9790608a633",
+        "opened_ok": true,
+        "open_code": null,
+        "manifest_hash": "sha256:db7afcc543ad7cb7f65dc43ff7815b66ba1796035a10b9b3b9f611294c7f145a",
+        "replayed_after_reopen": {
+          "coverage": 1,
+          "quests_completable": true
+        }
+      },
+      "duration_ms": 16
+    }
+  ]
+}
