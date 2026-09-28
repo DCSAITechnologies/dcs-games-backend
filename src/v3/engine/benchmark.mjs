@@ -119,7 +119,7 @@ export async function runBenchmark({ adapters, env, plan, live = false, maxUsd =
     for (let i = 0; i < p.calls; i++) {
       const base = { ...p, call: i + 1 };
       if (p.configured !== "yes") { out.push(row(base, "SKIPPED", { notes: "no credential in this environment" })); break; }
-      if ((failures.get(p.provider) || 0) >= MAX_FAILURES_PER_PROVIDER) { out.push(row(base, "SKIPPED", { notes: `provider dropped after ${MAX_FAILURES_PER_PROVIDER} failures` })); break; }
+      if ((failures.get(p.provider) || 0) >= MAX_FAILURES_PER_PROVIDER) { out.push(row(base, "SKIPPED", { notes: "provider dropped earlier in this run (credential rejected, or repeated failures); not called" })); break; }
       const engine = new GenerationEngine({ adapters, env, budget, health, fetchImpl, logger, maxRetries: 0, routes: { [p.task]: [{ provider: p.provider, model: p.model }] } });
       const t0 = Date.now();
       try {

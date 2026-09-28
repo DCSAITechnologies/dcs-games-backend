@@ -1,6 +1,6 @@
 # DCS Games — generation core specification (GAMES-A v1.0.0)
 
-The engine version is `games-a/1.0.0` (`ENGINE_VERSION`). Everything below is covered by `test/games-engine.test.mjs` (36 tests).
+The engine version is `games-a/1.0.0` (`ENGINE_VERSION`). Everything below is covered by `test/games-engine.test.mjs` (34 tests).
 
 ## 1. API
 
@@ -106,7 +106,7 @@ A request can tighten both with `attemptTimeoutMs` and `deadlineMs`. Async jobs 
 
 ## 10. Known limits and integration TODO
 
-1. **The live benchmark has not been run** (see §11). Routes are PROVISIONAL.
+1. **Live benchmark, 29 Sep 2026** (founder GO, $5 cap): 1 real call. Only Cerebras had a credential in the run environment, and it was rejected (HTTP 401 `wrong_api_key`; $0 billed). No other provider was configured, so every external route step remains PROVISIONAL. Only the local steps are MEASURED. See `DCS_GAMES_LIVE_BENCHMARK_RUN_29SEP2026.csv`.
 2. Model IDs taken from 28 Sep pricing pages postdate training data. Verify each on its first live call. A 404 classifies as BAD_REQUEST and falls through.
 3. Budget ledger and circuit state are in-memory. For production, persist them in Supabase, following the KINIX `ai_provider_health` pattern.
 4. Media URIs must be copied into DCS storage before publish. Veo needs a keyed server-side fetch. Gemini TTS PCM needs a WAV wrapper.
