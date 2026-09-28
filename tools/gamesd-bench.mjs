@@ -182,6 +182,11 @@ for (const recipe of recipes) {
 if (!ONLY && !LIMIT && fs.existsSync(GAMES_DIR)) {
   const keep = new Set(samples.filter((s) => s.build).map((s) => s.build.pkg.game_id));
   for (const d of fs.readdirSync(GAMES_DIR)) if (!keep.has(d) && d.startsWith("fb_")) fs.rmSync(path.join(GAMES_DIR, d), { recursive: true, force: true });
+  // …and their screenshots.
+  for (const dir of [EVIDENCE, path.join(EVIDENCE, "cpu")]) {
+    if (!fs.existsSync(dir)) continue;
+    for (const f of fs.readdirSync(dir)) if (f.startsWith("fb_") && f.endsWith(".png") && !keep.has(f.slice(0, -4))) fs.rmSync(path.join(dir, f), { force: true });
+  }
 }
 
 // Two browser passes. CPU (SwiftShader) is the default and gives the advisory

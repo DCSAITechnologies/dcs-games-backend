@@ -121,6 +121,8 @@ export async function benchPackage(site, browser, entry, { evidenceDir = path.jo
     // Screenshot + histogram from a consistent third-person view.
     await page.eval(`${H} H.stepFrames(2); H.view({ pitch: 0.42, dist: 16 });`);
     out.screen_hist = await page.eval(`${H} H.view({ pitch: 0.42, dist: 16 }); return window.__gdHist()`);
+    // The loading card fades out (0.6 s CSS transition) after `ready`; wait so it is not in the picture.
+    await page.waitFor(`(() => { const l = document.getElementById("loading"); return !l || l.hidden || getComputedStyle(l).display === "none" || Number(getComputedStyle(l).opacity) < 0.02; })()`, { timeout: 8000, interval: 100 });
     fs.mkdirSync(evidenceDir, { recursive: true });
     out.screenshot = await page.screenshot(path.join(evidenceDir, `${entry.game_id}.png`));
 

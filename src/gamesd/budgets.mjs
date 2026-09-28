@@ -27,8 +27,9 @@ export const PERF_BUDGET = Object.freeze({
 // Calibrated 29 Sep 2026 (Games-D quality agent) from measurements:
 //   - Lanternfall flagship, docs/games-b/evidence/lanternfall-perf.json:
 //     p50 331 ms, p95 743 ms (3.0 fps), 258 draw calls, 167k triangles.
-//   - Games-D samples (docs/games-d/evidence/bench.json): ~150k triangles and
-//     ~235–275 draw calls, the same weight class as the flagship.
+//   - Games-D samples, first bench runs: 150k–295k triangles, 190–336 draw
+//     calls, 4.4 fps / p95 ~400 ms on SwiftShader — the flagship's weight class.
+//     (The same samples run at the 60 fps vsync cap on hardware GL.)
 // So the frame limits sit just past the flagship's CPU figure; load allows for
 // headless Chrome compiling every shader and synthesising every texture on the CPU.
 // Wall-clock numbers taken on an overloaded host (load > 1.5 per core) are

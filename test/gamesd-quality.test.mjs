@@ -13,7 +13,7 @@ import { THEMES } from "../src/gamesd/world/themes.mjs";
 import { TEMPLATES } from "../src/gamesd/gameplay/templates.mjs";
 import { LAYOUTS } from "../src/gamesd/missions/layouts.mjs";
 import { LIGHTING } from "../src/gamesd/world/lighting.mjs";
-import { checkBudgets, ASSET_BUDGET } from "../src/gamesd/budgets.mjs";
+import { checkBudgets, ASSET_BUDGET, PERF_BUDGET } from "../src/gamesd/budgets.mjs";
 import { scoreSample, varietyReport } from "../src/gamesd/quality/score.mjs";
 import { visualSignature, signatureDistance, hexToLab } from "../src/gamesd/quality/signature.mjs";
 import { collisionProbe, probePositions, insideSolid } from "../src/gamesd/quality/collision-probe.mjs";
@@ -99,6 +99,23 @@ test("checkBudgets flags an oversized package", async () => {
   for (const k of ["package_bytes", "placements", "fps", "draw_calls", "triangles"]) assert.ok(keys.includes(k), `expected ${k} in ${keys}`);
 });
 
+test("checkBudgets: 3 fps is below the playability floor on a GPU; SwiftShader numbers are advisory only", async () => {
+  const res = await build(recipeAt(0, 11));
+  const P = PERF_BUDGET[res.pkg.concept.scale] || PERF_BUDGET.medium;
+  assert.ok(P.min_fps >= 12, "the GPU playability floor is a real frame rate");
+  const slow = { fps: 3, frame_ms_p95: 700, draw_calls: 200, triangles: 150000, load_ms: 1000 };
+  const gpu = checkBudgets(res.pkg, { perf: { ...slow, renderer: "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro)" }, expandScatter: realDeps.expandScatter });
+  assert.equal(gpu.ok, false);
+  assert.equal(gpu.perf_gate, "gpu");
+  assert.ok(gpu.over.some((o) => o.key === "fps"));
+  const sw = checkBudgets(res.pkg, { perf: { ...slow, renderer: "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0)), SwiftShader driver)" }, expandScatter: realDeps.expandScatter });
+  assert.equal(sw.ok, true, "a software renderer's frame rate never gates");
+  assert.equal(sw.perf_gate, "software_renderer_not_gated");
+  const adv = checkBudgets(res.pkg, { cpuPerf: { fps: 0.2, frame_ms_p95: 9000, load_ms: 1e6 }, expandScatter: realDeps.expandScatter });
+  assert.equal(adv.ok, true);
+  assert.deepEqual(adv.cpu_advisory.map((o) => o.key).sort(), ["cpu_fps", "cpu_frame_ms_p95", "cpu_load_ms"]);
+});
+
 test("collision probe detects a planted inside-solid position and a broken resolver", async () => {
   const res = await build(recipeAt(0, 11));
   const cols = realDeps.collision.buildColliders(res.pkg.world, res.pkg.scene);
@@ -145,14 +162,19 @@ test("browser bench smoke: one package loads, renders, plays, saves and reloads"
     const r = run.results[id];
     assert.equal(r.ok, true, `${r.reason}: ${JSON.stringify(r.errors).slice(0, 600)}`);
     assert.equal(r.mode, "play");
+    assert.ok(r.renderer, "renderer string recorded");
+    assert.equal(r.gpu, false, `the default pass is SwiftShader: ${r.renderer}`);
     assert.ok(r.fps.frames >= 3 && r.fps.fps > 0, JSON.stringify(r.fps));
     assert.ok(r.fps.draw_calls > 0 && r.fps.triangles > 0);
     assert.equal(r.save_reload.ok, true, JSON.stringify(r.save_reload));
     assert.equal(r.play.threw, null);
     assert.ok(fs.statSync(r.screenshot).size > 1000, "screenshot written");
     assert.equal(r.screen_hist.length, 64);
-    const s = await scoreSample(res, { browser: r, rebuild: false, probe: false, perfGate: false });
+    const s = await scoreSample(res, { browserCpu: r, rebuild: false, probe: false });
     assert.equal(s.launch.browser_ok, true);
+    assert.equal(s.fps, null, "SwiftShader never supplies the gating fps");
+    assert.ok(s.fps_cpu_worst_case.fps > 0);
+    assert.equal(s.budgets.perf_gate, "not_measured_on_gpu");
     assert.equal(s.save_reload.browser_ok, true);
     assert.ok(s.visual_signature.groups.screen, "screen histogram in the signature");
   } finally {
