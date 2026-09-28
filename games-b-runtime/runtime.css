@@ -59,6 +59,8 @@ kbd { display: inline-block; min-width: 1.5em; padding: 0 5px; margin: 0 2px; bo
 .hud-btn { flex: 1; padding: 5px 0; border-radius: 7px; border: 1px solid var(--edge); background: rgba(255,255,255,.08); color: var(--ink);
   font: 600 12px system-ui; cursor: pointer; }
 .hud-btn:hover { background: rgba(255,179,71,.25); }
+.hud-btn[hidden] { display: none; }
+.hud-btn.off { opacity: .5; text-decoration: line-through; }
 
 #vitals { position: absolute; left: calc(var(--gap) + env(safe-area-inset-left)); bottom: calc(var(--gap) + env(safe-area-inset-bottom)); width: 250px; padding: 9px 12px; pointer-events: none; }
 #vitals .row { display: flex; justify-content: space-between; margin-bottom: 5px; }

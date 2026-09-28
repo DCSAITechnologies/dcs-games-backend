@@ -23,7 +23,7 @@ const NAV_BAKE_PAD = 0.45;
 
 export const BIOMES = ["island", "forest", "desert", "snow", "volcanic", "canyon", "ruins", "city", "scifi_base"];
 export const WEATHERS = ["clear", "cloudy", "rain", "storm", "snow", "fog", "sandstorm", "ash"];
-export const SHAPES = ["island", "valley", "plateau", "open"];
+export const SHAPES = ["island", "valley", "plateau", "open", "archipelago", "caldera", "terraces", "dunes", "marsh"]; // add-only
 export const REGION_KINDS = ["district", "interior", "landmark", "wilderness", "transit", "arena", "instance"];
 export const PLACEMENT_ROLES = ["structure", "prop", "landmark", "foliage", "interactable", "pickup", "decor"];
 export const COLLIDER_SHAPES = ["box", "cylinder", "none"];

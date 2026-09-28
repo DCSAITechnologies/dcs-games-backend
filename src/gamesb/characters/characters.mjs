@@ -81,9 +81,17 @@ export function generateCharacters({ concept, world } = {}) {
 // ---------------------------------------------------------------------------
 // Bodies
 
+// Optional concept-character hints (add-only; the Games-B concept never sets them):
+//   kind: "humanoid"|"creature"|"robot"|"spirit"   overrides the name/role guess
+//   size: "small"|"large"                          scales the body (a swarm member, a brute)
+const KIND_HINTS = ["humanoid", "creature", "robot", "spirit"];
+const SIZE_MULT = { small: 0.6, large: 1.25 };
+const HOSTILE_BODY_ROLES = new Set(["enemy", "creature", "guard"]);
+
 const has = (cc, re) => re.test(`${cc.name || ""} ${cc.description || ""} ${cc.id || ""}`.toLowerCase());
 
 function kindFor(role, cc, biome) {
+  if (KIND_HINTS.includes(cc.kind)) return cc.kind;
   if (has(cc, /\b(robot|drone|automaton|machine|mech|android|construct)\b/)) return "robot";
   if (has(cc, /\b(spirit|ghost|wisp|shade|phantom|wraith|spectre|specter)\b/)) return "spirit";
   if (role === "companion") return has(cc, /\b(fox|dog|cat|wolf|hound|otter|bird|pup|beast)\b/) ? "creature"
@@ -133,6 +141,13 @@ function bodyFor(role, kind, cc, concept, r) {
     palette.primary = shade(secondary, 0.2); palette.secondary = shade(primary, 0.3);
     if (kind === "creature" && concept.biome === "snow") accessories.push("scarf");
     if (kind !== "creature") glow = accent;
+  } else if (!HOSTILE_BODY_ROLES.has(role) && KIND_HINTS.includes(cc.kind)) {
+    // A non-hostile animal or wisp (only reachable through the kind hint): a
+    // small, soft-coloured critter with no warning glow.
+    locomotion = kind === "creature" ? "quadruped" : "hover";
+    height = round2(r.range(0.35, 0.6));
+    build = "slim";
+    palette.skin = shade(ground, 0.25); palette.primary = shade(secondary, 0.1); palette.secondary = shade(primary, 0.35);
   } else {
     // Enemy sentinels and hostile creatures.
     locomotion = kind === "creature" ? "quadruped" : "hover";
@@ -142,6 +157,7 @@ function bodyFor(role, kind, cc, concept, r) {
     palette.primary = shade(primary, -0.45); palette.secondary = shade(secondary, -0.45);
     glow = accent; // the "eye" the player learns to watch for
   }
+  if (SIZE_MULT[cc.size]) height = round2(clamp(height * SIZE_MULT[cc.size], 0.3, 5));
   return { height, build, palette, accessories, locomotion, glow };
 }
 

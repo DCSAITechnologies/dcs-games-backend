@@ -530,6 +530,123 @@ const GEN = {
   },
 };
 
+// ------------------------------------------------------------ surface passes
+//
+// Optional weathering applied on top of any generator, driven by recipe params.
+// Each pass runs ONLY when its param is present, so a recipe without them
+// synthesizes exactly the bytes it always did. Every pass is built from the
+// same periodic primitives (fbm, worley, value noise) plus the already
+// tileable height field, so the result still tiles without seams.
+//
+//   grime:  0..1   darkens crevices (low height): soot, dirt, age
+//   cracks: 0..1   dark fissures along worley cell edges; crack_color, crack_cells
+//   moss:   0..1   green growth in crevices and damp patches; moss_color
+//   rust:   0..1   orange-brown blotches (metal); rust_color
+//   wear:   0..1   bright scuffs on the high points (metal panel wear, trodden stone)
+//   frost:  0..1   pale rime on the high points; frost_color
+//   wet:    0..1   darker, glossier surface (lower roughness)
+//   tint:   hex    final pull toward a colour, by tint_amount (0..1, default 0.2)
+
+export const SURFACE_PASSES = Object.freeze(["grime", "cracks", "moss", "rust", "wear", "frost", "wet", "tint"]);
+
+const amt = (v) => (Number.isFinite(v) ? clamp(v, 0, 1) : 0);
+
+function applySurfacePasses(N, seed, sc, params, rgb, ctx) {
+  const get = (i) => [rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2]];
+  const H = ctx.H, R = ctx.R;
+  const grime = amt(params.grime);
+  if (grime) {
+    const n = fbm(N, P(sc, 6), P(sc, 6), 3, seed + 9001);
+    for (let i = 0; i < N * N; i++) {
+      const k = grime * (0.55 * (1 - H[i]) + 0.45 * n[i]) * 0.7;
+      const c = get(i); ctx.set(i, [c[0] * (1 - k), c[1] * (1 - k * 0.95), c[2] * (1 - k * 0.9)]);
+      R[i] += k * 0.1;
+    }
+  }
+  const cracks = amt(params.cracks);
+  if (cracks) {
+    const cells = worley(N, P(sc, params.crack_cells ?? 5), seed + 9103, 0.9);
+    const mask = fbm(N, P(sc, 3), P(sc, 3), 2, seed + 9107);
+    const cc = hexToRgb(params.crack_color || "#1c1714");
+    const width = 0.015 + 0.05 * cracks;
+    for (let i = 0; i < N * N; i++) {
+      const e = cells.f2[i] - cells.f1[i];
+      const on = (1 - smoothstep(width * 0.4, width, e)) * smoothstep(1 - cracks, 1.05 - cracks * 0.6, mask[i] + 0.35);
+      if (on <= 0) continue;
+      ctx.set(i, mix3(get(i), cc, on * 0.85));
+      H[i] *= 1 - on * 0.8;
+      R[i] += on * 0.08;
+    }
+  }
+  const moss = amt(params.moss);
+  if (moss) {
+    const patch = fbm(N, P(sc, 4), P(sc, 4), 4, seed + 9203);
+    const fine = valueNoise(N, P(sc, 64), P(sc, 64), seed + 9209);
+    const mc = hexToRgb(params.moss_color || "#4f6b2a");
+    const mcDark = [mc[0] * 0.6, mc[1] * 0.7, mc[2] * 0.55];
+    for (let i = 0; i < N * N; i++) {
+      const w = smoothstep(1 - moss, 1.2 - moss * 0.7, 0.55 * patch[i] + 0.45 * (1 - H[i]));
+      if (w <= 0) continue;
+      ctx.set(i, mix3(get(i), mix3(mcDark, mc, fine[i]), w * 0.9));
+      H[i] = H[i] * (1 - w * 0.4) + w * 0.25 * fine[i];
+      R[i] = R[i] * (1 - w) + w * 0.95;
+    }
+  }
+  const rust = amt(params.rust);
+  if (rust) {
+    const blot = fbm(N, P(sc, 5), P(sc, 5), 4, seed + 9301);
+    const speck = valueNoise(N, P(sc, 48), P(sc, 48), seed + 9307);
+    const rc = hexToRgb(params.rust_color || "#8a4a22");
+    const rcDark = [rc[0] * 0.55, rc[1] * 0.5, rc[2] * 0.45];
+    for (let i = 0; i < N * N; i++) {
+      const w = smoothstep(1 - rust * 0.8, 1.05 - rust * 0.4, 0.7 * blot[i] + 0.3 * speck[i]);
+      if (w <= 0) continue;
+      ctx.set(i, mix3(get(i), mix3(rcDark, rc, speck[i]), w * 0.85));
+      R[i] = R[i] * (1 - w) + w * 0.9;
+      H[i] += w * 0.08 * speck[i];
+    }
+  }
+  const wear = amt(params.wear);
+  if (wear) {
+    const streak = fbm(N, P(sc, 3), P(sc, 64), 2, seed + 9401);
+    const broad = fbm(N, P(sc, 3), P(sc, 3), 3, seed + 9409);
+    for (let i = 0; i < N * N; i++) {
+      const w = wear * smoothstep(0.55, 0.95, 0.5 * H[i] + 0.3 * streak[i] + 0.2 * broad[i]);
+      if (w <= 0) continue;
+      const c = get(i);
+      ctx.set(i, mix3(c, [Math.min(255, c[0] * 1.35 + 18), Math.min(255, c[1] * 1.35 + 18), Math.min(255, c[2] * 1.35 + 18)], w * 0.6));
+      R[i] -= w * 0.15;
+    }
+  }
+  const frost = amt(params.frost);
+  if (frost) {
+    const n = fbm(N, P(sc, 5), P(sc, 5), 4, seed + 9503);
+    const fc = hexToRgb(params.frost_color || "#e6eef6");
+    for (let i = 0; i < N * N; i++) {
+      const w = smoothstep(1 - frost, 1.15 - frost * 0.6, 0.6 * H[i] + 0.4 * n[i]);
+      if (w <= 0) continue;
+      ctx.set(i, mix3(get(i), fc, w * 0.85));
+      R[i] = R[i] * (1 - w) + w * 0.6;
+    }
+  }
+  const wet = amt(params.wet);
+  if (wet) {
+    const puddle = fbm(N, P(sc, 3), P(sc, 3), 3, seed + 9601);
+    for (let i = 0; i < N * N; i++) {
+      const w = wet * (0.5 + 0.5 * smoothstep(0.45, 0.8, puddle[i] * (1.2 - H[i] * 0.4)));
+      const c = get(i);
+      ctx.set(i, [c[0] * (1 - 0.3 * w), c[1] * (1 - 0.3 * w), c[2] * (1 - 0.25 * w)]);
+      R[i] -= 0.45 * w;
+    }
+  }
+  if (typeof params.tint === "string" && /^#?[0-9a-f]{6}$/i.test(params.tint)) {
+    const t = hexToRgb(params.tint), k = amt(params.tint_amount ?? 0.2);
+    for (let i = 0; i < N * N; i++) ctx.set(i, mix3(get(i), t, k));
+  }
+}
+
+const hasSurfacePass = (params) => SURFACE_PASSES.some((k) => params[k] !== undefined && params[k] !== null);
+
 // ------------------------------------------------------------------ public
 
 /**
@@ -555,6 +672,7 @@ export function synthesizeTexture(recipe) {
     set(i, col) { const o = i * 3; rgb[o] = col[0]; rgb[o + 1] = col[1]; rgb[o + 2] = col[2]; },
   };
   GEN[gen](N, seed, colors, params, sc, ctx);
+  if (hasSurfacePass(params)) applySurfacePasses(N, seed, sc, params, rgb, ctx);
 
   const albedo = new Uint8ClampedArray(N * N * 4), roughness = new Uint8ClampedArray(N * N * 4);
   for (let i = 0, o = 0; i < N * N; i++, o += 4) {

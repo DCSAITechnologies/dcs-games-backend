@@ -12,6 +12,15 @@
 //   valley  — a meandering floor between raised walls (forest, snow, canyon).
 //   plateau — a raised central tableland with steep rims (ruins, volcanic).
 //   open    — gentle dunes / nearly flat ground (desert, city, scifi_base).
+// Optional shapes (never chosen by biome; a caller passes `shape`):
+//   archipelago — a central island and 3-4 satellites joined by sandbars
+//                 above the water line, so the chain stays walkable.
+//   caldera     — a ring ridge around a sheltered crater floor, broken by
+//                 three notches so the floor and the outside connect.
+//   terraces    — a hillside rising along one axis in broad stepped shelves.
+//   dunes       — a shallow basin of asymmetric wind-blown dune ridges.
+//   marsh       — low wet ground a couple of metres above the water line,
+//                 pocked with shallow pools that never join into channels.
 // Pads and path corridors are flattened into the result by `flattenPad` and
 // `flattenCorridor` after the layout is known.
 
@@ -64,6 +73,18 @@ export const SHAPE_BY_BIOME = {
   canyon: "valley", ruins: "plateau", city: "open", scifi_base: "open",
 };
 
+/** Every shape `generateBaseTerrain` knows. The first four are the biome defaults. */
+export const TERRAIN_SHAPES = ["island", "valley", "plateau", "open", "archipelago", "caldera", "terraces", "dunes", "marsh"];
+/** Shapes whose base heightfield is built around a water line at `waterLevel`. */
+export const WATER_SHAPES = ["island", "archipelago", "marsh"];
+
+/** Distance from (px,pz) to segment a–b, all in the same units. */
+function segDist(px, pz, ax, az, bx, bz) {
+  const dx = bx - ax, dz = bz - az, L2 = dx * dx + dz * dz || 1;
+  const t = clamp(((px - ax) * dx + (pz - az) * dz) / L2, 0, 1);
+  return Math.hypot(px - (ax + dx * t), pz - (az + dz * t));
+}
+
 /** Grid dimensions for a world size: ≤160 vertices per side. */
 export function terrainGrid(size) {
   const edge = Math.max(size.w, size.h);
@@ -77,8 +98,8 @@ export function terrainGrid(size) {
  * Base heightfield before pads and paths. Returns Float64Array heights plus
  * the grid, and a few shape facts (`summit`) the layout wants to know.
  */
-export function generateBaseTerrain({ size, biome, seed, waterLevel = 0 }) {
-  const shape = SHAPE_BY_BIOME[biome] || "open";
+export function generateBaseTerrain({ size, biome, seed, waterLevel = 0, shape: shapeIn } = {}) {
+  const shape = TERRAIN_SHAPES.includes(shapeIn) ? shapeIn : SHAPE_BY_BIOME[biome] || "open";
   const { cell, cols, rows } = terrainGrid(size);
   const heights = new Float64Array(cols * rows);
   const n1 = fbm(seed ^ 0x51ed, 5), n2 = fbm(seed ^ 0x2b7a, 4), n3 = fbm(seed ^ 0x9c3f, 3), ang = fbm(seed ^ 0x77aa, 3);
@@ -89,6 +110,8 @@ export function generateBaseTerrain({ size, biome, seed, waterLevel = 0 }) {
   const summit = { u: 0.5 + Math.cos(sa) * sd, v: 0.5 + Math.sin(sa) * sd };
   const cliffAng = sa + Math.PI * (0.6 + 0.4 * r2); // sea cliffs roughly facing away from the summit
   const meander = { a: 0.12 + 0.06 * r1, f: 1.2 + r2 * 1.3, p: r0 * 6.28 };
+  const extra = shape === "archipelago" || shape === "caldera" || shape === "terraces" || shape === "dunes" || shape === "marsh"
+    ? extraShapeParams(shape, seed, summit, sa) : null;
 
   for (let j = 0; j < rows; j++) {
     for (let i = 0; i < cols; i++) {
@@ -135,13 +158,15 @@ export function generateBaseTerrain({ size, biome, seed, waterLevel = 0 }) {
           const sd = Math.hypot(u - summit.u, v - summit.v);
           h += 14 * k * Math.exp(-(sd * sd) / (2 * 0.09 * 0.09)) - 6 * k * Math.exp(-(sd * sd) / (2 * 0.03 * 0.03));
         }
+      } else if (extra) {
+        h = extraShapeHeight(extra, u, v, { biome, k, waterLevel, n1, n2, n3, summit });
       } else {
         const flat = biome === "city" || biome === "scifi_base";
         const dunes = biome === "desert" ? Math.pow(Math.abs(Math.sin((u * 5 + n2(u * 2, v * 2) * 1.5) * Math.PI)), 2) * 2.2 * k : 0;
         h = (n1(u * 3.5, v * 3.5) - 0.5) * (flat ? 2 : 7) * k + dunes;
       }
       // Frame non-island worlds with a gentle rim so the edge reads as land.
-      if (shape !== "island") {
+      if (shape !== "island" && shape !== "archipelago") {
         const e = Math.min(u, v, 1 - u, 1 - v);
         h += smoothstep(0.06, 0, e) * 6 * k;
       }
@@ -149,6 +174,104 @@ export function generateBaseTerrain({ size, biome, seed, waterLevel = 0 }) {
     }
   }
   return { shape, cell, cols, rows, heights, summit: { x: summit.u * size.w, z: summit.v * size.h } };
+}
+
+/** Per-world constants for the optional shapes (all derived from the seed). */
+function extraShapeParams(shape, seed, summit, sa) {
+  const q = (a, b) => lattice(a, b, seed ^ 0x3c6e);
+  if (shape === "archipelago") {
+    // Centre island near the middle (the hub prefers the centre) and 3-4
+    // satellites spaced round it; each satellite gets a sandbar to the centre
+    // and the first one also to its neighbour, so the chain has a loop.
+    const c = { u: 0.5 + (q(1, 1) - 0.5) * 0.06, v: 0.5 + (q(1, 2) - 0.5) * 0.06, r: 0.2 + 0.03 * q(1, 3) };
+    const n = 3 + (q(2, 1) < 0.5 ? 1 : 0);
+    const isles = [c];
+    for (let s = 0; s < n; s++) {
+      const a = sa + (s / n) * Math.PI * 2 + (q(3, s) - 0.5) * 0.5;
+      const d = 0.29 + 0.04 * q(4, s);
+      isles.push({ u: 0.5 + Math.cos(a) * d, v: 0.5 + Math.sin(a) * d, r: 0.125 + 0.03 * q(5, s) });
+    }
+    const bars = isles.slice(1).map((s) => [c, s]);
+    bars.push([isles[1], isles[2]]);
+    return { shape, isles, bars, peak: { u: c.u + Math.cos(sa) * 0.07, v: c.v + Math.sin(sa) * 0.07 } };
+  }
+  if (shape === "caldera") {
+    const notches = [0, 1, 2].map((s) => sa + 0.9 + (s / 3) * Math.PI * 2 + (q(6, s) - 0.5) * 0.6);
+    const cone = { u: 0.5 + Math.cos(sa + Math.PI) * 0.16, v: 0.5 + Math.sin(sa + Math.PI) * 0.16 };
+    return { shape, notches, rc: 0.62 + 0.05 * q(7, 1), cone };
+  }
+  if (shape === "terraces") return { shape, dir: sa, step: 4.2, sharp: 0.17 }; // risers stay under ~32° so nav and the walker agree
+  if (shape === "dunes") return { shape, dir: sa * 0.5 + 0.4, period: 6.5 + q(8, 1) * 1.5 };
+  return { shape }; // marsh
+}
+
+/** Height of an optional shape at (u,v) in [0,1]², before the edge rim. */
+function extraShapeHeight(P, u, v, { biome, k, waterLevel, n1, n2, n3, summit }) {
+  const dc = Math.hypot(u - 0.5, v - 0.5) / 0.5;
+  switch (P.shape) {
+    case "archipelago": {
+      const wob = 1 + 0.22 * (n3(u * 6, v * 6) - 0.5) * 2;
+      let land = -Infinity;
+      for (const s of P.isles) land = Math.max(land, 1 - Math.hypot(u - s.u, v - s.v) / (s.r * wob));
+      let h;
+      if (land < 0) {
+        h = waterLevel - 0.8 + land * 14;
+        h = Math.max(h, waterLevel - 6 - 1.5 * n3(u * 4, v * 4));
+      } else {
+        const beach = smoothstep(0.0, 0.22, land);
+        h = waterLevel + 0.35 + beach * 1.7 + land * 5 * k;
+        h += (n1(u * 6, v * 6) - 0.45) * 4 * k * beach * smoothstep(0.1, 0.4, land);
+        const pd = Math.hypot(u - P.peak.u, v - P.peak.v);
+        h += 9 * k * Math.exp(-(pd * pd) / (2 * 0.06 * 0.06)) * beach;
+      }
+      // Sandbars: a low causeway just above the water, wide enough to walk.
+      let bar = -Infinity;
+      for (const [a, b] of P.bars) bar = Math.max(bar, 1 - segDist(u, v, a.u, a.v, b.u, b.v) / 0.042);
+      if (bar > 0) h = Math.max(h, waterLevel + 0.45 + 0.9 * smoothstep(0, 0.6, bar) + 0.3 * (n2(u * 9, v * 9) - 0.5));
+      return h;
+    }
+    case "caldera": {
+      const th = Math.atan2(v - 0.5, u - 0.5);
+      let notch = 0;
+      for (const a of P.notches) {
+        const dA = Math.atan2(Math.sin(th - a), Math.cos(th - a));
+        notch = Math.max(notch, Math.exp(-(dA * dA) / (2 * 0.2 * 0.2)));
+      }
+      const rc = P.rc + 0.06 * (n2(u * 3, v * 3) - 0.5) * 2;
+      const x = (dc - rc) / 0.15;
+      const rim = Math.exp(-x * x) * (1 - 0.85 * notch);
+      const floor = dc < rc ? 2.5 * k : 2.5 * k * (1 - smoothstep(rc, 1.2, dc));
+      let h = floor + rim * 14 * k + (n1(u * 4, v * 4) - 0.5) * 3.5 * k + rim * (n3(u * 8, v * 8) - 0.5) * 4 * k;
+      if (biome === "volcanic") {
+        const cd = Math.hypot(u - P.cone.u, v - P.cone.v);
+        h += 7 * k * Math.exp(-(cd * cd) / (2 * 0.055 * 0.055)) - 3.5 * k * Math.exp(-(cd * cd) / (2 * 0.02 * 0.02));
+      }
+      return h;
+    }
+    case "terraces": {
+      const t = (u - 0.5) * Math.cos(P.dir) + (v - 0.5) * Math.sin(P.dir) + 0.1 * (n2(u * 2.5, v * 2.5) - 0.5) * 2;
+      const h0 = smoothstep(-0.6, 0.6, t) * 24 * k + (n1(u * 3, v * 3) - 0.5) * 2.5 * k;
+      return terrace(Math.max(0, h0), P.step * k, P.sharp) + (n3(u * 9, v * 9) - 0.5) * 0.6;
+    }
+    case "dunes": {
+      const p = u * Math.cos(P.dir) + v * Math.sin(P.dir), q = -u * Math.sin(P.dir) + v * Math.cos(P.dir);
+      const ph = p * P.period + (n2(u * 2, v * 2) - 0.5) * 2.2 + 0.35 * Math.sin(q * 9);
+      const f = ph - Math.floor(ph);
+      const prof = smoothstep(0, 1, f < 0.72 ? f / 0.72 : (1 - f) / 0.28); // long windward rise, short slip face
+      const amp = 4.2 * k * (0.55 + 0.45 * n3(q * 3 + 2, p * 3)) * (0.35 + 0.65 * smoothstep(0.12, 0.4, dc));
+      return prof * amp + dc * dc * 5 * k + (n1(u * 5, v * 5) - 0.5) * 1.2 * k;
+    }
+    case "marsh":
+    default: {
+      let h = waterLevel + 2.3 + (n1(u * 4, v * 4) - 0.5) * 2.4 * k + (n3(u * 11, v * 11) - 0.5) * 0.5;
+      // Shallow pools where a noise field dips, kept off the middle so the
+      // hub has dry ground; low thresholds keep pools as islands of water.
+      const pn = n2(u * 5 + 7, v * 5 - 3);
+      const pool = smoothstep(0.34, 0.27, pn) * smoothstep(0.08, 0.2, dc);
+      h = lerp(h, waterLevel - 1.1, pool);
+      return h;
+    }
+  }
 }
 
 /** Level a disc to `target`, blending smoothly back to the terrain over `blend` metres. */

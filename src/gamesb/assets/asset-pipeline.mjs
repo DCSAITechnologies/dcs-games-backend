@@ -144,6 +144,9 @@ export async function resolveAssets({ concept = null, world, characters = null, 
   const palette = concept?.palette || null;
   const biome = concept?.biome || world.biome || null;
   const seed = Number.isInteger(world.seed) ? world.seed : Number.isInteger(concept?.seed) ? concept.seed : 0;
+  // Optional Games-D material style (add-only): absent → the exact Games-B materials.
+  const style = concept?.material_style && typeof concept.material_style === "object" ? concept.material_style : null;
+  const matOpts = style ? { palette, biome, textureSize, style } : { palette, biome, textureSize };
   const at = clock();
 
   const imageLane = createImageLane({ env, adapters: adapters.image || null });
@@ -258,11 +261,11 @@ export async function resolveAssets({ concept = null, world, characters = null, 
   const materialsById = {};
   for (const mref of [...matUses.keys()].sort()) {
     const name = mref.slice(4);
-    let spec = buildMaterialSpec(name, { palette, biome, textureSize });
+    let spec = buildMaterialSpec(name, matOpts);
     if (!spec) {
       const fb = unknownMaterialFallback(name);
       warnings.push(`unknown material '${mref}' built from 'mat:${fb}'`);
-      spec = buildMaterialSpec(fb, { palette, biome, textureSize });
+      spec = buildMaterialSpec(fb, matOpts);
       spec.material.material_id = mref;
       // Texture refs keep the requested name so they stay unique per material.
       spec.textures = spec.textures.map((t) => ({ ...t, ref: `tex:${name}_${t.channel}` }));

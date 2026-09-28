@@ -68,15 +68,22 @@ export const textureRef = (name, channel) => `tex:${name}_${channel}`;
 
 /**
  * Material payload + texture recipes for one `mat:` name.
+ *
+ * `style` (optional, add-only) is a MaterialStyle, normally `concept.material_style`
+ * as set by the Games-D material-styles module. When it is absent (null or
+ * undefined) this function takes exactly the path it always did, so every
+ * existing package rebuilds byte-identically. See `applyStyle` below.
  * @returns {{ name, ref, material, textures: [{ ref, channel, recipe }] } | null}
  */
-export function buildMaterialSpec(nameOrRef, { palette = null, biome = null, seed = 0, textureSize = 256 } = {}) {
+export function buildMaterialSpec(nameOrRef, { palette = null, biome = null, seed = 0, textureSize = 256, style = null } = {}) {
   const name = String(nameOrRef || "").replace(/^mat:/, "");
-  const def = LIBRARY[name];
-  if (!def) return null;
+  const base = LIBRARY[name];
+  if (!base) return null;
+  const st = isStyle(style) ? style : null;
+  const def = st ? styledDef(name, base, st) : base;
   const pull = def.pull && palette?.[def.pull[0]] ? [palette[def.pull[0]], def.pull[1]] : null;
-  const bt = BIOME_TINT[biome]?.[name];
-  const tint = (c) => { let x = bt ? mixHex(c, bt[0], bt[1]) : c; if (pull) x = mixHex(x, pull[0], pull[1]); return x; };
+  const bt = def.skip_biome ? null : BIOME_TINT[biome]?.[name];
+  const tint = (c) => { let x = bt ? mixHex(c, bt[0], bt[1]) : c; if (pull) x = mixHex(x, pull[0], pull[1]); if (def.style_tint) x = mixHex(x, def.style_tint[0], def.style_tint[1]); return x; };
 
   const textures = [];
   let color;
@@ -85,15 +92,17 @@ export function buildMaterialSpec(nameOrRef, { palette = null, biome = null, see
     color = colors[1];
     // Seed per material (not per game) so a texture is shared by every game
     // with the same palette — that is what makes the content cache pay off.
+    const size = [64, 128, 256, 512].includes(textureSize) ? textureSize : 256;
     const recipe = {
-      generator: def.gen, size: [64, 128, 256, 512].includes(textureSize) ? textureSize : 256,
-      seed: ((hashString(name) ^ (seed | 0)) >>> 0) % 1000003, colors, scale: 1, params: { ...(def.params || {}) },
+      generator: def.gen, size: st ? Math.min(size, st.texture_size || 256) : size,
+      seed: ((hashString(name) ^ (seed | 0) ^ (st ? (st.seed_offset | 0) : 0)) >>> 0) % 1000003, colors, scale: def.scale ?? 1, params: { ...(def.params || {}) },
     };
     for (const channel of ["albedo", "normal", "roughness"]) textures.push({ ref: textureRef(name, channel), channel, recipe: { ...recipe, channel } });
   } else {
     color = tint(def.flat);
   }
-  const emissive = def.emissive ? (pull ? mixHex(def.emissive, pull[0], pull[1]) : def.emissive) : null;
+  let emissive = def.emissive ? (pull ? mixHex(def.emissive, pull[0], pull[1]) : def.emissive) : null;
+  if (emissive && def.style_emissive) emissive = mixHex(emissive, def.style_emissive[0], def.style_emissive[1]);
   const material = {
     material_id: materialRef(name),
     color,
@@ -105,5 +114,47 @@ export function buildMaterialSpec(nameOrRef, { palette = null, biome = null, see
     double_sided: !!def.double_sided,
     texture_refs: Object.fromEntries(textures.map((t) => [t.channel, t.ref])),
   };
+  if (st) material.style = st.id;
   return { name, ref: materialRef(name), material, textures };
+}
+
+// ------------------------------------------------------------ material styles
+//
+// A MaterialStyle (Games-D, CONTRACT addition, all fields optional except id):
+//   { id, tint?: [hex, weight], seed_offset?: int, tile_mult?: number,
+//     roughness_add?: number, texture_size?: 64|128|256,
+//     params?: {...}            // texture params added to every textured material
+//     materials?: { <name>: { colors?: [hex x3..4], tint?: [hex, weight], roughness?, metalness?,
+//                             params?: {...}, generator?, scale?, tile_m?, emissive?: [hex, weight],
+//                             emissive_intensity?, opacity? } } }
+// A per-material `colors` ramp replaces the library ramp (and skips the biome
+// nudge, since the style already chose the colours); the palette pull still
+// applies, then the tint. Unknown names and bad values are ignored.
+
+const isHexStr = (v) => typeof v === "string" && /^#[0-9a-fA-F]{6}$/.test(v);
+const isTintPair = (v) => Array.isArray(v) && isHexStr(v[0]) && Number.isFinite(v[1]);
+const num = (v, lo, hi) => (Number.isFinite(v) ? clamp(v, lo, hi) : undefined);
+function isStyle(s) { return !!s && typeof s === "object" && typeof s.id === "string"; }
+
+function styledDef(name, base, st) {
+  const m = (st.materials && typeof st.materials === "object" && st.materials[name]) || {};
+  const def = { ...base };
+  if (Array.isArray(m.colors) && m.colors.length >= 3 && m.colors.every(isHexStr) && def.gen) { def.colors = m.colors.slice(0, 4); def.skip_biome = true; }
+  if (isHexStr(m.flat) && !def.gen) { def.flat = m.flat; def.skip_biome = true; }
+  const tint = isTintPair(m.tint) ? m.tint : isTintPair(st.tint) ? st.tint : null;
+  if (tint) def.style_tint = [tint[0], clamp(tint[1], 0, 1)];
+  if (typeof m.generator === "string" && def.gen) def.gen = m.generator;
+  const r = num(m.roughness, 0.02, 1);
+  def.roughness = r ?? clamp(Math.round((base.roughness + (num(st.roughness_add, -0.5, 0.5) ?? 0)) * 1000) / 1000, 0.02, 1);
+  if (num(m.metalness, 0, 1) !== undefined) def.metalness = m.metalness;
+  if (num(m.scale, 0.25, 8) !== undefined) def.scale = m.scale;
+  const tileMult = num(st.tile_mult, 0.25, 4) ?? 1;
+  if (num(m.tile_m, 0.1, 50) !== undefined) def.tile_m = m.tile_m;
+  else if (base.tile_m !== undefined) def.tile_m = Math.round(base.tile_m * tileMult * 1000) / 1000;
+  if (isTintPair(m.emissive)) def.style_emissive = [m.emissive[0], clamp(m.emissive[1], 0, 1)];
+  if (num(m.emissive_intensity, 0, 10) !== undefined) def.emissive_intensity = m.emissive_intensity;
+  if (num(m.opacity, 0.05, 1) !== undefined) def.opacity = m.opacity;
+  const params = { ...(base.params || {}), ...(st.params && typeof st.params === "object" && name !== "water" ? st.params : {}), ...(m.params && typeof m.params === "object" ? m.params : {}) };
+  if (Object.keys(params).length) def.params = params;
+  return def;
 }

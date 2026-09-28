@@ -80,7 +80,7 @@ function talkIxFor(world, cid) {
  * { kind: "reach", pos } | { kind: "interact", ix } | { kind: "wait" } | null (no way found).
  * Items locked behind other items resolve recursively to the prerequisite.
  */
-function goalFor(sim, obj, depth = 0) {
+function goalFor(sim, obj, depth = 0, agent = null) {
   const { pkg } = sim;
   const world = pkg.world;
   const nav = world.navigation;
@@ -123,12 +123,61 @@ function goalFor(sim, obj, depth = 0) {
       return viaIx(ix);
     }
     case "defeat": return sim.npcs[t] ? { kind: "defeat", pos: sim.npcs[t].position, ref: t } : null;
-    case "survive": return { kind: "wait" };
+    case "survive": {
+      // Survive-at-a-location: go there and hold it. When a damaging zone
+      // (storm/fire) has worn the agent down, fall back to the nearest safe
+      // region until healed, as a player would; the seconds keep counting.
+      if (!t || !(world.regions || []).some((r) => r.id === t)) return { kind: "wait" };
+      if (agent) {
+        const max = pkg.gameplay?.rules?.player_health || 100;
+        const hp = sim.game.health ?? max;
+        if (agent.retreat && hp >= max * 0.75) agent.retreat = null;
+        if (!agent.retreat && hp < max * 0.4 && zoneHurts(sim, sim.region)) agent.retreat = safeRegion(sim, sim.region);
+        if (agent.retreat) return { kind: "reach", pos: agent.retreat.pos, region: agent.retreat.id };
+      }
+      if (sim.region !== t) { const pos = regionGoal(world, nav, sim.deps, t); return pos ? { kind: "reach", pos, region: t } : { kind: "wait" }; }
+      return { kind: "hold" };
+    }
     default: return null;
   }
 }
 
 const dist = (a, b) => (a && b ? Math.hypot(a.x - b.x, a.z - b.z) : Infinity);
+
+/** Does an active storm/fire zone hurt in this region right now? */
+function zoneHurts(sim, region) {
+  if (!region) return false;
+  return (sim.pkg.gameplay?.hazards || []).some((h) => (h.kind === "storm_zone" || h.kind === "fire") && h.region === region
+    && (h.damage_per_s ?? 1) > 0 && (!h.active_after || sim.game.objectives?.[h.active_after] === "done"));
+}
+
+/** Nearest region (by walkable goal point) where no zone hurts, other than `except`. */
+function safeRegion(sim, except) {
+  const world = sim.pkg.world;
+  const p = sim.player.position;
+  let best = null, bestD = Infinity;
+  for (const r of world.regions || []) {
+    if (r.id === except || zoneHurts(sim, r.id)) continue;
+    const pos = regionGoal(world, world.navigation, sim.deps, r.id);
+    const d = dist(pos, p);
+    if (pos && (d < bestD || (d === bestD && best && r.id < best.id))) { best = { id: r.id, pos }; bestD = d; }
+  }
+  return best;
+}
+
+/** Unit vector away from nearby live hostiles (zero when none is close). */
+function evadeVector(sim, radius = 5.5) {
+  const p = sim.player.position;
+  let dx = 0, dz = 0;
+  for (const ch of sim.pkg.characters?.characters || []) {
+    if (!ch.behavior?.hostile || sim.defeated.includes(ch.id)) continue;
+    const n = sim.npcs[ch.id];
+    const nd = n ? dist(n.position, p) : Infinity;
+    if (nd < radius && nd > 0.01) { dx += (p.x - n.position.x) / nd; dz += (p.z - n.position.z) / nd; }
+  }
+  const l = Math.hypot(dx, dz);
+  return l > 0.01 ? { x: dx / l, z: dz / l } : { x: 0, z: 0 };
+}
 
 /**
  * Objective order from gameplay/solver.mjs when it is present: it replays the
@@ -149,23 +198,23 @@ async function loadPlan(pkg) {
   }
 }
 
-function pickObjective(sim, plan) {
+function pickObjective(sim, plan, agent = null) {
   const objs = sim.pkg.gameplay.objectives || [];
   const state = sim.game.objectives || {};
   const active = objs.filter((o) => state[o.id] === "active" && !o.optional);
   if (!active.length) return null;
   if (plan.order) {
-    for (const id of plan.order) { const o = active.find((a) => a.id === id); if (o && goalFor(sim, o)?.kind !== "wait") return o; }
+    for (const id of plan.order) { const o = active.find((a) => a.id === id); if (o && goalFor(sim, o, 0, agent)?.kind !== "wait") return o; }
   }
   // Greedy: the nearest reachable required objective; ties break on id so the
   // run is deterministic.
   const p = sim.player.position;
   let best = null, bestD = Infinity;
   for (const o of active) {
-    const g = goalFor(sim, o);
+    const g = goalFor(sim, o, 0, agent);
     if (!g) continue;
     const pos = g.pos || (g.ix && interactablePosition(sim, g.ix));
-    const d = g.kind === "wait" ? 1e9 : dist(pos, p);
+    const d = g.kind === "wait" ? 1e9 : g.kind === "hold" ? 0 : dist(pos, p);
     if (d < bestD || (d === bestD && best && o.id < best.id)) { best = o; bestD = d; }
   }
   return best || active[0];
@@ -187,7 +236,7 @@ export async function headlessPlaytest(pkg, { deps, maxSimSeconds = 1800, saveRe
   const saveAtCount = saveReloadAt > 0 ? Math.max(1, Math.ceil(required.length * saveReloadAt)) : Infinity;
   const timeline = [];
   let events = 0, stuck = 0, saveReload = { ok: false, skipped: true };
-  const agent = { key: null, path: null, wp: 0, repathAt: 0, checkAt: 0, checkPos: null, recoverUntil: 0, recoverDir: null, pressed: false, lastProgress: 0, convo: null, convoStart: 0, seen: new Set() };
+  const agent = { retreat: null, key: null, path: null, wp: 0, repathAt: 0, checkAt: 0, checkPos: null, recoverUntil: 0, recoverDir: null, pressed: false, lastProgress: 0, convo: null, convoStart: 0, seen: new Set() };
 
   const log = (e) => { if (timeline.length < 600) timeline.push({ t: Math.round(sim.t * 100) / 100, ...e }); };
 
@@ -219,11 +268,17 @@ export async function headlessPlaytest(pkg, { deps, maxSimSeconds = 1800, saveRe
       }
     } else {
       agent.convoStart = sim.t;
-      const obj = pickObjective(sim, plan);
-      const goal = obj ? goalFor(sim, obj) : null;
+      const obj = pickObjective(sim, plan, agent);
+      const goal = obj ? goalFor(sim, obj, 0, agent) : null;
       const key = obj ? `${obj.id}:${goal?.kind}:${goal?.ix?.id || goal?.region || goal?.ref || ""}` : null;
       if (key !== agent.key) { agent.key = key; agent.path = null; }
-      if (goal && goal.kind !== "wait") {
+      if (goal?.kind === "hold") {
+        // Holding a position: stand, stepping away from any hostile that closes in.
+        agent.pressed = false;
+        const v = evadeVector(sim);
+        input.move = v;
+        input.run = !!(v.x || v.z);
+      } else if (goal && goal.kind !== "wait") {
         const target = goal.pos || interactablePosition(sim, goal.ix);
         if (target) {
           if (!agent.path || sim.t >= agent.repathAt) repath(target);

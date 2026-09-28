@@ -30,6 +30,16 @@ function glRendererName() {
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
+/** localStorage, or null when the page may not use it. */
+function safeStorage() { try { const s = window.localStorage; s.getItem("x"); return s; } catch { return null; } }
+
+/** Stand-in when there is no pkg.audio or the audio module failed: every call is a no-op. */
+function inertAudio(reason) {
+  const nop = () => false;
+  const state = { present: false, available: false, reason, started: false, muted: false, enabled: false, cues_played: 0, cues_sounded: 0, emitter_plays: 0, cue_counts: {}, last_cue: null, errors: [], start: nop, setMuted: nop, toggleMute: nop, cue: nop };
+  return { state, start: nop, setMuted: nop, toggleMute: nop, cue: nop, onEvents: () => {}, step: () => {}, reset: () => {}, dispose: () => {} };
+}
+
 // Each import is a literal import("…") so the publisher's import-closure scan
 // (hooks/publish.mjs) sees it and ships the module with the game.
 async function tryImport(load) {
@@ -123,6 +133,40 @@ async function boot() {
   }
   setSim(sim);
 
+  // ---- audio (optional pkg.audio; procedural WebAudio, no files) -----------------
+  // Loaded only when the package asks for it, started on the first user gesture
+  // (autoplay policy), and never allowed to break the game: any failure leaves
+  // an inert controller whose state says why.
+  let audio = inertAudio(pkg.audio ? "audio module not loaded" : "no audio in package");
+  if (pkg.audio) {
+    const audioMod = await tryImport(() => import("./audio.mjs"));
+    if (audioMod.__error) notes.push(`audio: ${audioMod.__error.message}`);
+    else {
+      try { audio = audioMod.createAudio(pkg.audio, { win: window, storage: safeStorage() }); } catch (e) { notes.push(`audio: ${e.message}`); }
+    }
+  }
+  HOOK.audio = audio.state;
+  const muteBtn = document.getElementById("btn-mute");
+  const syncMute = () => {
+    if (!muteBtn) return;
+    muteBtn.classList.toggle("off", !!audio.state.muted);
+    muteBtn.setAttribute("aria-pressed", audio.state.muted ? "true" : "false");
+    muteBtn.title = audio.state.muted ? "Sound off (M)" : "Sound on (M)";
+  };
+  if (audio.state.present) {
+    const gestures = ["pointerdown", "keydown", "touchstart"];
+    const onGesture = () => {
+      try { audio.start(); } catch (e) { notes.push(`audio start: ${e.message}`); }
+      if (audio.state.started || !audio.state.available) for (const g of gestures) window.removeEventListener(g, onGesture, true);
+    };
+    for (const g of gestures) window.addEventListener(g, onGesture, { capture: true, passive: true });
+    if (muteBtn) {
+      muteBtn.hidden = false;
+      muteBtn.addEventListener("click", () => { audio.toggleMute(); syncMute(); });
+      syncMute();
+    }
+  }
+
   // ---- UI -------------------------------------------------------------------
   const SAVE_KEY = `dcs-gamesb:${pkg.game_id}:save`;
   const hud = createHud({
@@ -149,6 +193,7 @@ async function boot() {
       if (code === "F5") { try { HOOK.save(); hud.toast("Game saved"); } catch (e) { hud.toast(`Save failed: ${e.message}`, "bad"); } }
       if (code === "F9") { try { HOOK.load(); hud.toast("Game loaded"); } catch (e) { hud.toast(`Load failed: ${e.message}`, "bad"); } }
       if (code === "KeyH") document.getElementById("help")?.toggleAttribute("hidden");
+      if (code === "KeyM" && audio.state.present) { audio.toggleMute(); syncMute(); hud.toast(audio.state.muted ? "Sound off" : "Sound on"); }
     },
   });
   if (!sim) {
@@ -210,6 +255,8 @@ async function boot() {
       console.error(e);
       return;
     }
+    audio.onEvents(r.events, sim.t);
+    audio.step(sim, SIM_DT);
     for (const ev of r.events || []) {
       if (ev.kind === "interact" && LIGHTABLE.has(ixById.get(ev.ref)?.kind)) lit.add(ev.ref);
       if (ev.kind === "objective_done") {
@@ -308,6 +355,7 @@ async function boot() {
   function restart() {
     if (!S) return;
     setSim(S.createSim(pkg, deps));
+    audio.reset(sim?.status || "playing");
     hud.reset();
     R.cam.initialised = false;
   }
@@ -352,6 +400,7 @@ async function boot() {
       const s = save || JSON.parse(localStorage.getItem(SAVE_KEY) || "null");
       if (!s) throw new Error("no saved game");
       setSim(S.restoreSim(pkg, s, deps));
+      audio.reset(sim?.status || "playing");
       hud.reset();
       hud.skipMessages((sim.game.messages || []).length);
       R.cam.initialised = false;

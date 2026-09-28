@@ -15,7 +15,7 @@
 //   8. focal / pickup / talk interactables with the §4.5 ids
 
 import { seeded, hashString, clamp, round2 } from "../common/rng.mjs";
-import { generateBaseTerrain, flattenPad, corridorProfile, carveCorridors, relaxPathSeams, sampleGrid, slopeGrid } from "./terrain.mjs";
+import { generateBaseTerrain, TERRAIN_SHAPES, WATER_SHAPES, flattenPad, corridorProfile, carveCorridors, relaxPathSeams, sampleGrid, slopeGrid } from "./terrain.mjs";
 import { sampleHeight, slopeAt, expandScatter, footprintRadius, distToPolyline } from "./terrain-sample.mjs";
 import { buildColliders, containsXZ, pointInCollider } from "./collision.mjs";
 import { reachableSet, nearestWalkable, cellCenter } from "./nav-grid.mjs";
@@ -327,7 +327,41 @@ function padRadius(kind) { return kind === "hub" ? 12 : kind === "village" ? 11 
  * coastal) and a spacing term. A few relaxation passes then nudge each
  * non-hub region to the best nearby candidate, which evens out the spread.
  */
-function layoutRegions(base, locations, size, wl, hasWater, R) {
+/**
+ * Optional placement orderings (Games-D layouts, via concept.layout_ordering).
+ * Absent or "linear" keeps the historic placement exactly. Each ordering gives
+ * every location a target point; the placement score then pulls hard toward it.
+ *   hub_spoke — hub at the centre, the rest evenly on a ring around it
+ *   loop      — everything on one ring, hub included, in visiting order
+ *   gauntlet  — a long zig-zag chain across the map, finale at the far end
+ *   cluster   — everything packed tightly round a central hub
+ */
+export const LAYOUT_ORDERINGS = Object.freeze(["linear", "hub_spoke", "loop", "gauntlet", "cluster"]);
+function orderingTargets(ordering, n, size, hasWater, phase) {
+  const edge = Math.max(size.w, size.h), cx = size.w / 2, cz = size.h / 2;
+  const at = (r, a) => ({ x: cx + Math.cos(a) * r, z: cz + Math.sin(a) * r });
+  const t = [];
+  if (ordering === "hub_spoke" || ordering === "cluster") {
+    const r = ordering === "cluster" ? Math.max(40, edge * 0.2) : edge * 0.3;
+    t.push({ x: cx, z: cz });
+    for (let k = 1; k < n; k++) t.push(at(r, phase + (2 * Math.PI * (k - 1)) / Math.max(1, n - 1)));
+    return { t, gap: n > 2 ? 2 * r * Math.sin(Math.PI / (n - 1)) : r };
+  }
+  if (ordering === "loop") {
+    const r = edge * 0.3;
+    for (let k = 0; k < n; k++) t.push(at(r, phase + (2 * Math.PI * k) / n));
+    return { t, gap: 2 * r * Math.sin(Math.PI / Math.max(n, 2)) };
+  }
+  // gauntlet
+  const L = edge * (hasWater ? 0.62 : 0.72), dx = Math.cos(phase), dz = Math.sin(phase);
+  for (let k = 0; k < n; k++) {
+    const s = -L / 2 + (L * k) / Math.max(1, n - 1), off = k > 0 && k < n - 1 ? (k % 2 ? 1 : -1) * edge * 0.05 : 0;
+    t.push({ x: cx + dx * s - dz * off, z: cz + dz * s + dx * off });
+  }
+  return { t, gap: L / Math.max(1, n - 1) };
+}
+
+function layoutRegions(base, locations, size, wl, hasWater, R, ordering) {
   const edge = Math.max(size.w, size.h);
   const step = edge / 30;
   const cands = [];
@@ -367,7 +401,11 @@ function layoutRegions(base, locations, size, wl, hasWater, R) {
   const kindScore = (c, loc, idx) => {
     const hN = (c.h - minH) / Math.max(1e-6, maxH - minH);
     const dc = Math.hypot(c.x - size.w / 2, c.z - size.h / 2) / edge;
+    if (target) return -Math.hypot(c.x - target[idx].x, c.z - target[idx].z) / edge * 30 + (idx === 0 ? 0 : kindPref(c, loc, hN) * 0.5);
     if (idx === 0) return -dc * (hasWater ? 14 : 8);
+    return kindPref(c, loc, hN);
+  };
+  const kindPref = (c, loc, hN) => {
     switch (loc.kind) {
       case "summit": case "tower": return hN * 6;
       case "dock": return hasWater ? (c.coast > 0 ? 6 - Math.abs(c.h - (wl + 1.8)) : -6) : -hN * 2;
@@ -381,6 +419,12 @@ function layoutRegions(base, locations, size, wl, hasWater, R) {
     return d;
   };
   const noise = cands.map(() => R.next());
+  let target = null;
+  if (LAYOUT_ORDERINGS.includes(ordering) && ordering !== "linear" && n > 1) {
+    const o = orderingTargets(ordering, n, size, hasWater, R.next() * Math.PI * 2);
+    target = o.t;
+    spacing = ordering === "cluster" ? 34 : Math.max(30, Math.min(spacing, o.gap * 0.8));
+  }
   for (let li = 0; li < n; li++) {
     const loc = locations[li];
     let best = null;
@@ -423,6 +467,19 @@ function layoutRegions(base, locations, size, wl, hasWater, R) {
     }
   }
   return placed;
+}
+
+/**
+ * Fixed path graphs for Games-D orderings (parents listed before children, as
+ * the pad-grade pass expects): hub_spoke is a star from the hub, gauntlet and
+ * loop are a chain in visiting order (the loop is closed separately). Other
+ * orderings, and none, use the MST.
+ */
+function orderedLinks(ordering, n) {
+  if (n < 3) return null;
+  if (ordering === "hub_spoke") return Array.from({ length: n - 1 }, (_, k) => [0, k + 1]);
+  if (ordering === "gauntlet" || ordering === "loop") return Array.from({ length: n - 1 }, (_, k) => [k, k + 1]);
+  return null;
 }
 
 /** Prim's MST over region centres, rooted at the hub. */
@@ -505,20 +562,24 @@ function buildWorld(concept, S, attempt) {
   const edge = SIZE_BY_SCALE[concept.scale] || SIZE_BY_SCALE.medium;
   const size = { w: edge, h: edge };
   const locations = normaliseLocations(concept);
-  const hasWater = biome === "island" || locations.some((l) => l.kind === "dock");
+  // Optional concept.terrain_shape (add-only) overrides the biome's default
+  // shape; water then follows the shape rather than the biome.
+  const shapeOverride = TERRAIN_SHAPES.includes(concept.terrain_shape) ? concept.terrain_shape : null;
+  const waterShape = shapeOverride ? WATER_SHAPES.includes(shapeOverride) : biome === "island";
+  const hasWater = waterShape || locations.some((l) => l.kind === "dock");
   const R = seeded(hashString(attempt ? `layout|${S}|${attempt}` : `layout|${S}`));
 
   // 1. Base terrain. Non-island worlds with a dock get a low water line at
   // the 4th percentile so the dock has something to face.
-  const base = generateBaseTerrain({ size, biome, seed: S, waterLevel: 0 });
+  const base = generateBaseTerrain({ size, biome, seed: S, waterLevel: 0, ...(shapeOverride ? { shape: shapeOverride } : {}) });
   let wl = 0;
-  if (hasWater && biome !== "island") {
+  if (hasWater && !waterShape) {
     const sorted = Array.from(base.heights).sort((a, b) => a - b);
     wl = round2(sorted[Math.floor(sorted.length * 0.04)]);
   }
 
   // 2. Regions.
-  const centres = layoutRegions(base, locations, size, wl, hasWater, R);
+  const centres = layoutRegions(base, locations, size, wl, hasWater, R, concept.layout_ordering);
   const regions = locations.map((loc, i) => {
     const half = regionHalf(loc.kind, edge), c = centres[i];
     return {
@@ -537,7 +598,7 @@ function buildWorld(concept, S, attempt) {
   });
   // A path can only climb so fast, so a pad may sit at most a gentle grade
   // above or below its MST parent. Prim's order visits parents first.
-  const tree = mst(regions.map((r) => r.center));
+  const tree = orderedLinks(concept.layout_ordering, regions.length) || mst(regions.map((r) => r.center));
   const padGrade = Math.tan((12 * Math.PI) / 180);
   for (const [a, b] of tree) {
     const d = Math.hypot(regions[a].center.x - regions[b].center.x, regions[a].center.z - regions[b].center.z) - regions[a].pad_radius - regions[b].pad_radius;
@@ -545,7 +606,9 @@ function buildWorld(concept, S, attempt) {
     padH[b] = round2(clamp(padH[b], padH[a] - lim, padH[a] + lim));
   }
   regions.forEach((r, i) => flattenPad(base, r.center.x, r.center.z, r.pad_radius, padH[i], 9));
-  const paths = tree.map(([a, b], k) => {
+  // A loop layout also closes its ring: the finale connects back to the hub.
+  const links = concept.layout_ordering === "loop" && regions.length > 3 ? tree.concat([[regions.length - 1, 0]]) : tree;
+  const paths = links.map(([a, b], k) => {
     const ra = regions[a], rb = regions[b];
     const pts = routeOnTerrain(base, ra.center, rb.center, hasWater ? wl : -Infinity, size);
     return { id: `path_${k + 1}`, from_region: ra.id, to_region: rb.id, width: a === 0 ? 3.5 : 3, points: pts };

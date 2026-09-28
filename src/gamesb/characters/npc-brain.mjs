@@ -20,6 +20,23 @@
 //   repath_t    seconds until the cached path is re-planned
 //   patrol_idx  index of the patrol point being walked to
 //   returning   true while walking home after a chase gave up; suppresses re-aggro
+//   stuck_t     seconds spent wedged short of a goal (only present once wedged); past
+//               STUCK_S the goal is treated as unreachable, so nothing freezes for good
+//
+// Optional behaviour fields beyond §6 (add-only; absent = the Games-B behaviour):
+//   home: {x,z}          the NPC's post. createNpcState starts it there instead of at
+//                        the spawn point, and guard/leash/wander measure from it.
+//   avoid: [{x,z,r}]     keep-out discs (player spawn, checkpoints, objectives). A point
+//                        inside a disc counts as blocked, except that an NPC already
+//                        inside one may always step outward, so it can never be trapped.
+//   sight_los: bool      the player is only noticed along a clear line (walls hide them).
+//   chase_max_s: number  a chase lasts at most this long (timed on `timer`), then the NPC
+//                        loses interest and walks home like a leash give-up. Stops a
+//                        chaser pinning a player that cannot outrun it round a corner.
+//   archetype: string    informational label from the preset that built this behaviour.
+// A flee entered through on_player_near (a skittish critter) is bounded by
+// leash_radius around home, and any wanderer that has strayed beyond its
+// wander_radius walks home before picking a new stroll.
 
 export const STATES = ["idle", "patrol", "guard", "wander", "follow_player", "flee", "chase"];
 
@@ -34,13 +51,16 @@ const TELEPORT_DIST = 40;   // m: beyond this the companion catches up instantly
 const FAR_HYSTERESIS = 1.2; // near→far needs sight_radius × this, so an NPC on the edge doesn't flicker
 const CHASE_STOP = 1.2;     // m: a chaser stops at contact range rather than inside the player
 const RUN_SPEED = 3.2;      // m/s: above this the anim is "run"
+const STUCK_S = 2;          // s: wedged this long short of a goal → treat the goal as unreachable
 
 const dist = (a, b) => Math.hypot(a.x - b.x, a.z - b.z);
 const facing = (dx, dz) => Math.atan2(dx, dz); // Three.js: rotation_y 0 faces +z
 
 /** @returns NpcState */
 export function createNpcState(character, spawnPos) {
-  const x = spawnPos?.x ?? 0, z = spawnPos?.z ?? 0;
+  const post = character.behavior?.home;
+  const hasPost = post && Number.isFinite(post.x) && Number.isFinite(post.z);
+  const x = hasPost ? post.x : spawnPos?.x ?? 0, z = hasPost ? post.z : spawnPos?.z ?? 0;
   return {
     id: character.id,
     position: { x, y: spawnPos?.y ?? 0, z },
@@ -74,6 +94,9 @@ export function stepNpc(npcState, character, ctx, dt) {
   const dP = player ? dist(n.position, player) : Infinity;
   const sight = b.sight_radius || 0;
   const leash = b.leash_radius || 0;
+  const base = ctx;
+  ctx = withAvoid(ctx, b.avoid, n.position);
+  const sees = (d) => d <= sight && (!b.sight_los || lineClear(base, n.position, player));
 
   // --- transitions -------------------------------------------------------
   if (n.returning) {
@@ -83,7 +106,7 @@ export function stepNpc(npcState, character, ctx, dt) {
     // Only the NPC's "resting" states react to the player. A state forced by
     // gameplay (say, flee) stays until gameplay changes it again.
     const resting = n.state === b.initial || n.state === far;
-    if (near && n.state !== near && resting && dP <= sight) {
+    if (near && n.state !== near && resting && sees(dP)) {
       const leashOk = near !== "chase" || leash <= 0 || dist(n.home, player) <= leash;
       if (leashOk) n = switchTo(n, near);
     } else if (far && n.state === near && n.state !== far && dP > sight * FAR_HYSTERESIS) {
@@ -93,6 +116,10 @@ export function stepNpc(npcState, character, ctx, dt) {
   if (n.state === "chase" && leash > 0 && player &&
       (dist(n.position, n.home) > leash || dist(n.home, player) > leash)) {
     n = giveUp(n, b);
+  }
+  if (n.state === "chase" && b.chase_max_s > 0) {
+    n.timer = (n.timer || 0) + dt;
+    if (n.timer >= b.chase_max_s) n = giveUp(n, b);
   }
 
   // --- goal for this state -----------------------------------------------
@@ -126,6 +153,10 @@ export function stepNpc(npcState, character, ctx, dt) {
         break;
       }
       case "wander": {
+        const wr = b.wander_radius || 0;
+        if (wr > 0 && dist(n.position, n.home) > wr + 2 && !(n.target && dist(n.target, n.home) <= 1)) {
+          n.target = { x: n.home.x, z: n.home.z }; n.timer = 0; // strayed (after a flee): walk home first
+        }
         if (n.target && dist(n.position, n.target) <= ARRIVE) {
           n.target = null;
           n.timer = 1 + ctx.rand() * 2; // linger before the next stroll
@@ -159,6 +190,11 @@ export function stepNpc(npcState, character, ctx, dt) {
       case "flee": {
         if (!player) break;
         if (dP > Math.max(sight * 2, 20)) { faceTo = null; break; }
+        // A skittish critter bolts, but only as far as its leash: then it turns to watch.
+        if (b.on_player_near === "flee" && leash > 0 && dist(n.position, n.home) >= leash &&
+            (n.position.x - n.home.x) * (n.position.x - player.x) + (n.position.z - n.home.z) * (n.position.z - player.z) > 0) {
+          faceTo = player; break;
+        }
         const ux = dP > 1e-6 ? (n.position.x - player.x) / dP : 1, uz = dP > 1e-6 ? (n.position.z - player.z) / dP : 0;
         goal = { x: n.position.x + ux * 5, z: n.position.z + uz * 5 };
         speed *= 1.25;
@@ -179,7 +215,13 @@ export function stepNpc(npcState, character, ctx, dt) {
   if (goal && speed > 0) {
     const r = direct ? moveDirect(n, goal, speed, dt, ctx) : moveToward(n, goal, speed, dt, ctx, stopAt);
     n = r.n;
+    const stepped = dist(n.position, start) > 1e-6;
     if (r.unreachable) n = onUnreachable(n, b);
+    else if (!stepped && dist(n.position, goal) > stopAt + 1e-6) {
+      // Wedged short of the goal (a wall the path cannot see, a keep-out disc).
+      n.stuck_t = (n.stuck_t || 0) + dt;
+      if (n.stuck_t >= STUCK_S) { n = onUnreachable(n, b); n.stuck_t = 0; }
+    } else if (n.stuck_t) n.stuck_t = 0;
   }
   n.target = n.state === "wander" && !n.returning ? n.target : (goal ? { x: goal.x, z: goal.z } : null);
 
@@ -217,6 +259,25 @@ function onUnreachable(n, b) {
 }
 
 const blocked = (ctx, x, z) => (typeof ctx.isBlocked === "function" ? !!ctx.isBlocked(x, z) : false);
+
+/** ctx whose isBlocked also honours the behaviour's keep-out discs (see header). */
+function withAvoid(ctx, zones, from) {
+  if (!Array.isArray(zones) || zones.length === 0) return ctx;
+  const fx = from.x, fz = from.z;
+  return {
+    ...ctx,
+    isBlocked: (x, z) => {
+      if (blocked(ctx, x, z)) return true;
+      for (const q of zones) {
+        const r = q.r || 0, d = Math.hypot(x - q.x, z - q.z);
+        if (d >= r) continue;
+        const d0 = Math.hypot(fx - q.x, fz - q.z);
+        if (!(d0 < r && d >= d0 - 1e-9)) return true; // entering, or going deeper
+      }
+      return false;
+    },
+  };
+}
 
 function lineClear(ctx, a, b) {
   const d = dist(a, b);

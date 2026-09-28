@@ -68,7 +68,7 @@ If you need a field that is not here, add it as **optional**, and never rename o
     water: { enabled: bool, level: number, color: hex, opacity }
   },
   terrain: {
-    kind: "heightfield", shape: "island"|"valley"|"plateau"|"open",
+    kind: "heightfield", shape: "island"|"valley"|"plateau"|"open"|"archipelago"|"caldera"|"terraces"|"dunes"|"marsh" /* last five only via optional concept.terrain_shape */,
     cols, rows, cell /* metres per cell */, heights: number[] /* rows*cols, row-major, z-major: heights[j*cols+i] is at x=i*cell, z=j*cell */,
     min_y, max_y,
     material_layers: [{ material_ref, min_h, max_h, max_slope_deg }]   // first matching layer wins

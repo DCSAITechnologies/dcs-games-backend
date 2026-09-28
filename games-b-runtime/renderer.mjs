@@ -127,7 +127,9 @@ export async function createRenderer({ canvas, pkg, mods = {}, baseUrl = locatio
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, lowQ ? 1 : 1.5));
   renderer.outputEncoding = THREE.sRGBEncoding;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.05;
+  // Optional environment.exposure / lamp_boost (Games-D lighting presets); absent → the Games-B defaults.
+  renderer.toneMappingExposure = Number.isFinite(env.exposure) ? Math.min(2, Math.max(0.5, env.exposure)) : 1.05;
+  const lampBoost = Number.isFinite(env.lamp_boost) ? Math.min(3, Math.max(0.5, env.lamp_boost)) : 1;
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.info.autoReset = true;
@@ -590,7 +592,7 @@ export async function createRenderer({ canvas, pkg, mods = {}, baseUrl = locatio
   const player = buildCharacter(playerRec?.format === "mesh-recipe" ? playerRec.payload : defaultPlayerRecipe(), lib, { warn });
   player.root.name = "player";
   scene.add(player.root);
-  const playerLamp = new THREE.PointLight(0xffb366, 0.55, 7, 2);
+  const playerLamp = new THREE.PointLight(0xffb366, 0.55 * lampBoost, 7 * Math.sqrt(lampBoost), 2);
   playerLamp.position.set(0.3, 1.1, 0.25);
   player.root.add(playerLamp);
   const spawn = (world.spawn_points || []).find((s) => s.id === "spawn_player") || (world.spawn_points || []).find((s) => s.kind === "player");
@@ -713,7 +715,7 @@ export async function createRenderer({ canvas, pkg, mods = {}, baseUrl = locatio
       if (!c) { l.intensity = 0; l.userData.base = 0; return; }
       l.position.copy(c.g.pos);
       l.color.copy(c.g.color);
-      l.userData.base = 1.5 * Math.min(3, c.g.strength);
+      l.userData.base = 1.5 * Math.min(3, c.g.strength) * lampBoost;
       l.distance = 10 + 4 * Math.min(3, c.g.strength);
     });
   }
