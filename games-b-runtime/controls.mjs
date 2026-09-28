@@ -115,6 +115,7 @@ export function createControls({ canvas, cam, root = document, onKey = () => {} 
         run: k("ShiftLeft", "ShiftRight") || state.touchRun,
         jump: k("Space") || state.touchJump,
         interact: k("KeyE") || state.touchInteract,
+        unstuck: k("KeyR"),
         up: (k("KeyQ", "Space") ? 1 : 0) - (k("KeyZ", "ControlLeft") ? 1 : 0),
       };
     },

@@ -249,13 +249,17 @@ function interactableCatalogue(sim) {
   return sim._ixCache;
 }
 
-/** Nearest usable interactable within its radius (§9). Collected pickups are gone. */
+/**
+ * Nearest usable interactable within its radius (§9). Collected pickups are
+ * gone; an opened container stays usable (it grants its item only once), so an
+ * objective that targets it can still complete after it was opened early.
+ */
 export function nearestInteractable(sim) {
   const p = sim.player.position;
   const baseR = sim.pkg.gameplay?.interaction?.radius ?? 2.5;
   let best = null;
   for (const ix of interactableCatalogue(sim)) {
-    if (sim.collected.includes(ix.id)) continue;
+    if (ix.kind !== "container" && sim.collected.includes(ix.id)) continue;
     const pos = interactablePosition(sim, ix);
     if (!pos) continue;
     const dist = hyp(pos.x - p.x, pos.z - p.z);
@@ -557,12 +561,13 @@ function checkOutOfWorld(sim, out) {
 
 function hazardDamage(sim, dt) {
   const gp = sim.pkg.gameplay;
-  const mult = gp?.difficulty?.damage_mult ?? 1;
+  // difficulty.damage_mult is applied once, by the rules engine's damage
+  // handler; multiplying here too made the effective rate dps × mult².
   const p = sim.player.position;
   let dmg = 0;
   for (const h of gp?.hazards || []) {
     if (h.active_after && sim.game.objectives?.[h.active_after] !== "done") continue;
-    const dps = (h.damage_per_s ?? gp?.combat?.hazard_damage_per_s ?? 5) * mult;
+    const dps = h.damage_per_s ?? gp?.combat?.hazard_damage_per_s ?? 5;
     if (h.kind === "sentinel") {
       const n = sim.npcs[h.character_ref];
       if (n && !sim.defeated.includes(h.character_ref) && hyp(n.position.x - p.x, n.position.z - p.z) <= SENTINEL_RADIUS) dmg += dps * dt;
@@ -607,6 +612,10 @@ export function stepSim(sim, input = {}, dt = SIM_DT) {
 
   if (sim.activeDialogue && Number.isInteger(input.choice)) doChoice(sim, input.choice, out);
 
+  // Optional input.unstuck (add-only): a player trapped where the terrain has
+  // no way out (a pit below a cliff) returns to the current checkpoint, as in
+  // most 3D games. Game state is untouched; only the player is moved.
+  if (input.unstuck && !sim.activeDialogue) { respawn(sim); out.events.push({ kind: "unstuck", ref: sim.game.checkpoint || null }); }
   stepPlayer(sim, input, dt, out);
   checkOutOfWorld(sim, out);
 

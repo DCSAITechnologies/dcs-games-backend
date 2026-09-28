@@ -342,6 +342,12 @@ characters: {
 }
 ```
 
+## 7a. Optional extensions (Games-D, 29 Sep 2026)
+
+Games-D adds several optional, add-only fields: the concept's `terrain_shape`, `layout_ordering`, `material_style` and `fallback_recipe`; the environment's `exposure` and `lamp_boost`; the NPC behaviour fields `home`, `avoid`, `sight_los` and `chase_max_s`; and the package's `audio`. See `src/gamesd/CONTRACT.md` §6. `assemblePackage({ extras })` and `buildGame({ overrides: { extras } })` add optional top-level package fields.
+
+When `createdAt` is given, provenance `at` is pinned to it and `latency_ms` is set to 0, so rebuilds are byte-identical.
+
 ## 8. ProvenanceStage
 
 ```js

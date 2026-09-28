@@ -57,7 +57,7 @@ The concept stage runs its patches in this order: theme, then layout, then npc r
 | `npc/behaviours.mjs` | `ARCHETYPES`, `npcConceptPatch(concept, ctx) → concept` (roster), `applyNpcPresets(characters, ctx & {world}) → characters` |
 | `gameplay/templates.mjs` | `TEMPLATES: {id → Template}`, `templateConceptPatch(concept, ctx)`, `applyTemplate(gameplay, ctx & {concept, world, characters}) → gameplay` |
 | `materials/material-styles.mjs` | `MATERIAL_STYLES`, `materialConceptPatch(concept, ctx) → concept` (sets optional `concept.material_style`) |
-| `audio/sfx.mjs` | `AUDIO_PRESETS`, `audioFor(ctx & {concept, world, gameplay}) → AudioSpec` (optional `pkg.audio`) |
+| `audio/sfx.mjs` | `AUDIO_PRESETS`, `audioFor(ctx & {concept, world, gameplay}) → AudioSpec` (optional `pkg.audio`), `validateAudioSpec` |
 
 A module that cannot honour a recipe **must not throw**. It degrades to the
 nearest valid behaviour and pushes a string into `ctx.notes`.
@@ -66,18 +66,39 @@ nearest valid behaviour and pushes a string into `ctx.notes`.
 
 **Template** `{ id, name, genre, summary, needs: { hostiles_min?, hostiles_max?, locations_min?, companion?: bool }, timed: bool }`
 
-**Layout** `{ id, name, scale, locations: int, kinds?: [kind], ordering: "linear"|"hub_spoke"|"loop"|"gauntlet" }`
+**Layout** `{ id, name, scale, locations: int, kinds?: [kind], finale_kinds?: [kind], ordering: "linear"|"hub_spoke"|"loop"|"gauntlet"|"cluster", keywords }`. The ordering reaches world-spec as the optional `concept.layout_ordering`; when it is absent or `"linear"`, the world is bit-identical to Games-B.
 
 **Difficulty** `{ level, damage_mult, speed_mult, time_mult, lives, player_health, hostile_bonus, npc_speed_mult, sight_mult }`
 
 ## 4. Budgets (`budgets.mjs`)
 
-`ASSET_BUDGET` and `PERF_BUDGET` are keyed by scale. `checkBudgets(pkg, { perf? }) → { ok, over: [{ key, value, limit }] }`.
+`ASSET_BUDGET`, `PERF_BUDGET` and `CPU_PERF_BUDGET` are keyed by scale.
+
+- `checkBudgets(pkg, { perf?, cpuPerf?, build_ms?, expandScatter? })` returns `{ ok, scale, figures, over: [{ key, value, limit }], perf_gate, cpu_advisory }`.
+- `PERF_BUDGET` (20/15/12 fps, p95 80/100/120 ms for small/medium/large) gates frame rate **only** for a hardware-GL measurement. Draw calls and triangles always gate.
+- `CPU_PERF_BUDGET` (the SwiftShader worst case) is advisory and never affects `ok`.
+
 A fallback game that is over budget is **not** counted as playable.
 
 ## 5. Quality (`quality/`)
 
-`scoreSample(result, { browser? }) → SampleScore` measures launch, objective completion,
-collision, FPS, save/reload, visual signature and deterministic rebuild. The bench CLI
+`scoreSample(result, { browser?, browserCpu?, rebuild?, probe?, perfGate?, cpuCompare? }) → SampleScore`.
+It measures launch, objective completion, collision, FPS, save/reload, visual signature and deterministic rebuild,
+and adds `playable` plus `reasons[]`. `varietyReport(scores)` returns the pairwise visual distances and the
+counts of world and gameplay variants. The bench CLI
 `tools/gamesd-bench.mjs` builds the sample catalogue (`samples/catalogue.mjs`) and writes
 `docs/games-d/DCS_GAMES_*`.
+
+## 6. Optional fields Games-D adds to Games-B shapes
+
+All of these are add-only. When a field is absent, Games-B output is unchanged.
+
+| where | field | read by |
+|---|---|---|
+| GameConcept | `terrain_shape` (`archipelago`, `caldera`, `terraces`, `dunes`, `marsh`, or a base shape) | world-spec → `generateBaseTerrain({ shape })` |
+| GameConcept | `layout_ordering` | world-spec `layoutRegions` / path graph |
+| GameConcept | `material_style` (the full style object) | `resolveAssets` → `buildMaterialSpec` |
+| GameConcept | `fallback_recipe` (the recipe, plus `recipe_id` and `engine`) | provenance only |
+| WorldSpec.environment | `exposure`, `lamp_boost`, `lighting` | browser renderer |
+| CharactersSpec behavior | `home`, `avoid`, `sight_los`, `chase_max_s`, `archetype` | npc-brain |
+| GamePackage | `audio` (AudioSpec) | `games-b-runtime/audio.mjs` |

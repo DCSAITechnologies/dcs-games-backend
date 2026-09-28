@@ -554,7 +554,14 @@ export function isConnected(world) {
   const near = (x, z, r) => nearestWalkable(nav, x, z, r, (i) => reach.has(i)) >= 0;
   if (!world.regions.every((r) => near(r.center.x, r.center.z, nav.cell))) return false;
   const pl = new Map(world.placements.map((p) => [p.id, p]));
-  return world.interactables.every((ix) => !ix.placement_ref || near(pl.get(ix.placement_ref).position.x, pl.get(ix.placement_ref).position.z, ix.radius));
+  // An interactable counts only from a connected cell the sim would let the
+  // player use it from: within its radius AND within the sim's 4 m height
+  // window (3.5 here, for margin). Without the height test a brazier on a mesa
+  // top "connected" through the cliff foot below it, and was unusable.
+  const t = world.terrain;
+  const usable = (p, r) => nearestWalkable(nav, p.x, p.z, r, (i) => reach.has(i)
+    && Math.abs(sampleHeight(t, ((i % nav.cols) + 0.5) * nav.cell, (Math.floor(i / nav.cols) + 0.5) * nav.cell) - p.y) < 3.5) >= 0;
+  return world.interactables.every((ix) => !ix.placement_ref || usable(pl.get(ix.placement_ref).position, ix.radius));
 }
 
 function buildWorld(concept, S, attempt) {
@@ -752,7 +759,7 @@ function buildWorld(concept, S, attempt) {
   // 6. Navigation.
   const instances = expandScatter(world);
   const colliders = buildColliders(world, null, instances);
-  world.navigation = bakeNavigation(world, colliders);
+  world.navigation = bakeNavigation(world, colliders, { edgeGuard: concept.nav_edge_guard === true });
   const nav = world.navigation;
 
   // 7. Spawns — all chosen from cells reachable from the player spawn.
@@ -840,18 +847,38 @@ function buildWorld(concept, S, attempt) {
  * radius. Colliders are rasterised over their own bounding box rather than
  * tested per cell, which keeps a large forest cheap.
  */
-export function bakeNavigation(world, colliders) {
+/**
+ * @param {object} [opts]
+ * @param {boolean} [opts.edgeGuard] also reject a cell whose height step to any
+ *   8-neighbour centre is steeper than MAX_SLOPE_DEG. The centre slope alone
+ *   misses cliff rims: the rim cell is flat but the capsule slides off it, and
+ *   paths along it end in a pit. Opt-in (Games-D sets it), because it changes
+ *   the grid; it is recorded as `navigation.edge_guard` so re-bakes keep it.
+ */
+export function bakeNavigation(world, colliders, { edgeGuard } = {}) {
   const t = world.terrain;
   const cell = t.cell;
   const cols = Math.round(world.size.w / cell), rows = Math.round(world.size.h / cell);
   const water = world.environment.water;
   const wl = water.enabled ? water.level : -Infinity;
+  const guard = edgeGuard ?? world.navigation?.edge_guard === true;
+  const maxStep = Math.tan((MAX_SLOPE_DEG * Math.PI) / 180);
   const walk = new Uint8Array(cols * rows);
   for (let j = 1; j < rows - 1; j++) {
     for (let i = 1; i < cols - 1; i++) {
       const x = (i + 0.5) * cell, z = (j + 0.5) * cell;
-      if (sampleHeight(t, x, z) < wl + 0.25) continue;
+      const h = sampleHeight(t, x, z);
+      if (h < wl + 0.25) continue;
       if (slopeAt(t, x, z) > MAX_SLOPE_DEG) continue;
+      if (guard) {
+        let rim = false;
+        for (let dj = -1; dj <= 1 && !rim; dj++) for (let di = -1; di <= 1 && !rim; di++) {
+          if (!di && !dj) continue;
+          const d = cell * Math.hypot(di, dj);
+          if (Math.abs(sampleHeight(t, x + di * cell, z + dj * cell) - h) / d > maxStep) rim = true;
+        }
+        if (rim) continue;
+      }
       walk[j * cols + i] = 1;
     }
   }
@@ -866,6 +893,6 @@ export function bakeNavigation(world, colliders) {
   }
   let s = "";
   for (let k = 0; k < walk.length; k++) s += walk[k] ? "1" : "0";
-  return { cell, cols, rows, max_slope_deg: MAX_SLOPE_DEG, step_height: STEP_HEIGHT, walkable: s };
+  return { cell, cols, rows, max_slope_deg: MAX_SLOPE_DEG, step_height: STEP_HEIGHT, walkable: s, ...(guard ? { edge_guard: true } : {}) };
 }
 

@@ -610,15 +610,12 @@ function unmetNeeds(t, M) {
 
 // ------------------------------------------------------------ assembly
 
-// sim-core multiplies hazard damage by difficulty.damage_mult and the rules
-// engine multiplies the resulting damage event by it again, so a hazard's
-// effective rate is damage_per_s × damage_mult². Templates divide the listed
-// rate by damage_mult once, so the effective rate is base × damage_mult — the
-// scale the difficulty table was written for (easy ½, hard 1.6×).
+// Hazards keep their listed rate: the rules engine applies difficulty.damage_mult
+// once to every damage event, so the effective rate is base × damage_mult
+// (easy ½, hard 1.6×). (Until 29 Sep sim-core also multiplied, squaring it.)
 const round2 = (v) => Math.round(v * 100) / 100;
-function scaleHazards(hazards, d) {
-  const m = d.damage_mult > 0 ? d.damage_mult : 1;
-  return (hazards || []).map((h) => ({ ...h, damage_per_s: round2((h.damage_per_s ?? 0) / m) }));
+function scaleHazards(hazards) {
+  return (hazards || []).map((h) => ({ ...h, damage_per_s: round2(h.damage_per_s ?? 0) }));
 }
 
 function withDifficulty(g, ctx) {
@@ -626,15 +623,14 @@ function withDifficulty(g, ctx) {
   const out = clone(g);
   out.rules = { ...out.rules, player_health: d.player_health, lives: d.lives };
   out.difficulty = gameplayDifficulty(d);
-  out.hazards = scaleHazards(out.hazards, d);
-  if (out.combat) out.combat = { ...out.combat, hazard_damage_per_s: round2((out.combat.hazard_damage_per_s ?? 0) / (d.damage_mult > 0 ? d.damage_mult : 1)) };
+  out.hazards = scaleHazards(out.hazards);
   return out;
 }
 
 /** Effective hazard damage per second the player takes from `h` under `gameplay`'s difficulty. */
 export function effectiveHazardDps(h, gameplay) {
   const m = gameplay?.difficulty?.damage_mult ?? 1;
-  return (h.damage_per_s ?? gameplay?.combat?.hazard_damage_per_s ?? 5) * m * m;
+  return (h.damage_per_s ?? gameplay?.combat?.hazard_damage_per_s ?? 5) * m;
 }
 
 function assemble(g0, ctx, M, spec) {
@@ -673,9 +669,8 @@ function assemble(g0, ctx, M, spec) {
     if (eff > 90) events.push({ id: "ev_clock_last", once: true, trigger: { kind: "timer", value: Math.round(eff - 30) }, actions: [{ kind: "message", value: "30 seconds left!" }] });
   }
   g.events = events;
-  const d = ctx.difficulty || DIFFICULTY.normal;
-  g.hazards = scaleHazards(spec.hazards, d);
-  g.combat = { ...spec.combat, hazard_damage_per_s: round2(spec.combat.hazard_damage_per_s / (d.damage_mult > 0 ? d.damage_mult : 1)) };
+  g.hazards = scaleHazards(spec.hazards);
+  g.combat = { ...spec.combat };
   g.rules = { ...g.rules, time_limit_s: tl };
   g.win_conditions = spec.win;
   g.lose_conditions = [{ kind: "health_zero" }, { kind: "lives_zero" }, { kind: "fell_out" }, ...(tl ? [{ kind: "time_expired" }] : [])];

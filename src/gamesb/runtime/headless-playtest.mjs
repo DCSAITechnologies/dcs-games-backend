@@ -144,6 +144,30 @@ function goalFor(sim, obj, depth = 0, agent = null) {
 
 const dist = (a, b) => (a && b ? Math.hypot(a.x - b.x, a.z - b.z) : Infinity);
 
+/**
+ * The walkable cell to walk to for a goal: connected to where the agent stands
+ * and, when the goal has a height, inside the sim's interaction height window.
+ * The plain nearest walkable cell can sit at a cliff foot below a mesa-top
+ * target, or on an island the agent cannot reach, and the agent then climbs at
+ * the cliff until it dies. Returns null when there is no such cell nearby.
+ */
+function approachCell(pkg, deps, from, goal, maxRings = 6, nav = pkg.world.navigation, exclude = null) {
+  if (typeof deps.nav.reachableSet !== "function" || typeof deps.nav.navIndex !== "function") return null;
+  const reach = deps.nav.reachableSet(nav, from);
+  const hAt = deps.terrain?.sampleHeight;
+  const c = nav.cell, ci = Math.floor(goal.x / c), cj = Math.floor(goal.z / c);
+  let best = null, bestD = Infinity;
+  for (let dj = -maxRings; dj <= maxRings; dj++) for (let di = -maxRings; di <= maxRings; di++) {
+    const px = (ci + di + 0.5) * c, pz = (cj + dj + 0.5) * c;
+    const idx = deps.nav.navIndex(nav, px, pz);
+    if (idx < 0 || !reach.has(idx) || exclude?.has(idx)) continue;
+    if (typeof goal.y === "number" && hAt && Math.abs(hAt(pkg.world.terrain, px, pz) - goal.y) >= 3.5) continue;
+    const d = (px - goal.x) ** 2 + (pz - goal.z) ** 2;
+    if (d < bestD) { bestD = d; best = { x: px, z: pz }; }
+  }
+  return best;
+}
+
 /** Does an active storm/fire zone hurt in this region right now? */
 function zoneHurts(sim, region) {
   if (!region) return false;
@@ -235,16 +259,38 @@ export async function headlessPlaytest(pkg, { deps, maxSimSeconds = 1800, saveRe
   const required = (pkg.gameplay.objectives || []).filter((o) => !o.optional);
   const saveAtCount = saveReloadAt > 0 ? Math.max(1, Math.ceil(required.length * saveReloadAt)) : Infinity;
   const timeline = [];
-  let events = 0, stuck = 0, saveReload = { ok: false, skipped: true };
-  const agent = { retreat: null, key: null, path: null, wp: 0, repathAt: 0, checkAt: 0, checkPos: null, recoverUntil: 0, recoverDir: null, pressed: false, lastProgress: 0, convo: null, convoStart: 0, seen: new Set() };
+  let events = 0, stuck = 0, unstucks = 0, saveReload = { ok: false, skipped: true };
+  const agent = { retreat: null, key: null, path: null, wp: 0, repathAt: 0, checkAt: 0, checkPos: null, recoverUntil: 0, recoverDir: null, pressed: false, lastProgress: 0, convo: null, convoStart: 0, seen: new Set(), stuckAt: new Map(), blocked: new Set(), badApproach: new Set(), overlay: null, lastMain: -1, unstuckNext: false };
 
   const log = (e) => { if (timeline.length < 600) timeline.push({ t: Math.round(sim.t * 100) / 100, ...e }); };
 
+  // Cells the agent has repeatedly failed to walk into are dropped from its own
+  // copy of the nav grid, as a player learns to walk round a lip the grid
+  // calls walkable but the capsule cannot cross. The package is never changed.
+  const spawnPt = (pkg.world.spawn_points || []).find((x) => x.id === "spawn_player")?.position;
+  const mainArea = spawnPt && typeof deps.nav.reachableSet === "function" && typeof deps.nav.navIndex === "function" ? deps.nav.reachableSet(nav, spawnPt) : null;
+  const planNav = () => {
+    if (!agent.blocked.size) return nav;
+    if (agent.overlay?.n === agent.blocked.size) return agent.overlay.nav;
+    const w = nav.walkable.split("");
+    for (const i of agent.blocked) w[i] = "0";
+    agent.overlay = { n: agent.blocked.size, nav: { ...nav, walkable: w.join("") } };
+    return agent.overlay.nav;
+  };
   const repath = (goalPos) => {
     const p = sim.player.position;
-    const g = nearestWalkable(nav, deps.nav.isWalkable, goalPos.x, goalPos.z, 6) || goalPos;
-    const s = deps.nav.isWalkable(nav, p.x, p.z) ? p : (nearestWalkable(nav, deps.nav.isWalkable, p.x, p.z, 4) || p);
-    const path = deps.nav.findPath(nav, { x: s.x, z: s.z }, { x: g.x, z: g.z });
+    const pn = planNav();
+    const s = deps.nav.isWalkable(pn, p.x, p.z) ? p : (nearestWalkable(pn, deps.nav.isWalkable, p.x, p.z, 4) || p);
+    const g = approachCell(pkg, deps, s, goalPos, 6, pn, agent.badApproach) || nearestWalkable(pn, deps.nav.isWalkable, goalPos.x, goalPos.z, 6) || goalPos;
+    let path = deps.nav.findPath(pn, { x: s.x, z: s.z }, { x: g.x, z: g.z });
+    // Slid onto a ledge or islet off the main walkable area: walk back to the
+    // nearest cell of the spawn's connected area and route from there, rather
+    // than beelining at the goal across whatever lies between.
+    if (!path && mainArea) {
+      const back = nearestWalkable(pn, (nv, x, z) => deps.nav.isWalkable(nv, x, z) && mainArea.has(deps.nav.navIndex(nv, x, z)), p.x, p.z, 10);
+      const rest = back && deps.nav.findPath(pn, back, { x: g.x, z: g.z });
+      if (rest) path = [{ x: p.x, z: p.z }, ...rest];
+    }
     agent.path = path ? [...path, { x: goalPos.x, z: goalPos.z }] : [{ x: goalPos.x, z: goalPos.z }];
     agent.wp = 0;
     agent.repathAt = sim.t + 3;
@@ -297,9 +343,14 @@ export async function headlessPlaytest(pkg, { deps, maxSimSeconds = 1800, saveRe
             let dx = wp.x - p.x, dz = wp.z - p.z;
             const d = Math.hypot(dx, dz);
             if (d > 0.05) { dx /= d; dz /= d; }
-            // Keep clear of hostile NPCs the agent is not after.
+            // Keep clear of hostile NPCs the agent is not after. While hunting,
+            // every pending defeat target counts as "after": steering away from
+            // a second target clustered next to the first deadlocked the hunt.
+            const hunting = goal.kind === "defeat"
+              ? new Set((pkg.gameplay.objectives || []).filter((o) => o.kind === "defeat" && sim.game.objectives?.[o.id] === "active").map((o) => o.target_ref))
+              : null;
             for (const ch of pkg.characters?.characters || []) {
-              if (!ch.behavior?.hostile || goal.ref === ch.id || goal.ix?.character_ref === ch.id) continue;
+              if (!ch.behavior?.hostile || goal.ref === ch.id || goal.ix?.character_ref === ch.id || hunting?.has(ch.id)) continue;
               const n = sim.npcs[ch.id];
               const nd = n ? dist(n.position, p) : Infinity;
               if (nd < 5.5 && nd > 0.01) { dx += ((p.x - n.position.x) / nd) * 1.2; dz += ((p.z - n.position.z) / nd) * 1.2; }
@@ -318,6 +369,29 @@ export async function headlessPlaytest(pkg, { deps, maxSimSeconds = 1800, saveRe
               const side = stuck % 2 ? 1 : -1;
               agent.recoverDir = { x: -input.move.z * side, z: input.move.x * side };
               log({ kind: "stuck", pos: { x: Math.round(p.x * 10) / 10, z: Math.round(p.z * 10) / 10 } });
+              // Stuck twice in the same cell: block the cell it keeps trying to enter.
+              const here = deps.nav.navIndex?.(nav, p.x, p.z) ?? -1;
+              const n = (agent.stuckAt.get(here) || 0) + 1;
+              agent.stuckAt.set(here, n);
+              const ml = Math.hypot(input.move.x, input.move.z) || 1;
+              const ahead = deps.nav.navIndex?.(nav, p.x + (input.move.x / ml) * nav.cell, p.z + (input.move.z / ml) * nav.cell) ?? -1;
+              // Trapped: stuck again and again in a cell cut off from the spawn's
+              // walkable area (fell into a pit). Use the unstuck action a player has.
+              if (n >= 4 && mainArea && !mainArea.has(here)) {
+                agent.unstuckNext = true; agent.stuckAt.clear();
+                // …and stop routing over the edge it fell from.
+                if (agent.lastMain >= 0 && agent.blocked.size < 64) agent.blocked.add(agent.lastMain);
+              }
+              if (n >= 2) {
+                if (ahead >= 0 && ahead !== here && agent.blocked.size < 64 && deps.nav.isWalkable(planNav(), p.x + (input.move.x / ml) * nav.cell, p.z + (input.move.z / ml) * nav.cell)) agent.blocked.add(ahead);
+                // On the last leg (approach cell → target) the way in is wrong:
+                // give up on this approach cell and pick another next repath.
+                else if (agent.path && agent.wp >= agent.path.length - 2 && agent.path.length >= 2 && agent.badApproach.size < 32) {
+                  const a = agent.path[agent.path.length - 2];
+                  const ai = deps.nav.navIndex?.(nav, a.x, a.z) ?? -1;
+                  if (ai >= 0) agent.badApproach.add(ai);
+                }
+              }
               agent.path = null;
             }
             agent.checkPos = { x: p.x, z: p.z };
@@ -331,6 +405,8 @@ export async function headlessPlaytest(pkg, { deps, maxSimSeconds = 1800, saveRe
       }
     }
 
+    if (mainArea) { const pi = deps.nav.navIndex(nav, sim.player.position.x, sim.player.position.z); if (mainArea.has(pi)) agent.lastMain = pi; }
+    if (agent.unstuckNext && !currentDialogue(sim)) { input.unstuck = true; agent.unstuckNext = false; unstucks++; log({ kind: "unstuck" }); agent.path = null; }
     const res = stepSim(sim, input);
     for (const e of res.events) {
       events++;
@@ -347,17 +423,17 @@ export async function headlessPlaytest(pkg, { deps, maxSimSeconds = 1800, saveRe
       delete saveReload.sim;
     }
     if (sim.t - agent.lastProgress > 600) {
-      return finish(sim, { stuck, events, timeline, saveReload, plan, reason: "no objective progress for 600 simulated seconds" });
+      return finish(sim, { stuck, unstucks, events, timeline, saveReload, plan, reason: "no objective progress for 600 simulated seconds" });
     }
   }
-  return finish(sim, { stuck, events, timeline, saveReload, plan, reason: sim.status === "playing" ? `time budget of ${maxSimSeconds}s exhausted` : sim.status === "lost" ? "lost" : null });
+  return finish(sim, { stuck, unstucks, events, timeline, saveReload, plan, reason: sim.status === "playing" ? `time budget of ${maxSimSeconds}s exhausted` : sim.status === "lost" ? "lost" : null });
 }
 
-function finish(sim, { stuck, events, timeline, saveReload, plan, reason }) {
+function finish(sim, { stuck, unstucks, events, timeline, saveReload, plan, reason }) {
   const objectives_done = Object.entries(sim.game.objectives || {}).filter(([, s]) => s === "done").map(([id]) => id);
   const out = {
     won: sim.status === "won", status: sim.status, package_sha256: sim.pkg.integrity?.sha256 ?? null, sim_seconds: Math.round(sim.t * 100) / 100, steps: sim.stats.steps,
-    objectives_done, events, stuck_recoveries: stuck, save_reload: saveReload, timeline, plan_source: plan.source,
+    objectives_done, events, stuck_recoveries: stuck, unstuck_uses: unstucks, save_reload: saveReload, timeline, plan_source: plan.source,
     health: sim.game.health, lives: sim.game.lives, falls: sim.stats.falls,
   };
   if (!out.won && reason) out.reason = reason;
@@ -429,13 +505,37 @@ export async function checkObjectiveReachability(pkg, { deps } = {}) {
     return giversOf(pkg, t).map((cid) => ({ pos: spawnPos(cid), radius: 2.5 }));
   };
 
+  const reach = typeof deps.nav.reachableSet === "function" && typeof deps.nav.navIndex === "function" ? deps.nav.reachableSet(nav, start) : null;
   for (const o of pkg.gameplay?.objectives || []) {
     if (o.kind === "survive") { results.push({ objective_id: o.id, target_ref: o.target_ref, reachable: true, reason: "survive needs no target" }); continue; }
     const targets = targetsFor(o).filter((x) => x.pos);
     let ok = false, reason = targets.length ? "no walkable approach connected to the spawn" : "target has no position";
     for (const { pos, radius } of targets) {
+      const reachR = radius + nav.cell * 0.75 + 0.5;
+      // Any connected walkable cell within reach counts: the single nearest
+      // cell can be a sealed pocket (e.g. under a hut) while the door's front
+      // step is connected, which used to report a reachable target as not.
+      if (reach) {
+        // What the sim needs: horizontal distance within the radius (a player
+        // can stand anywhere in a cell, so half a cell of slack) and the sim's
+        // 4 m height window (3.5 for margin) when the target has a height.
+        const useR = radius + nav.cell * 0.5;
+        const n = Math.ceil(useR / nav.cell);
+        const ci = Math.floor(pos.x / nav.cell), cj = Math.floor(pos.z / nav.cell);
+        const hAt = deps.terrain?.sampleHeight;
+        for (let dj = -n; dj <= n && !ok; dj++) for (let di = -n; di <= n && !ok; di++) {
+          const px = (ci + di + 0.5) * nav.cell, pz = (cj + dj + 0.5) * nav.cell;
+          if (Math.hypot(px - pos.x, pz - pos.z) > useR) continue;
+          const idx = deps.nav.navIndex(nav, px, pz);
+          if (idx < 0 || !reach.has(idx)) continue;
+          if (typeof pos.y === "number" && hAt && Math.abs(hAt(world.terrain, px, pz) - pos.y) >= 3.5) continue;
+          ok = true;
+        }
+        if (ok) { reason = null; break; }
+        continue;
+      }
       const approach = nearestWalkable(nav, deps.nav.isWalkable, pos.x, pos.z, Math.max(1, Math.ceil((radius + nav.cell) / nav.cell)));
-      if (!approach || Math.hypot(approach.x - pos.x, approach.z - pos.z) > radius + nav.cell * 0.75 + 0.5) continue;
+      if (!approach || Math.hypot(approach.x - pos.x, approach.z - pos.z) > reachR) continue;
       if (deps.nav.findPath(nav, start, approach)) { ok = true; reason = null; break; }
     }
     results.push({ objective_id: o.id, target_ref: o.target_ref, optional: !!o.optional, reachable: ok, ...(reason ? { reason } : {}) });

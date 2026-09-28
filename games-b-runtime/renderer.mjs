@@ -772,9 +772,10 @@ export async function createRenderer({ canvas, pkg, mods = {}, baseUrl = locatio
       for (const gp of glowPoints) if (gp.charGlow && c.glow.includes(gp.charGlow)) gp.pos.copy(gp.charGlow.local).applyMatrix4(gp.charGlow.holder.matrixWorld);
     }
 
-    // Placements: pickups bob and vanish, lights ignite.
+    // Placements: pickups bob and vanish, lights ignite. An opened container
+    // stays in the world (sim-core keeps it usable).
     for (const e of placementObjs.values()) {
-      const collected = e.ix && view.collected?.has(e.ix.id);
+      const collected = e.ix && e.ix.kind !== "container" && view.collected?.has(e.ix.id);
       e.hidden = !!collected;
       e.obj.visible = !collected;
       if (e.pickup && !collected) {

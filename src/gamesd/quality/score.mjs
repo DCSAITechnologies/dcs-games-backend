@@ -79,12 +79,13 @@ export async function scoreSample(res, { browser = null, browserCpu = null, rebu
   };
 
   // ---- collision: re-run the playtest with the collision dependency observed
-  let collision = { stuck_recoveries: pt?.stuck_recoveries ?? null, falls: pt?.falls ?? null, player_inside_solid_samples: null, samples: 0, steps: pt?.steps ?? null };
+  let collision = { stuck_recoveries: pt?.stuck_recoveries ?? null, unstuck_uses: pt?.unstuck_uses ?? 0, falls: pt?.falls ?? null, player_inside_solid_samples: null, samples: 0, steps: pt?.steps ?? null };
   if (pkg && probe) {
     try {
       const pr = await collisionProbe(pkg, { deps, maxSimSeconds });
       collision = {
         stuck_recoveries: pt?.stuck_recoveries ?? pr.playtest.stuck_recoveries,
+        unstuck_uses: pt?.unstuck_uses ?? pr.playtest.unstuck_uses ?? 0,
         falls: pt?.falls ?? pr.playtest.falls,
         player_inside_solid_samples: pr.inside,
         samples: pr.samples,

@@ -257,6 +257,8 @@ const totals = {
   BROWSER_LAUNCH_OK: anyBrowser ? `${ok.filter((s) => s.launch.browser_ok === true).length}/${ok.length}` : "not run",
   BUDGET_OK: `${ok.filter((s) => s.budgets.ok).length}/${ok.length}`,
   INSIDE_SOLID_SAMPLES: ok.reduce((a, s) => a + (s.collision.player_inside_solid_samples || 0), 0),
+  // Samples the headless agent could only finish by using the R "back to checkpoint" action.
+  SAMPLES_NEEDING_UNSTUCK: ok.filter((s) => (s.collision.unstuck_uses || 0) > 0).length,
   MIN_PAIRWISE_VISUAL_DISTANCE: variety.min_pairwise,
   MEAN_PAIRWISE_VISUAL_DISTANCE: variety.mean_pairwise,
   NEAR_DUPLICATE_PAIRS: variety.near_duplicates.length,
@@ -314,13 +316,13 @@ if (overloaded && anyBrowser) md.push("", `**The host was overloaded** (load per
 md.push("");
 
 md.push("## Per-sample results", "");
-md.push("| game_id | theme | template | layout | diff | light | scale | playable | won | obj | sim s | stuck | falls | in-solid | save H/B | det | fps (GPU) | p95 ms | cpu_worst_case fps | draws | tris | load ms | build ms | budget |");
-md.push("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+md.push("| game_id | theme | template | layout | diff | light | scale | playable | won | obj | sim s | stuck | unstuck | falls | in-solid | save H/B | det | fps (GPU) | p95 ms | cpu_worst_case fps | draws | tris | load ms | build ms | budget |");
+md.push("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
 for (const s of scores) {
   const r = s.recipe || {};
-  if (!s.visual_signature) { md.push(`| ${s.game_id} | ${r.theme} | ${r.template} | ${r.layout} | ${r.difficulty} | ${r.lighting ?? "–"} | ${r.scale ?? "–"} | **no** |${" – |".repeat(16)}`); continue; }
+  if (!s.visual_signature) { md.push(`| ${s.game_id} | ${r.theme} | ${r.template} | ${r.layout} | ${r.difficulty} | ${r.lighting ?? "–"} | ${r.scale ?? "–"} | **no** |${" – |".repeat(17)}`); continue; }
   const oc = s.objective_completion, c = s.collision, f = s.fps, fc = s.fps_cpu_worst_case, g = f || fc;
-  md.push(`| ${s.game_id} | ${r.theme} | ${r.template} | ${r.layout} | ${r.difficulty} | ${s.lighting ?? "–"} | ${s.scale} | ${s.playable ? "yes" : "**no**"} | ${yn(oc.won)} | ${oc.done}/${oc.required} | ${num(oc.sim_seconds)} | ${c.stuck_recoveries ?? "–"} | ${c.falls ?? "–"} | ${c.player_inside_solid_samples ?? "–"}/${c.samples} | ${yn(s.save_reload.headless_ok)}/${yn(s.save_reload.browser_ok)} | ${yn(s.deterministic.rebuild_sha_equal)} | ${num(f?.fps, 1)} | ${num(f?.frame_ms_p95, 1)} | ${num(fc?.fps, 2)} | ${g?.draw_calls ?? "–"} | ${g?.triangles ?? "–"} | ${s.launch.load_ms ?? s.launch.cpu_load_ms ?? "–"} | ${s.build_ms ?? "–"} | ${s.budgets.ok ? "ok" : "**over**"} |`);
+  md.push(`| ${s.game_id} | ${r.theme} | ${r.template} | ${r.layout} | ${r.difficulty} | ${s.lighting ?? "–"} | ${s.scale} | ${s.playable ? "yes" : "**no**"} | ${yn(oc.won)} | ${oc.done}/${oc.required} | ${num(oc.sim_seconds)} | ${c.stuck_recoveries ?? "–"} | ${c.unstuck_uses ?? 0} | ${c.falls ?? "–"} | ${c.player_inside_solid_samples ?? "–"}/${c.samples} | ${yn(s.save_reload.headless_ok)}/${yn(s.save_reload.browser_ok)} | ${yn(s.deterministic.rebuild_sha_equal)} | ${num(f?.fps, 1)} | ${num(f?.frame_ms_p95, 1)} | ${num(fc?.fps, 2)} | ${g?.draw_calls ?? "–"} | ${g?.triangles ?? "–"} | ${s.launch.load_ms ?? s.launch.cpu_load_ms ?? "–"} | ${s.build_ms ?? "–"} | ${s.budgets.ok ? "ok" : "**over**"} |`);
 }
 md.push("");
 md.push("Columns: *obj* required objectives done by the headless playtest agent; *in-solid* steps the player ended inside a solid collider / steps with a collider nearby (collision probe); *save H/B* headless / browser save-reload (every browser pass that ran); *det* a second build of the same recipe has the same `integrity.sha256`; *fps (GPU)*, *p95 ms* real `requestAnimationFrame` rendering on hardware GL while the player walks; *cpu_worst_case fps* the same on SwiftShader (advisory); *load ms* page navigation to runtime ready (GPU pass, else CPU pass).", "");

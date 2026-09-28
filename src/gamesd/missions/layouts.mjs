@@ -41,7 +41,7 @@ export const LAYOUTS = Object.freeze({
   hub_spoke: L({
     id: "hub_spoke", name: "Hub and spokes", scale: "medium", locations: 6, ordering: "hub_spoke",
     summary: "Five sites on a ring round a central hub; every trail starts at home.",
-    kinds: ["camp", "cave", "ruin", "shrine", "grove", "tower"], finale_kinds: ["landmark", "shrine", "tower"],
+    kinds: ["camp", "village", "cave", "ruin", "shrine", "grove", "tower"], finale_kinds: ["landmark", "shrine", "tower"],
     keywords: ["hub", "spoke", "spokes", "central", "radial", "star", "base camp", "wheel"],
   }),
   grand_loop: L({

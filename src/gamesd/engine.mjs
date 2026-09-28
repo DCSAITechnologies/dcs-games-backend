@@ -51,7 +51,8 @@ export function conceptPromptFor(recipe, ctx) {
 export function overridesFor(recipe, ctx) {
   return {
     concept: (c0) => {
-      let c = { ...c0, scale: ctx.scale };
+      // nav_edge_guard: keep cliff-rim cells off the nav grid (world-spec bakeNavigation).
+      let c = { ...c0, scale: ctx.scale, nav_edge_guard: true };
       c = themeConceptPatch(c, ctx);
       c = layoutConceptPatch(c, ctx);
       c = npcConceptPatch(c, ctx);

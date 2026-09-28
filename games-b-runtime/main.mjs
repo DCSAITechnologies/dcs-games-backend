@@ -209,7 +209,8 @@ async function boot() {
   // Hook inputs are presses (interact, jump, choice) or holds (move, run). A press
   // must reach sim-core as a rising edge, so if the sim's latch is still down
   // from a previous press we first feed one released step.
-  const pending = { interact: false, jump: false, choice: null };
+  const pending = { interact: false, jump: false, choice: null, unstuck: false };
+  let unstuckHeld = false;
   let hookHold = { move: { x: 0, z: 0 }, run: false };
   let manual = false;
 
@@ -232,6 +233,9 @@ async function boot() {
       const w = controls.wish();
       input.move = worldMove(w);
       input.run = w.run; input.jump = w.jump; input.interact = w.interact;
+      // R: back to the last checkpoint, once per key press.
+      if (w.unstuck && !unstuckHeld) pending.unstuck = true;
+      unstuckHeld = !!w.unstuck;
       const c = controls.takeChoice();
       if (c !== null) pending.choice = c;
     }
@@ -241,6 +245,7 @@ async function boot() {
         else { input[k] = true; pending[k] = false; }
       }
     }
+    if (pending.unstuck) { input.unstuck = true; pending.unstuck = false; }
     if (pending.choice !== null && sim.activeDialogue) { input.choice = pending.choice; pending.choice = null; }
     else if (pending.choice !== null && !sim.activeDialogue) pending.choice = null;
     return input;
@@ -371,6 +376,7 @@ async function boot() {
       if ("run" in partial) hookHold.run = !!partial.run;
       if (partial.interact) pending.interact = true;
       if (partial.jump) pending.jump = true;
+      if (partial.unstuck) pending.unstuck = true;
       if (Number.isInteger(partial.choice)) pending.choice = partial.choice;
       if (partial.clear) { hookHold = { move: { x: 0, z: 0 }, run: false }; }
     },
