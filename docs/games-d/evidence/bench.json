@@ -1,11 +1,11 @@
 {
  "bench_version": "1.1.0",
- "generated_at": "2026-09-28T21:32:45.044Z",
- "wall_seconds": 455,
+ "generated_at": "2026-09-28T23:24:57.786Z",
+ "wall_seconds": 438,
  "git": {
-  "head": "594b209",
+  "head": "fc0cb25",
   "branch": "games-d/local-fallback-29sep2026",
-  "dirty": 58
+  "dirty": 54
  },
  "recipe_source": "src/gamesd/samples/catalogue.mjs",
  "options": {
@@ -21,16 +21,16 @@
   "cpus": "Apple M4 Pro",
   "ncpu": 14,
   "load_before": {
-   "loadavg_1m": 8.7,
-   "loadavg_5m": 55.5,
+   "loadavg_1m": 6.6,
+   "loadavg_5m": 7,
    "ncpu": 14,
-   "ratio": 0.62
+   "ratio": 0.47
   },
   "load_after": {
-   "loadavg_1m": 16.8,
-   "loadavg_5m": 27,
+   "loadavg_1m": 15.5,
+   "loadavg_5m": 12,
    "ncpu": 14,
-   "ratio": 1.2
+   "ratio": 1.11
   },
   "overloaded": false,
   "overloaded_ratio": 1.5
@@ -134,10 +134,10 @@
   "SAMPLES_PLAYABLE": 18,
   "WORLD_VARIANTS": 18,
   "GAMEPLAY_VARIANTS": 17,
-  "AVG_FPS": 60,
+  "AVG_FPS": 59.99,
   "AVG_FPS_RENDERER": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
   "PERF_VERIFIED_ON_GPU": "18/18",
-  "CPU_WORST_CASE_AVG_FPS": 8.96,
+  "CPU_WORST_CASE_AVG_FPS": 8.93,
   "CPU_WORST_CASE_RENDERER": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)",
   "SAVE_RELOAD_PASS": "18/18",
   "SAVE_RELOAD_BROWSER_PASS": "18/18",
@@ -146,30 +146,31 @@
   "BROWSER_LAUNCH_OK": "18/18",
   "BUDGET_OK": "18/18",
   "INSIDE_SOLID_SAMPLES": 0,
-  "MIN_PAIRWISE_VISUAL_DISTANCE": 0.241,
-  "MEAN_PAIRWISE_VISUAL_DISTANCE": 0.48,
+  "SAMPLES_NEEDING_UNSTUCK": 0,
+  "MIN_PAIRWISE_VISUAL_DISTANCE": 0.242,
+  "MEAN_PAIRWISE_VISUAL_DISTANCE": 0.481,
   "NEAR_DUPLICATE_PAIRS": 0
  },
  "fps": {
   "gpu": {
-   "min_fps": 60,
+   "min_fps": 59.75,
    "max_fps": 60,
-   "avg_fps": 60,
+   "avg_fps": 59.99,
    "avg_p50_ms": 16.7,
-   "avg_p95_ms": 16.77,
-   "avg_load_ms": 983.94,
-   "avg_draw_calls": 221.83,
+   "avg_p95_ms": 16.74,
+   "avg_load_ms": 965.56,
+   "avg_draw_calls": 224.28,
    "max_draw_calls": 456,
    "max_triangles": 373529
   },
   "cpu_worst_case": {
-   "min_fps": 5.88,
-   "max_fps": 12,
-   "avg_fps": 8.96,
-   "avg_p50_ms": 113.9,
-   "avg_p95_ms": 142.62,
-   "avg_load_ms": 7419.56,
-   "avg_draw_calls": 225.33,
+   "min_fps": 5.48,
+   "max_fps": 12.1,
+   "avg_fps": 8.93,
+   "avg_p50_ms": 116.68,
+   "avg_p95_ms": 135.23,
+   "avg_load_ms": 7261,
+   "avg_draw_calls": 229,
    "max_draw_calls": 456,
    "max_triangles": 350617
   }
@@ -177,12 +178,12 @@
  "variety": {
   "n": 18,
   "pairs": 153,
-  "min_pairwise": 0.241,
-  "mean_pairwise": 0.48,
+  "min_pairwise": 0.242,
+  "mean_pairwise": 0.481,
   "closest_pair": {
    "a": "fb_dune_sea_courier_run_normal_505",
    "b": "fb_sandstone_steps_relic_hunt_normal_1212",
-   "d": 0.241,
+   "d": 0.242,
    "parts": {
     "palette": 0.232,
     "sky": 0.007,
@@ -194,7 +195,7 @@
     "placement": 0.223,
     "footprint": 0.706,
     "labels": 0.75,
-    "screen": 0.181
+    "screen": 0.183
    }
   },
   "near_duplicate_threshold": 0.08,
@@ -232,12 +233,12 @@
    {
     "game_id": "fb_swamp_fen_hunt_hard_404",
     "nearest": "fb_sunken_ruins_lock_and_key_normal_1313",
-    "d": 0.282
+    "d": 0.291
    },
    {
     "game_id": "fb_dune_sea_courier_run_normal_505",
     "nearest": "fb_sandstone_steps_relic_hunt_normal_1212",
-    "d": 0.241
+    "d": 0.242
    },
    {
     "game_id": "fb_oasis_flats_timed_rush_easy_606",
@@ -247,7 +248,7 @@
    {
     "game_id": "fb_frost_peaks_beacon_circuit_normal_707",
     "nearest": "fb_glacier_steps_lock_and_key_hard_808",
-    "d": 0.362
+    "d": 0.361
    },
    {
     "game_id": "fb_glacier_steps_lock_and_key_hard_808",
@@ -257,12 +258,12 @@
    {
     "game_id": "fb_ember_caldera_last_stand_normal_909",
     "nearest": "fb_obsidian_mesa_stealth_infiltration_hard_1010",
-    "d": 0.352
+    "d": 0.341
    },
    {
     "game_id": "fb_obsidian_mesa_stealth_infiltration_hard_1010",
     "nearest": "fb_ember_caldera_last_stand_normal_909",
-    "d": 0.352
+    "d": 0.341
    },
    {
     "game_id": "fb_red_canyon_timed_rush_hard_1111",
@@ -272,12 +273,12 @@
    {
     "game_id": "fb_sandstone_steps_relic_hunt_normal_1212",
     "nearest": "fb_dune_sea_courier_run_normal_505",
-    "d": 0.241
+    "d": 0.242
    },
    {
     "game_id": "fb_sunken_ruins_lock_and_key_normal_1313",
     "nearest": "fb_swamp_fen_hunt_hard_404",
-    "d": 0.282
+    "d": 0.291
    },
    {
     "game_id": "fb_overgrown_temple_beacon_circuit_easy_1414",
@@ -301,8 +302,8 @@
    },
    {
     "game_id": "fb_crystal_hollow_hunt_normal_1818",
-    "nearest": "fb_orbital_base_last_stand_hard_1717",
-    "d": 0.383
+    "nearest": "fb_obsidian_mesa_stealth_infiltration_hard_1010",
+    "d": 0.381
    }
   ],
   "distances": [
@@ -349,7 +350,7 @@
    {
     "a": "fb_storm_isle_classic_chain_normal_101",
     "b": "fb_obsidian_mesa_stealth_infiltration_hard_1010",
-    "d": 0.414
+    "d": 0.427
    },
    {
     "a": "fb_storm_isle_classic_chain_normal_101",
@@ -364,7 +365,7 @@
    {
     "a": "fb_storm_isle_classic_chain_normal_101",
     "b": "fb_sunken_ruins_lock_and_key_normal_1313",
-    "d": 0.394
+    "d": 0.411
    },
    {
     "a": "fb_storm_isle_classic_chain_normal_101",
@@ -429,7 +430,7 @@
    {
     "a": "fb_tropical_cove_relic_hunt_easy_202",
     "b": "fb_obsidian_mesa_stealth_infiltration_hard_1010",
-    "d": 0.604
+    "d": 0.615
    },
    {
     "a": "fb_tropical_cove_relic_hunt_easy_202",
@@ -444,7 +445,7 @@
    {
     "a": "fb_tropical_cove_relic_hunt_easy_202",
     "b": "fb_sunken_ruins_lock_and_key_normal_1313",
-    "d": 0.491
+    "d": 0.496
    },
    {
     "a": "fb_tropical_cove_relic_hunt_easy_202",
@@ -484,7 +485,7 @@
    {
     "a": "fb_pine_valley_grand_tour_easy_303",
     "b": "fb_oasis_flats_timed_rush_easy_606",
-    "d": 0.472
+    "d": 0.473
    },
    {
     "a": "fb_pine_valley_grand_tour_easy_303",
@@ -504,7 +505,7 @@
    {
     "a": "fb_pine_valley_grand_tour_easy_303",
     "b": "fb_obsidian_mesa_stealth_infiltration_hard_1010",
-    "d": 0.528
+    "d": 0.529
    },
    {
     "a": "fb_pine_valley_grand_tour_easy_303",
@@ -519,7 +520,7 @@
    {
     "a": "fb_pine_valley_grand_tour_easy_303",
     "b": "fb_sunken_ruins_lock_and_key_normal_1313",
-    "d": 0.467
+    "d": 0.459
    },
    {
     "a": "fb_pine_valley_grand_tour_easy_303",
@@ -549,7 +550,7 @@
    {
     "a": "fb_swamp_fen_hunt_hard_404",
     "b": "fb_dune_sea_courier_run_normal_505",
-    "d": 0.434
+    "d": 0.435
    },
    {
     "a": "fb_swamp_fen_hunt_hard_404",
@@ -564,7 +565,7 @@
    {
     "a": "fb_swamp_fen_hunt_hard_404",
     "b": "fb_glacier_steps_lock_and_key_hard_808",
-    "d": 0.478
+    "d": 0.479
    },
    {
     "a": "fb_swamp_fen_hunt_hard_404",
@@ -574,7 +575,7 @@
    {
     "a": "fb_swamp_fen_hunt_hard_404",
     "b": "fb_obsidian_mesa_stealth_infiltration_hard_1010",
-    "d": 0.516
+    "d": 0.523
    },
    {
     "a": "fb_swamp_fen_hunt_hard_404",
@@ -589,7 +590,7 @@
    {
     "a": "fb_swamp_fen_hunt_hard_404",
     "b": "fb_sunken_ruins_lock_and_key_normal_1313",
-    "d": 0.282
+    "d": 0.291
    },
    {
     "a": "fb_swamp_fen_hunt_hard_404",
@@ -639,7 +640,7 @@
    {
     "a": "fb_dune_sea_courier_run_normal_505",
     "b": "fb_obsidian_mesa_stealth_infiltration_hard_1010",
-    "d": 0.508
+    "d": 0.511
    },
    {
     "a": "fb_dune_sea_courier_run_normal_505",
@@ -649,12 +650,12 @@
    {
     "a": "fb_dune_sea_courier_run_normal_505",
     "b": "fb_sandstone_steps_relic_hunt_normal_1212",
-    "d": 0.241
+    "d": 0.242
    },
    {
     "a": "fb_dune_sea_courier_run_normal_505",
     "b": "fb_sunken_ruins_lock_and_key_normal_1313",
-    "d": 0.438
+    "d": 0.445
    },
    {
     "a": "fb_dune_sea_courier_run_normal_505",
@@ -684,7 +685,7 @@
    {
     "a": "fb_oasis_flats_timed_rush_easy_606",
     "b": "fb_frost_peaks_beacon_circuit_normal_707",
-    "d": 0.534
+    "d": 0.535
    },
    {
     "a": "fb_oasis_flats_timed_rush_easy_606",
@@ -699,7 +700,7 @@
    {
     "a": "fb_oasis_flats_timed_rush_easy_606",
     "b": "fb_obsidian_mesa_stealth_infiltration_hard_1010",
-    "d": 0.523
+    "d": 0.54
    },
    {
     "a": "fb_oasis_flats_timed_rush_easy_606",
@@ -714,7 +715,7 @@
    {
     "a": "fb_oasis_flats_timed_rush_easy_606",
     "b": "fb_sunken_ruins_lock_and_key_normal_1313",
-    "d": 0.439
+    "d": 0.448
    },
    {
     "a": "fb_oasis_flats_timed_rush_easy_606",
@@ -724,7 +725,7 @@
    {
     "a": "fb_oasis_flats_timed_rush_easy_606",
     "b": "fb_fog_city_stealth_infiltration_normal_1515",
-    "d": 0.499
+    "d": 0.5
    },
    {
     "a": "fb_oasis_flats_timed_rush_easy_606",
@@ -744,7 +745,7 @@
    {
     "a": "fb_frost_peaks_beacon_circuit_normal_707",
     "b": "fb_glacier_steps_lock_and_key_hard_808",
-    "d": 0.362
+    "d": 0.361
    },
    {
     "a": "fb_frost_peaks_beacon_circuit_normal_707",
@@ -754,7 +755,7 @@
    {
     "a": "fb_frost_peaks_beacon_circuit_normal_707",
     "b": "fb_obsidian_mesa_stealth_infiltration_hard_1010",
-    "d": 0.394
+    "d": 0.392
    },
    {
     "a": "fb_frost_peaks_beacon_circuit_normal_707",
@@ -769,7 +770,7 @@
    {
     "a": "fb_frost_peaks_beacon_circuit_normal_707",
     "b": "fb_sunken_ruins_lock_and_key_normal_1313",
-    "d": 0.535
+    "d": 0.529
    },
    {
     "a": "fb_frost_peaks_beacon_circuit_normal_707",
@@ -784,7 +785,7 @@
    {
     "a": "fb_frost_peaks_beacon_circuit_normal_707",
     "b": "fb_hillside_town_grand_tour_easy_1616",
-    "d": 0.456
+    "d": 0.455
    },
    {
     "a": "fb_frost_peaks_beacon_circuit_normal_707",
@@ -794,7 +795,7 @@
    {
     "a": "fb_frost_peaks_beacon_circuit_normal_707",
     "b": "fb_crystal_hollow_hunt_normal_1818",
-    "d": 0.441
+    "d": 0.442
    },
    {
     "a": "fb_glacier_steps_lock_and_key_hard_808",
@@ -804,7 +805,7 @@
    {
     "a": "fb_glacier_steps_lock_and_key_hard_808",
     "b": "fb_obsidian_mesa_stealth_infiltration_hard_1010",
-    "d": 0.509
+    "d": 0.516
    },
    {
     "a": "fb_glacier_steps_lock_and_key_hard_808",
@@ -819,7 +820,7 @@
    {
     "a": "fb_glacier_steps_lock_and_key_hard_808",
     "b": "fb_sunken_ruins_lock_and_key_normal_1313",
-    "d": 0.471
+    "d": 0.479
    },
    {
     "a": "fb_glacier_steps_lock_and_key_hard_808",
@@ -829,17 +830,17 @@
    {
     "a": "fb_glacier_steps_lock_and_key_hard_808",
     "b": "fb_fog_city_stealth_infiltration_normal_1515",
-    "d": 0.555
+    "d": 0.556
    },
    {
     "a": "fb_glacier_steps_lock_and_key_hard_808",
     "b": "fb_hillside_town_grand_tour_easy_1616",
-    "d": 0.382
+    "d": 0.381
    },
    {
     "a": "fb_glacier_steps_lock_and_key_hard_808",
     "b": "fb_orbital_base_last_stand_hard_1717",
-    "d": 0.513
+    "d": 0.512
    },
    {
     "a": "fb_glacier_steps_lock_and_key_hard_808",
@@ -849,7 +850,7 @@
    {
     "a": "fb_ember_caldera_last_stand_normal_909",
     "b": "fb_obsidian_mesa_stealth_infiltration_hard_1010",
-    "d": 0.352
+    "d": 0.341
    },
    {
     "a": "fb_ember_caldera_last_stand_normal_909",
@@ -864,7 +865,7 @@
    {
     "a": "fb_ember_caldera_last_stand_normal_909",
     "b": "fb_sunken_ruins_lock_and_key_normal_1313",
-    "d": 0.539
+    "d": 0.544
    },
    {
     "a": "fb_ember_caldera_last_stand_normal_909",
@@ -889,47 +890,47 @@
    {
     "a": "fb_ember_caldera_last_stand_normal_909",
     "b": "fb_crystal_hollow_hunt_normal_1818",
-    "d": 0.47
+    "d": 0.471
    },
    {
     "a": "fb_obsidian_mesa_stealth_infiltration_hard_1010",
     "b": "fb_red_canyon_timed_rush_hard_1111",
-    "d": 0.544
+    "d": 0.56
    },
    {
     "a": "fb_obsidian_mesa_stealth_infiltration_hard_1010",
     "b": "fb_sandstone_steps_relic_hunt_normal_1212",
-    "d": 0.516
+    "d": 0.53
    },
    {
     "a": "fb_obsidian_mesa_stealth_infiltration_hard_1010",
     "b": "fb_sunken_ruins_lock_and_key_normal_1313",
-    "d": 0.534
+    "d": 0.538
    },
    {
     "a": "fb_obsidian_mesa_stealth_infiltration_hard_1010",
     "b": "fb_overgrown_temple_beacon_circuit_easy_1414",
-    "d": 0.426
+    "d": 0.445
    },
    {
     "a": "fb_obsidian_mesa_stealth_infiltration_hard_1010",
     "b": "fb_fog_city_stealth_infiltration_normal_1515",
-    "d": 0.434
+    "d": 0.441
    },
    {
     "a": "fb_obsidian_mesa_stealth_infiltration_hard_1010",
     "b": "fb_hillside_town_grand_tour_easy_1616",
-    "d": 0.597
+    "d": 0.591
    },
    {
     "a": "fb_obsidian_mesa_stealth_infiltration_hard_1010",
     "b": "fb_orbital_base_last_stand_hard_1717",
-    "d": 0.393
+    "d": 0.409
    },
    {
     "a": "fb_obsidian_mesa_stealth_infiltration_hard_1010",
     "b": "fb_crystal_hollow_hunt_normal_1818",
-    "d": 0.385
+    "d": 0.381
    },
    {
     "a": "fb_red_canyon_timed_rush_hard_1111",
@@ -939,7 +940,7 @@
    {
     "a": "fb_red_canyon_timed_rush_hard_1111",
     "b": "fb_sunken_ruins_lock_and_key_normal_1313",
-    "d": 0.544
+    "d": 0.555
    },
    {
     "a": "fb_red_canyon_timed_rush_hard_1111",
@@ -954,7 +955,7 @@
    {
     "a": "fb_red_canyon_timed_rush_hard_1111",
     "b": "fb_hillside_town_grand_tour_easy_1616",
-    "d": 0.492
+    "d": 0.493
    },
    {
     "a": "fb_red_canyon_timed_rush_hard_1111",
@@ -969,7 +970,7 @@
    {
     "a": "fb_sandstone_steps_relic_hunt_normal_1212",
     "b": "fb_sunken_ruins_lock_and_key_normal_1313",
-    "d": 0.512
+    "d": 0.522
    },
    {
     "a": "fb_sandstone_steps_relic_hunt_normal_1212",
@@ -994,32 +995,32 @@
    {
     "a": "fb_sandstone_steps_relic_hunt_normal_1212",
     "b": "fb_crystal_hollow_hunt_normal_1818",
-    "d": 0.56
+    "d": 0.559
    },
    {
     "a": "fb_sunken_ruins_lock_and_key_normal_1313",
     "b": "fb_overgrown_temple_beacon_circuit_easy_1414",
-    "d": 0.4
+    "d": 0.423
    },
    {
     "a": "fb_sunken_ruins_lock_and_key_normal_1313",
     "b": "fb_fog_city_stealth_infiltration_normal_1515",
-    "d": 0.405
+    "d": 0.414
    },
    {
     "a": "fb_sunken_ruins_lock_and_key_normal_1313",
     "b": "fb_hillside_town_grand_tour_easy_1616",
-    "d": 0.489
+    "d": 0.485
    },
    {
     "a": "fb_sunken_ruins_lock_and_key_normal_1313",
     "b": "fb_orbital_base_last_stand_hard_1717",
-    "d": 0.523
+    "d": 0.533
    },
    {
     "a": "fb_sunken_ruins_lock_and_key_normal_1313",
     "b": "fb_crystal_hollow_hunt_normal_1818",
-    "d": 0.519
+    "d": 0.509
    },
    {
     "a": "fb_overgrown_temple_beacon_circuit_easy_1414",
@@ -1039,7 +1040,7 @@
    {
     "a": "fb_overgrown_temple_beacon_circuit_easy_1414",
     "b": "fb_crystal_hollow_hunt_normal_1818",
-    "d": 0.543
+    "d": 0.544
    },
    {
     "a": "fb_fog_city_stealth_infiltration_normal_1515",
@@ -1054,7 +1055,7 @@
    {
     "a": "fb_fog_city_stealth_infiltration_normal_1515",
     "b": "fb_crystal_hollow_hunt_normal_1818",
-    "d": 0.389
+    "d": 0.388
    },
    {
     "a": "fb_hillside_town_grand_tour_easy_1616",
@@ -1064,12 +1065,12 @@
    {
     "a": "fb_hillside_town_grand_tour_easy_1616",
     "b": "fb_crystal_hollow_hunt_normal_1818",
-    "d": 0.577
+    "d": 0.575
    },
    {
     "a": "fb_orbital_base_last_stand_hard_1717",
     "b": "fb_crystal_hollow_hunt_normal_1818",
-    "d": 0.383
+    "d": 0.382
    }
   ]
  },
@@ -1105,13 +1106,13 @@
     "reach",
     "activate"
    ],
-   "build_ms": 238,
+   "build_ms": 323,
    "notes": [],
    "launch": {
     "headless_ok": true,
     "browser_ok": true,
-    "load_ms": 1096,
-    "cpu_load_ms": 7879,
+    "load_ms": 1038,
+    "cpu_load_ms": 7656,
     "headless_load_ms": 4,
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
     "cpu_renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
@@ -1121,14 +1122,15 @@
     "done": 10,
     "pct": 100,
     "won": true,
-    "sim_seconds": 116.32
+    "sim_seconds": 118.23
    },
    "collision": {
     "stuck_recoveries": 0,
+    "unstuck_uses": 0,
     "falls": 0,
     "player_inside_solid_samples": 0,
-    "samples": 6118,
-    "steps": 6979,
+    "samples": 6293,
+    "steps": 7094,
     "examples": [],
     "replay_matches": true
    },
@@ -1142,12 +1144,12 @@
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)"
    },
    "fps_cpu_worst_case": {
-    "fps": 6.86,
-    "frame_ms_p50": 149.9,
-    "frame_ms_p95": 166.8,
+    "fps": 7.44,
+    "frame_ms_p50": 133.3,
+    "frame_ms_p95": 166.6,
     "draw_calls": 206,
     "triangles": 147296,
-    "frames": 28,
+    "frames": 30,
     "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
    },
    "save_reload": {
@@ -1589,13 +1591,13 @@
    },
    "deterministic": {
     "rebuild_sha_equal": true,
-    "sha256": "7363c8a660b979fe6c7918e6cba2e9781b68c78fbe66215d35b83a3d40afb137"
+    "sha256": "df1e8f72043f4c9a76ae027ff2c98215d379180e54801080bb0fd7fa2b2d5979"
    },
    "budgets": {
     "ok": true,
     "scale": "medium",
     "figures": {
-     "package_bytes": 392327,
+     "package_bytes": 392367,
      "records": 104,
      "placements": 48,
      "scatter_instances": 280,
@@ -1617,7 +1619,7 @@
      "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
      "gpu": true,
      "attempts": 1,
-     "load_ms": 1096,
+     "load_ms": 1038,
      "fps": {
       "fps": 60,
       "frame_ms_p50": 16.7,
@@ -1669,18 +1671,18 @@
      "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)",
      "gpu": false,
      "attempts": 1,
-     "load_ms": 7879,
+     "load_ms": 7656,
      "fps": {
-      "fps": 6.86,
-      "frame_ms_p50": 149.9,
-      "frame_ms_p95": 166.8,
-      "frames": 28,
-      "seconds": 4.08,
+      "fps": 7.44,
+      "frame_ms_p50": 133.3,
+      "frame_ms_p95": 166.6,
+      "frames": 30,
+      "seconds": 4.03,
       "draw_calls": 206,
       "triangles": 147296,
       "textures": 55,
       "geometries": 237,
-      "walked_m": 13.29
+      "walked_m": 14.19
      },
      "save_reload": {
       "ok": true,
@@ -1718,7 +1720,7 @@
    },
    "headless_playtest": {
     "won": true,
-    "sim_seconds": 116.32,
+    "sim_seconds": 118.23,
     "plan_source": "solver",
     "reason": null
    }
@@ -1749,15 +1751,15 @@
     "collect",
     "collect"
    ],
-   "build_ms": 140,
+   "build_ms": 215,
    "notes": [
     "themes: tropical_cove solid scatter capped to keep objectives reachable"
    ],
    "launch": {
     "headless_ok": true,
     "browser_ok": true,
-    "load_ms": 972,
-    "cpu_load_ms": 7849,
+    "load_ms": 916,
+    "cpu_load_ms": 7448,
     "headless_load_ms": 2,
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
     "cpu_renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
@@ -1771,6 +1773,7 @@
    },
    "collision": {
     "stuck_recoveries": 1,
+    "unstuck_uses": 0,
     "falls": 0,
     "player_inside_solid_samples": 0,
     "samples": 3828,
@@ -1782,18 +1785,18 @@
     "fps": 60,
     "frame_ms_p50": 16.7,
     "frame_ms_p95": 16.7,
-    "draw_calls": 331,
-    "triangles": 295894,
+    "draw_calls": 329,
+    "triangles": 295546,
     "frames": 240,
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)"
    },
    "fps_cpu_worst_case": {
-    "fps": 6.97,
+    "fps": 7.19,
     "frame_ms_p50": 133.4,
-    "frame_ms_p95": 166.7,
+    "frame_ms_p95": 150,
     "draw_calls": 332,
     "triangles": 273218,
-    "frames": 28,
+    "frames": 29,
     "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
    },
    "save_reload": {
@@ -2245,13 +2248,13 @@
    },
    "deterministic": {
     "rebuild_sha_equal": true,
-    "sha256": "b858f383bb082d32d51601096ebe2584fad9176238dd0edb9adf22a2f1b5be80"
+    "sha256": "d08ffb844d6d38fc0ec25949758dd24e3219044c255a4526bb50c8a04025242b"
    },
    "budgets": {
     "ok": true,
     "scale": "large",
     "figures": {
-     "package_bytes": 420783,
+     "package_bytes": 420821,
      "records": 113,
      "placements": 48,
      "scatter_instances": 741,
@@ -2273,18 +2276,18 @@
      "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
      "gpu": true,
      "attempts": 1,
-     "load_ms": 972,
+     "load_ms": 916,
      "fps": {
       "fps": 60,
       "frame_ms_p50": 16.7,
       "frame_ms_p95": 16.7,
       "frames": 240,
       "seconds": 4,
-      "draw_calls": 331,
-      "triangles": 295894,
+      "draw_calls": 329,
+      "triangles": 295546,
       "textures": 57,
       "geometries": 366,
-      "walked_m": 15.58
+      "walked_m": 15.65
      },
      "save_reload": {
       "ok": true,
@@ -2325,18 +2328,18 @@
      "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)",
      "gpu": false,
      "attempts": 1,
-     "load_ms": 7849,
+     "load_ms": 7448,
      "fps": {
-      "fps": 6.97,
+      "fps": 7.19,
       "frame_ms_p50": 133.4,
-      "frame_ms_p95": 166.7,
-      "frames": 28,
-      "seconds": 4.02,
+      "frame_ms_p95": 150,
+      "frames": 29,
+      "seconds": 4.03,
       "draw_calls": 332,
       "triangles": 273218,
       "textures": 57,
       "geometries": 366,
-      "walked_m": 10.73
+      "walked_m": 11.18
      },
      "save_reload": {
       "ok": true,
@@ -2406,13 +2409,13 @@
     "reach",
     "reach"
    ],
-   "build_ms": 145,
+   "build_ms": 309,
    "notes": [],
    "launch": {
     "headless_ok": true,
     "browser_ok": true,
-    "load_ms": 923,
-    "cpu_load_ms": 7554,
+    "load_ms": 892,
+    "cpu_load_ms": 7056,
     "headless_load_ms": 2,
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
     "cpu_renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
@@ -2422,14 +2425,15 @@
     "done": 6,
     "pct": 100,
     "won": true,
-    "sim_seconds": 83.05
+    "sim_seconds": 83.12
    },
    "collision": {
     "stuck_recoveries": 0,
+    "unstuck_uses": 0,
     "falls": 0,
     "player_inside_solid_samples": 0,
-    "samples": 3536,
-    "steps": 4983,
+    "samples": 3647,
+    "steps": 4987,
     "examples": [],
     "replay_matches": true
    },
@@ -2443,12 +2447,12 @@
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)"
    },
    "fps_cpu_worst_case": {
-    "fps": 6.67,
-    "frame_ms_p50": 150,
-    "frame_ms_p95": 166.7,
+    "fps": 6.37,
+    "frame_ms_p50": 150.1,
+    "frame_ms_p95": 166.8,
     "draw_calls": 456,
     "triangles": 302440,
-    "frames": 27,
+    "frames": 26,
     "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
    },
    "save_reload": {
@@ -2856,13 +2860,13 @@
    },
    "deterministic": {
     "rebuild_sha_equal": true,
-    "sha256": "623a5f047de0d027b988cfd021a8f5ac0e05115566387f57b9d8088e3e776d06"
+    "sha256": "13eb24c5c3d7c7353b54d03962d0b842f88fcf0fc49f07497e02c9370a8ee5ef"
    },
    "budgets": {
     "ok": true,
     "scale": "large",
     "figures": {
-     "package_bytes": 400750,
+     "package_bytes": 400788,
      "records": 106,
      "placements": 44,
      "scatter_instances": 822,
@@ -2884,7 +2888,7 @@
      "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
      "gpu": true,
      "attempts": 1,
-     "load_ms": 923,
+     "load_ms": 892,
      "fps": {
       "fps": 60,
       "frame_ms_p50": 16.7,
@@ -2936,18 +2940,18 @@
      "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)",
      "gpu": false,
      "attempts": 1,
-     "load_ms": 7554,
+     "load_ms": 7056,
      "fps": {
-      "fps": 6.67,
-      "frame_ms_p50": 150,
-      "frame_ms_p95": 166.7,
-      "frames": 27,
-      "seconds": 4.05,
+      "fps": 6.37,
+      "frame_ms_p50": 150.1,
+      "frame_ms_p95": 166.8,
+      "frames": 26,
+      "seconds": 4.08,
       "draw_calls": 456,
       "triangles": 302440,
       "textures": 58,
       "geometries": 476,
-      "walked_m": 10.79
+      "walked_m": 10.78
      },
      "save_reload": {
       "ok": true,
@@ -2985,7 +2989,7 @@
    },
    "headless_playtest": {
     "won": true,
-    "sim_seconds": 83.05,
+    "sim_seconds": 83.12,
     "plan_source": "solver",
     "reason": null
    }
@@ -3017,13 +3021,13 @@
     "defeat",
     "talk"
    ],
-   "build_ms": 71,
+   "build_ms": 117,
    "notes": [],
    "launch": {
     "headless_ok": true,
     "browser_ok": true,
-    "load_ms": 1001,
-    "cpu_load_ms": 7600,
+    "load_ms": 1083,
+    "cpu_load_ms": 7926,
     "headless_load_ms": 0,
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
     "cpu_renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
@@ -3037,6 +3041,7 @@
    },
    "collision": {
     "stuck_recoveries": 0,
+    "unstuck_uses": 0,
     "falls": 0,
     "player_inside_solid_samples": 0,
     "samples": 1313,
@@ -3054,9 +3059,9 @@
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)"
    },
    "fps_cpu_worst_case": {
-    "fps": 8.4,
+    "fps": 8.46,
     "frame_ms_p50": 116.7,
-    "frame_ms_p95": 150,
+    "frame_ms_p95": 150.1,
     "draw_calls": 208,
     "triangles": 116031,
     "frames": 34,
@@ -3515,13 +3520,13 @@
    },
    "deterministic": {
     "rebuild_sha_equal": true,
-    "sha256": "0742f587b3d5479ea55ed3dc37b86b60a061affdc1f7d9910f10f98e552db20f"
+    "sha256": "d4708e746afe31ed04374ccea6c8d03cc9c5bd25ffeade881b1c36a1c6fccc10"
    },
    "budgets": {
     "ok": true,
     "scale": "small",
     "figures": {
-     "package_bytes": 343062,
+     "package_bytes": 343102,
      "records": 107,
      "placements": 41,
      "scatter_instances": 189,
@@ -3543,7 +3548,7 @@
      "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
      "gpu": true,
      "attempts": 1,
-     "load_ms": 1001,
+     "load_ms": 1083,
      "fps": {
       "fps": 60,
       "frame_ms_p50": 16.7,
@@ -3554,7 +3559,7 @@
       "triangles": 139031,
       "textures": 56,
       "geometries": 263,
-      "walked_m": 18.32
+      "walked_m": 18.39
      },
      "save_reload": {
       "ok": true,
@@ -3595,18 +3600,18 @@
      "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)",
      "gpu": false,
      "attempts": 1,
-     "load_ms": 7600,
+     "load_ms": 7926,
      "fps": {
-      "fps": 8.4,
+      "fps": 8.46,
       "frame_ms_p50": 116.7,
-      "frame_ms_p95": 150,
+      "frame_ms_p95": 150.1,
       "frames": 34,
-      "seconds": 4.05,
+      "seconds": 4.02,
       "draw_calls": 208,
       "triangles": 116031,
       "textures": 56,
       "geometries": 263,
-      "walked_m": 15.77
+      "walked_m": 15.99
      },
      "save_reload": {
       "ok": true,
@@ -3680,13 +3685,13 @@
     "deliver",
     "talk"
    ],
-   "build_ms": 170,
+   "build_ms": 384,
    "notes": [],
    "launch": {
     "headless_ok": true,
     "browser_ok": true,
-    "load_ms": 1041,
-    "cpu_load_ms": 7387,
+    "load_ms": 918,
+    "cpu_load_ms": 7281,
     "headless_load_ms": 0,
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
     "cpu_renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
@@ -3700,6 +3705,7 @@
    },
    "collision": {
     "stuck_recoveries": 0,
+    "unstuck_uses": 0,
     "falls": 0,
     "player_inside_solid_samples": 0,
     "samples": 4472,
@@ -3708,21 +3714,21 @@
     "replay_matches": true
    },
    "fps": {
-    "fps": 60,
+    "fps": 59.75,
     "frame_ms_p50": 16.7,
     "frame_ms_p95": 16.8,
     "draw_calls": 185,
     "triangles": 76358,
-    "frames": 241,
+    "frames": 240,
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)"
    },
    "fps_cpu_worst_case": {
-    "fps": 9.21,
-    "frame_ms_p50": 100.1,
-    "frame_ms_p95": 133.4,
-    "draw_calls": 195,
-    "triangles": 78510,
-    "frames": 37,
+    "fps": 10.17,
+    "frame_ms_p50": 100,
+    "frame_ms_p95": 100.1,
+    "draw_calls": 185,
+    "triangles": 76358,
+    "frames": 41,
     "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
    },
    "save_reload": {
@@ -4110,11 +4116,11 @@
       0,
       0,
       0,
-      0.001,
+      0.002,
       0,
       0,
       0,
-      0.011,
+      0.012,
       0.018,
       0,
       0,
@@ -4147,13 +4153,13 @@
    },
    "deterministic": {
     "rebuild_sha_equal": true,
-    "sha256": "9693ad10e94c8ccbeeef6876dc01ac4ecb9f75958fe71f6ce3bea5e84590ef88"
+    "sha256": "a0f9e3e86cc3f84994974029fa2d63820d450865c32013f6058b5e725518c8c4"
    },
    "budgets": {
     "ok": true,
     "scale": "medium",
     "figures": {
-     "package_bytes": 362065,
+     "package_bytes": 362105,
      "records": 105,
      "placements": 40,
      "scatter_instances": 54,
@@ -4175,18 +4181,18 @@
      "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
      "gpu": true,
      "attempts": 1,
-     "load_ms": 1041,
+     "load_ms": 918,
      "fps": {
-      "fps": 60,
+      "fps": 59.75,
       "frame_ms_p50": 16.7,
       "frame_ms_p95": 16.8,
-      "frames": 241,
+      "frames": 240,
       "seconds": 4.02,
       "draw_calls": 185,
       "triangles": 76358,
       "textures": 59,
       "geometries": 214,
-      "walked_m": 18.24
+      "walked_m": 18.32
      },
      "save_reload": {
       "ok": true,
@@ -4227,18 +4233,18 @@
      "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)",
      "gpu": false,
      "attempts": 1,
-     "load_ms": 7387,
+     "load_ms": 7281,
      "fps": {
-      "fps": 9.21,
-      "frame_ms_p50": 100.1,
-      "frame_ms_p95": 133.4,
-      "frames": 37,
-      "seconds": 4.02,
-      "draw_calls": 195,
-      "triangles": 78510,
+      "fps": 10.17,
+      "frame_ms_p50": 100,
+      "frame_ms_p95": 100.1,
+      "frames": 41,
+      "seconds": 4.03,
+      "draw_calls": 185,
+      "triangles": 76358,
       "textures": 59,
       "geometries": 214,
-      "walked_m": 16.67
+      "walked_m": 18.17
      },
      "save_reload": {
       "ok": true,
@@ -4306,13 +4312,13 @@
     "reach",
     "activate"
    ],
-   "build_ms": 49,
+   "build_ms": 70,
    "notes": [],
    "launch": {
     "headless_ok": true,
     "browser_ok": true,
-    "load_ms": 1037,
-    "cpu_load_ms": 6687,
+    "load_ms": 1017,
+    "cpu_load_ms": 6329,
     "headless_load_ms": 0,
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
     "cpu_renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
@@ -4326,6 +4332,7 @@
    },
    "collision": {
     "stuck_recoveries": 0,
+    "unstuck_uses": 0,
     "falls": 0,
     "player_inside_solid_samples": 0,
     "samples": 873,
@@ -4336,19 +4343,19 @@
    "fps": {
     "fps": 60,
     "frame_ms_p50": 16.7,
-    "frame_ms_p95": 16.7,
+    "frame_ms_p95": 16.8,
     "draw_calls": 153,
     "triangles": 77856,
-    "frames": 240,
+    "frames": 241,
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)"
    },
    "fps_cpu_worst_case": {
-    "fps": 11.41,
-    "frame_ms_p50": 83.4,
-    "frame_ms_p95": 100.1,
+    "fps": 11.65,
+    "frame_ms_p50": 83.3,
+    "frame_ms_p95": 100,
     "draw_calls": 153,
     "triangles": 77856,
-    "frames": 46,
+    "frames": 47,
     "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
    },
    "save_reload": {
@@ -4701,7 +4708,7 @@
       0,
       0,
       0,
-      0.099,
+      0.101,
       0,
       0,
       0,
@@ -4725,42 +4732,42 @@
       0.015,
       0,
       0,
-      0.005,
-      0.021,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0.001,
-      0,
-      0,
-      0,
       0.004,
-      0.549,
+      0.019,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
       0.001,
       0,
       0,
-      0.031,
-      0.165,
+      0,
+      0.005,
+      0.542,
+      0.001,
+      0,
+      0,
+      0.037,
+      0.168,
       0.001
      ]
     }
    },
    "deterministic": {
     "rebuild_sha_equal": true,
-    "sha256": "dc5b4b809234564020f4e434d8a2133570701643aa156a92333d354173d35893"
+    "sha256": "a19e87a803548ebac4daa340aa61e887ff2389d27ac160f2e9da51b2c7b1e388"
    },
    "budgets": {
     "ok": true,
     "scale": "small",
     "figures": {
-     "package_bytes": 302570,
+     "package_bytes": 302608,
      "records": 99,
      "placements": 41,
      "scatter_instances": 102,
@@ -4782,18 +4789,18 @@
      "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
      "gpu": true,
      "attempts": 1,
-     "load_ms": 1037,
+     "load_ms": 1017,
      "fps": {
       "fps": 60,
       "frame_ms_p50": 16.7,
-      "frame_ms_p95": 16.7,
-      "frames": 240,
-      "seconds": 4,
+      "frame_ms_p95": 16.8,
+      "frames": 241,
+      "seconds": 4.02,
       "draw_calls": 153,
       "triangles": 77856,
       "textures": 54,
       "geometries": 205,
-      "walked_m": 18.25
+      "walked_m": 18.4
      },
      "save_reload": {
       "ok": true,
@@ -4834,18 +4841,18 @@
      "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)",
      "gpu": false,
      "attempts": 1,
-     "load_ms": 6687,
+     "load_ms": 6329,
      "fps": {
-      "fps": 11.41,
-      "frame_ms_p50": 83.4,
-      "frame_ms_p95": 100.1,
-      "frames": 46,
+      "fps": 11.65,
+      "frame_ms_p50": 83.3,
+      "frame_ms_p95": 100,
+      "frames": 47,
       "seconds": 4.03,
       "draw_calls": 153,
       "triangles": 77856,
       "textures": 54,
       "geometries": 205,
-      "walked_m": 18.02
+      "walked_m": 18.17
      },
      "save_reload": {
       "ok": true,
@@ -4915,13 +4922,13 @@
     "reach",
     "activate"
    ],
-   "build_ms": 119,
+   "build_ms": 322,
    "notes": [],
    "launch": {
     "headless_ok": true,
     "browser_ok": true,
-    "load_ms": 979,
-    "cpu_load_ms": 6647,
+    "load_ms": 911,
+    "cpu_load_ms": 6661,
     "headless_load_ms": 0,
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
     "cpu_renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
@@ -4931,33 +4938,34 @@
     "done": 6,
     "pct": 100,
     "won": true,
-    "sim_seconds": 69.82
+    "sim_seconds": 105.4
    },
    "collision": {
-    "stuck_recoveries": 0,
+    "stuck_recoveries": 5,
+    "unstuck_uses": 0,
     "falls": 0,
     "player_inside_solid_samples": 0,
-    "samples": 3218,
-    "steps": 4189,
+    "samples": 5371,
+    "steps": 6324,
     "examples": [],
     "replay_matches": true
    },
    "fps": {
     "fps": 60,
     "frame_ms_p50": 16.7,
-    "frame_ms_p95": 16.8,
+    "frame_ms_p95": 16.7,
     "draw_calls": 250,
     "triangles": 102462,
     "frames": 241,
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)"
    },
    "fps_cpu_worst_case": {
-    "fps": 11.51,
-    "frame_ms_p50": 83.4,
+    "fps": 12.1,
+    "frame_ms_p50": 83.3,
     "frame_ms_p95": 100,
     "draw_calls": 249,
     "triangles": 102398,
-    "frames": 47,
+    "frames": 49,
     "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
    },
    "save_reload": {
@@ -5359,12 +5367,12 @@
       0,
       0,
       0.001,
-      0.022,
-      0.075,
+      0.021,
+      0.074,
       0,
       0,
       0,
-      0.017,
+      0.016,
       0.021,
       0,
       0,
@@ -5379,41 +5387,41 @@
       0,
       0,
       0,
-      0.004,
-      0.027,
-      0.167,
+      0.005,
+      0.029,
+      0.163,
       0,
       0,
       0,
-      0.155,
-      0,
-      0,
-      0,
-      0,
+      0.152,
       0,
       0,
       0,
       0,
       0,
-      0.003,
+      0,
+      0,
+      0,
+      0,
+      0.002,
       0.005,
       0,
       0,
       0,
       0.007,
-      0.405
+      0.414
      ]
     }
    },
    "deterministic": {
     "rebuild_sha_equal": true,
-    "sha256": "7c26da4bc79a61ed8c4b90d52d87d2147a4c5ac2e7ede61246fd24e83a99cd1f"
+    "sha256": "ad4becb87aff4004429d55002296b0aa16b160b8a9d4bf7e194227ee4c2d17ca"
    },
    "budgets": {
     "ok": true,
     "scale": "medium",
     "figures": {
-     "package_bytes": 382478,
+     "package_bytes": 382518,
      "records": 102,
      "placements": 51,
      "scatter_instances": 138,
@@ -5435,18 +5443,18 @@
      "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
      "gpu": true,
      "attempts": 1,
-     "load_ms": 979,
+     "load_ms": 911,
      "fps": {
       "fps": 60,
       "frame_ms_p50": 16.7,
-      "frame_ms_p95": 16.8,
+      "frame_ms_p95": 16.7,
       "frames": 241,
       "seconds": 4.02,
       "draw_calls": 250,
       "triangles": 102462,
       "textures": 56,
       "geometries": 289,
-      "walked_m": 18.25
+      "walked_m": 18.32
      },
      "save_reload": {
       "ok": true,
@@ -5487,18 +5495,18 @@
      "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)",
      "gpu": false,
      "attempts": 1,
-     "load_ms": 6647,
+     "load_ms": 6661,
      "fps": {
-      "fps": 11.51,
-      "frame_ms_p50": 83.4,
+      "fps": 12.1,
+      "frame_ms_p50": 83.3,
       "frame_ms_p95": 100,
-      "frames": 47,
-      "seconds": 4.08,
+      "frames": 49,
+      "seconds": 4.05,
       "draw_calls": 249,
       "triangles": 102398,
       "textures": 56,
       "geometries": 289,
-      "walked_m": 18.55
+      "walked_m": 18.7
      },
      "save_reload": {
       "ok": true,
@@ -5536,7 +5544,7 @@
    },
    "headless_playtest": {
     "won": true,
-    "sim_seconds": 69.82,
+    "sim_seconds": 105.4,
     "plan_source": "solver",
     "reason": null
    }
@@ -5570,13 +5578,13 @@
     "reach",
     "activate"
    ],
-   "build_ms": 85,
+   "build_ms": 185,
    "notes": [],
    "launch": {
     "headless_ok": true,
     "browser_ok": true,
-    "load_ms": 947,
-    "cpu_load_ms": 7080,
+    "load_ms": 965,
+    "cpu_load_ms": 7194,
     "headless_load_ms": 0,
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
     "cpu_renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
@@ -5590,6 +5598,7 @@
    },
    "collision": {
     "stuck_recoveries": 0,
+    "unstuck_uses": 0,
     "falls": 0,
     "player_inside_solid_samples": 0,
     "samples": 2362,
@@ -5600,19 +5609,19 @@
    "fps": {
     "fps": 60,
     "frame_ms_p50": 16.7,
-    "frame_ms_p95": 16.8,
+    "frame_ms_p95": 16.7,
     "draw_calls": 230,
     "triangles": 79946,
     "frames": 241,
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)"
    },
    "fps_cpu_worst_case": {
-    "fps": 10.98,
+    "fps": 10.95,
     "frame_ms_p50": 83.4,
     "frame_ms_p95": 100.1,
     "draw_calls": 230,
     "triangles": 79946,
-    "frames": 45,
+    "frames": 44,
     "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
    },
    "save_reload": {
@@ -5971,7 +5980,7 @@
      ],
      "screen": [
       0.026,
-      0.003,
+      0.002,
       0,
       0,
       0.002,
@@ -5987,11 +5996,11 @@
       0,
       0,
       0.03,
-      0.005,
+      0.006,
       0,
       0,
       0.003,
-      0.037,
+      0.036,
       0.007,
       0,
       0,
@@ -6006,14 +6015,14 @@
       0,
       0,
       0,
-      0.002,
-      0.01,
       0.001,
+      0.01,
       0,
       0,
-      0.003,
+      0,
+      0.002,
       0.227,
-      0.134,
+      0.132,
       0,
       0,
       0,
@@ -6029,23 +6038,23 @@
       0,
       0.002,
       0.01,
-      0.056,
+      0.047,
       0,
       0,
       0.007,
-      0.432
+      0.445
      ]
     }
    },
    "deterministic": {
     "rebuild_sha_equal": true,
-    "sha256": "937674375112743a5a5f0961b07e68fc74703f54d0e6d0cc9fe77906a574c431"
+    "sha256": "10e2dff5b1dbf84eed6ab908b153371c03978585d904657796955ce6471639d1"
    },
    "budgets": {
     "ok": true,
     "scale": "medium",
     "figures": {
-     "package_bytes": 367345,
+     "package_bytes": 367381,
      "records": 104,
      "placements": 39,
      "scatter_instances": 75,
@@ -6067,11 +6076,11 @@
      "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
      "gpu": true,
      "attempts": 1,
-     "load_ms": 947,
+     "load_ms": 965,
      "fps": {
       "fps": 60,
       "frame_ms_p50": 16.7,
-      "frame_ms_p95": 16.8,
+      "frame_ms_p95": 16.7,
       "frames": 241,
       "seconds": 4.02,
       "draw_calls": 230,
@@ -6119,18 +6128,18 @@
      "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)",
      "gpu": false,
      "attempts": 1,
-     "load_ms": 7080,
+     "load_ms": 7194,
      "fps": {
-      "fps": 10.98,
+      "fps": 10.95,
       "frame_ms_p50": 83.4,
       "frame_ms_p95": 100.1,
-      "frames": 45,
-      "seconds": 4.1,
+      "frames": 44,
+      "seconds": 4.02,
       "draw_calls": 230,
       "triangles": 79946,
       "textures": 62,
       "geometries": 258,
-      "walked_m": 18.55
+      "walked_m": 18.1
      },
      "save_reload": {
       "ok": true,
@@ -6198,13 +6207,13 @@
     "activate",
     "survive"
    ],
-   "build_ms": 85,
+   "build_ms": 96,
    "notes": [],
    "launch": {
     "headless_ok": true,
     "browser_ok": true,
-    "load_ms": 1075,
-    "cpu_load_ms": 7794,
+    "load_ms": 937,
+    "cpu_load_ms": 8235,
     "headless_load_ms": 0,
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
     "cpu_renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
@@ -6218,6 +6227,7 @@
    },
    "collision": {
     "stuck_recoveries": 0,
+    "unstuck_uses": 0,
     "falls": 0,
     "player_inside_solid_samples": 0,
     "samples": 3088,
@@ -6228,15 +6238,15 @@
    "fps": {
     "fps": 60,
     "frame_ms_p50": 16.7,
-    "frame_ms_p95": 16.8,
+    "frame_ms_p95": 16.7,
     "draw_calls": 143,
     "triangles": 89204,
     "frames": 241,
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)"
    },
    "fps_cpu_worst_case": {
-    "fps": 9.42,
-    "frame_ms_p50": 100,
+    "fps": 9.23,
+    "frame_ms_p50": 116.6,
     "frame_ms_p95": 116.7,
     "draw_calls": 145,
     "triangles": 66240,
@@ -6653,7 +6663,7 @@
       0,
       0,
       0.011,
-      0,
+      0.001,
       0,
       0,
       0,
@@ -6685,13 +6695,13 @@
    },
    "deterministic": {
     "rebuild_sha_equal": true,
-    "sha256": "c1e4ddab1990c239e3ae662f374df8bb427e4ab3892059d988ea6f64c374ab67"
+    "sha256": "d5d3ac2799b7c8e03cb2300599e93331edc3f04f431a9a5f09f8ad70e5bf8bf2"
    },
    "budgets": {
     "ok": true,
     "scale": "small",
     "figures": {
-     "package_bytes": 292468,
+     "package_bytes": 292508,
      "records": 93,
      "placements": 35,
      "scatter_instances": 43,
@@ -6713,11 +6723,11 @@
      "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
      "gpu": true,
      "attempts": 1,
-     "load_ms": 1075,
+     "load_ms": 937,
      "fps": {
       "fps": 60,
       "frame_ms_p50": 16.7,
-      "frame_ms_p95": 16.8,
+      "frame_ms_p95": 16.7,
       "frames": 241,
       "seconds": 4.02,
       "draw_calls": 143,
@@ -6765,22 +6775,22 @@
      "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)",
      "gpu": false,
      "attempts": 1,
-     "load_ms": 7794,
+     "load_ms": 8235,
      "fps": {
-      "fps": 9.42,
-      "frame_ms_p50": 100,
+      "fps": 9.23,
+      "frame_ms_p50": 116.6,
       "frame_ms_p95": 116.7,
       "frames": 38,
-      "seconds": 4.03,
+      "seconds": 4.12,
       "draw_calls": 145,
       "triangles": 66240,
       "textures": 54,
       "geometries": 172,
-      "walked_m": 17.12
+      "walked_m": 17.57
      },
      "save_reload": {
       "ok": true,
-      "moved_m": 10.29,
+      "moved_m": 10.38,
       "restore_err_m": 0,
       "snapshot_equal": true,
       "reason": null
@@ -6848,13 +6858,13 @@
     "reach",
     "interact"
    ],
-   "build_ms": 128,
+   "build_ms": 243,
    "notes": [],
    "launch": {
     "headless_ok": true,
     "browser_ok": true,
-    "load_ms": 1040,
-    "cpu_load_ms": 7580,
+    "load_ms": 968,
+    "cpu_load_ms": 7765,
     "headless_load_ms": 0,
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
     "cpu_renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
@@ -6864,33 +6874,34 @@
     "done": 8,
     "pct": 100,
     "won": true,
-    "sim_seconds": 48.52
+    "sim_seconds": 48.43
    },
    "collision": {
     "stuck_recoveries": 0,
+    "unstuck_uses": 0,
     "falls": 0,
     "player_inside_solid_samples": 0,
-    "samples": 2439,
-    "steps": 2911,
+    "samples": 2181,
+    "steps": 2906,
     "examples": [],
     "replay_matches": true
    },
    "fps": {
     "fps": 60,
     "frame_ms_p50": 16.7,
-    "frame_ms_p95": 16.7,
-    "draw_calls": 172,
-    "triangles": 85566,
+    "frame_ms_p95": 16.8,
+    "draw_calls": 198,
+    "triangles": 85364,
     "frames": 241,
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)"
    },
    "fps_cpu_worst_case": {
-    "fps": 9.92,
-    "frame_ms_p50": 99.9,
-    "frame_ms_p95": 200,
-    "draw_calls": 172,
-    "triangles": 85566,
-    "frames": 40,
+    "fps": 11.27,
+    "frame_ms_p50": 83.4,
+    "frame_ms_p95": 100.1,
+    "draw_calls": 198,
+    "triangles": 85364,
+    "frames": 46,
     "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
    },
    "save_reload": {
@@ -7082,10 +7093,10 @@
      ],
      "terrain_abs": [
       0,
-      0.122,
-      0.387,
-      0.359,
-      0.11,
+      0.121,
+      0.39,
+      0.355,
+      0.112,
       0.022,
       0,
       0,
@@ -7093,17 +7104,17 @@
       0
      ],
      "terrain_rel": [
-      0.276,
+      0.28,
       0.155,
-      0.215,
-      0.174,
-      0.137,
+      0.213,
+      0.173,
+      0.135,
       0.019,
       0.011,
       0.013
      ],
      "terrain_form": [
-      0.353,
+      0.352,
       0.151,
       0
      ],
@@ -7115,46 +7126,44 @@
       "lib:cliff_rock": 0.047
      },
      "placement": {
-      "lib:signpost": 0.036,
-      "lib:stone_hut": 0.036,
-      "lib:well": 0.018,
-      "lib:lantern_post": 0.071,
-      "lib:fence": 0.036,
-      "lib:crate": 0.036,
-      "lib:barrel": 0.036,
-      "lib:campfire": 0.018,
-      "lib:tent": 0.036,
-      "lib:chest": 0.036,
-      "lib:cliff_rock": 0.054,
-      "lib:rock_large": 0.018,
-      "lib:altar": 0.036,
-      "lib:dead_tree": 0.125,
-      "lib:flowers": 0.089,
-      "lib:mushroom": 0.036,
-      "lib:ruin_arch": 0.018,
-      "lib:ruin_wall": 0.036,
-      "lib:ruin_pillar": 0.071,
-      "lib:rock_small": 0.036,
-      "lib:shrine": 0.018,
-      "lib:obelisk": 0.018,
-      "lib:shard": 0.089
+      "lib:signpost": 0.038,
+      "lib:stone_hut": 0.094,
+      "lib:well": 0.038,
+      "lib:lantern_post": 0.094,
+      "lib:fence": 0.038,
+      "lib:crate": 0.038,
+      "lib:barrel": 0.038,
+      "lib:campfire": 0.019,
+      "lib:tent": 0.038,
+      "lib:gate": 0.019,
+      "lib:cart": 0.019,
+      "lib:altar": 0.038,
+      "lib:dead_tree": 0.132,
+      "lib:flowers": 0.094,
+      "lib:mushroom": 0.038,
+      "lib:chest": 0.019,
+      "lib:cliff_rock": 0.057,
+      "lib:rock_large": 0.019,
+      "lib:shrine": 0.019,
+      "lib:obelisk": 0.019,
+      "lib:shard": 0.094
      },
      "footprint": [
       0,
       0,
-      0.196,
+      0.057,
       0,
-      0.071,
-      0.25,
-      0.036,
+      0.075,
+      0.264,
+      0.094,
+      0,
+      0.019,
+      0.17,
+      0.038,
+      0.151,
       0,
       0,
-      0.143,
-      0.036,
-      0.143,
-      0,
-      0,
-      0.125,
+      0.132,
       0
      ],
      "labels": [
@@ -7268,7 +7277,7 @@
      ],
      "screen": [
       0.48,
-      0.076,
+      0.077,
       0,
       0,
       0,
@@ -7287,8 +7296,8 @@
       0.019,
       0,
       0,
-      0.083,
-      0.083,
+      0.082,
+      0.082,
       0.086,
       0,
       0,
@@ -7304,7 +7313,7 @@
       0,
       0,
       0.003,
-      0.008,
+      0.009,
       0,
       0,
       0,
@@ -7330,21 +7339,21 @@
       0,
       0,
       0.001,
-      0.003
+      0.002
      ]
     }
    },
    "deterministic": {
     "rebuild_sha_equal": true,
-    "sha256": "651bd4b3a49005685aff1512437606f28a39dd5d9079703b0c065e89dbea174b"
+    "sha256": "288ce6c3c1d620ad1d586a1a04d4f4368ad8691322f79a649eead02b15b2256a"
    },
    "budgets": {
     "ok": true,
     "scale": "medium",
     "figures": {
-     "package_bytes": 400816,
-     "records": 105,
-     "placements": 56,
+     "package_bytes": 396827,
+     "records": 104,
+     "placements": 53,
      "scatter_instances": 85,
      "characters": 8,
      "texture_px": 256,
@@ -7364,17 +7373,17 @@
      "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
      "gpu": true,
      "attempts": 1,
-     "load_ms": 1040,
+     "load_ms": 968,
      "fps": {
       "fps": 60,
       "frame_ms_p50": 16.7,
-      "frame_ms_p95": 16.7,
+      "frame_ms_p95": 16.8,
       "frames": 241,
       "seconds": 4.02,
-      "draw_calls": 172,
-      "triangles": 85566,
+      "draw_calls": 198,
+      "triangles": 85364,
       "textures": 56,
-      "geometries": 209,
+      "geometries": 235,
       "walked_m": 18.24
      },
      "save_reload": {
@@ -7416,18 +7425,18 @@
      "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)",
      "gpu": false,
      "attempts": 1,
-     "load_ms": 7580,
+     "load_ms": 7765,
      "fps": {
-      "fps": 9.92,
-      "frame_ms_p50": 99.9,
-      "frame_ms_p95": 200,
-      "frames": 40,
-      "seconds": 4.03,
-      "draw_calls": 172,
-      "triangles": 85566,
+      "fps": 11.27,
+      "frame_ms_p50": 83.4,
+      "frame_ms_p95": 100.1,
+      "frames": 46,
+      "seconds": 4.08,
+      "draw_calls": 198,
+      "triangles": 85364,
       "textures": 56,
-      "geometries": 209,
-      "walked_m": 16.82
+      "geometries": 235,
+      "walked_m": 18.47
      },
      "save_reload": {
       "ok": true,
@@ -7465,7 +7474,7 @@
    },
    "headless_playtest": {
     "won": true,
-    "sim_seconds": 48.52,
+    "sim_seconds": 48.43,
     "plan_source": "solver",
     "reason": null
    }
@@ -7496,13 +7505,13 @@
     "reach",
     "activate"
    ],
-   "build_ms": 64,
+   "build_ms": 80,
    "notes": [],
    "launch": {
     "headless_ok": true,
     "browser_ok": true,
-    "load_ms": 940,
-    "cpu_load_ms": 7359,
+    "load_ms": 984,
+    "cpu_load_ms": 7151,
     "headless_load_ms": 0,
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
     "cpu_renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
@@ -7512,33 +7521,34 @@
     "done": 5,
     "pct": 100,
     "won": true,
-    "sim_seconds": 38.5
+    "sim_seconds": 24.13
    },
    "collision": {
-    "stuck_recoveries": 3,
+    "stuck_recoveries": 0,
+    "unstuck_uses": 0,
     "falls": 0,
     "player_inside_solid_samples": 0,
-    "samples": 2527,
-    "steps": 2310,
+    "samples": 1665,
+    "steps": 1448,
     "examples": [],
     "replay_matches": true
    },
    "fps": {
     "fps": 60,
     "frame_ms_p50": 16.7,
-    "frame_ms_p95": 16.7,
+    "frame_ms_p95": 16.8,
     "draw_calls": 205,
     "triangles": 105028,
     "frames": 241,
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)"
    },
    "fps_cpu_worst_case": {
-    "fps": 9.59,
-    "frame_ms_p50": 100,
-    "frame_ms_p95": 116.7,
-    "draw_calls": 205,
-    "triangles": 105028,
-    "frames": 39,
+    "fps": 8.68,
+    "frame_ms_p50": 116.7,
+    "frame_ms_p95": 133.4,
+    "draw_calls": 223,
+    "triangles": 107190,
+    "frames": 35,
     "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
    },
    "save_reload": {
@@ -7898,11 +7908,11 @@
       0,
       0,
       0,
-      0.035,
+      0.036,
       0,
       0,
       0,
-      0.091,
+      0.093,
       0.002,
       0,
       0,
@@ -7918,12 +7928,12 @@
       0,
       0,
       0,
-      0.66,
+      0.661,
       0.004,
       0,
       0,
-      0.037,
-      0.029,
+      0.036,
+      0.028,
       0.001,
       0,
       0,
@@ -7935,13 +7945,13 @@
    },
    "deterministic": {
     "rebuild_sha_equal": true,
-    "sha256": "2593072b8bd9d1adcc7f1328eeec2dd51c84174b87abe0b604ecb122f3e2b889"
+    "sha256": "d7ccf099c4f6f9bd711753ebf4313288d7d708d8b4995c06d8b8308a28c800f0"
    },
    "budgets": {
     "ok": true,
     "scale": "medium",
     "figures": {
-     "package_bytes": 350056,
+     "package_bytes": 350096,
      "records": 100,
      "placements": 41,
      "scatter_instances": 106,
@@ -7963,11 +7973,11 @@
      "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
      "gpu": true,
      "attempts": 1,
-     "load_ms": 940,
+     "load_ms": 984,
      "fps": {
       "fps": 60,
       "frame_ms_p50": 16.7,
-      "frame_ms_p95": 16.7,
+      "frame_ms_p95": 16.8,
       "frames": 241,
       "seconds": 4.02,
       "draw_calls": 205,
@@ -8015,18 +8025,18 @@
      "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)",
      "gpu": false,
      "attempts": 1,
-     "load_ms": 7359,
+     "load_ms": 7151,
      "fps": {
-      "fps": 9.59,
-      "frame_ms_p50": 100,
-      "frame_ms_p95": 116.7,
-      "frames": 39,
-      "seconds": 4.07,
-      "draw_calls": 205,
-      "triangles": 105028,
+      "fps": 8.68,
+      "frame_ms_p50": 116.7,
+      "frame_ms_p95": 133.4,
+      "frames": 35,
+      "seconds": 4.03,
+      "draw_calls": 223,
+      "triangles": 107190,
       "textures": 59,
       "geometries": 231,
-      "walked_m": 18.09
+      "walked_m": 15.92
      },
      "save_reload": {
       "ok": true,
@@ -8064,7 +8074,7 @@
    },
    "headless_playtest": {
     "won": true,
-    "sim_seconds": 38.5,
+    "sim_seconds": 24.13,
     "plan_source": "solver",
     "reason": null
    }
@@ -8093,13 +8103,13 @@
     "collect",
     "collect"
    ],
-   "build_ms": 66,
+   "build_ms": 98,
    "notes": [],
    "launch": {
     "headless_ok": true,
     "browser_ok": true,
-    "load_ms": 960,
-    "cpu_load_ms": 6983,
+    "load_ms": 892,
+    "cpu_load_ms": 6542,
     "headless_load_ms": 0,
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
     "cpu_renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
@@ -8113,6 +8123,7 @@
    },
    "collision": {
     "stuck_recoveries": 0,
+    "unstuck_uses": 0,
     "falls": 0,
     "player_inside_solid_samples": 0,
     "samples": 1526,
@@ -8130,12 +8141,12 @@
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)"
    },
    "fps_cpu_worst_case": {
-    "fps": 12,
-    "frame_ms_p50": 83.3,
-    "frame_ms_p95": 100,
-    "draw_calls": 133,
-    "triangles": 54798,
-    "frames": 49,
+    "fps": 10.62,
+    "frame_ms_p50": 100,
+    "frame_ms_p95": 116.7,
+    "draw_calls": 134,
+    "triangles": 54800,
+    "frames": 43,
     "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
    },
    "save_reload": {
@@ -8469,7 +8480,7 @@
       }
      ],
      "screen": [
-      0.003,
+      0.002,
       0,
       0,
       0,
@@ -8506,7 +8517,7 @@
       0,
       0,
       0.006,
-      0.009,
+      0.008,
       0,
       0,
       0,
@@ -8527,24 +8538,24 @@
       0,
       0,
       0.014,
-      0.004,
+      0.005,
       0,
       0,
       0,
-      0.735,
-      0.204
+      0.737,
+      0.203
      ]
     }
    },
    "deterministic": {
     "rebuild_sha_equal": true,
-    "sha256": "cd3949149c3e568a8e555c67a7a8de21ee5454b85d225703e4277f7ef9fa183e"
+    "sha256": "c1477d795eff1eb2663eb9af3521dc32eb5c5e5ffc12059f6565f5852f2a428a"
    },
    "budgets": {
     "ok": true,
     "scale": "small",
     "figures": {
-     "package_bytes": 298854,
+     "package_bytes": 298894,
      "records": 99,
      "placements": 34,
      "scatter_instances": 59,
@@ -8566,7 +8577,7 @@
      "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
      "gpu": true,
      "attempts": 1,
-     "load_ms": 960,
+     "load_ms": 892,
      "fps": {
       "fps": 60,
       "frame_ms_p50": 16.7,
@@ -8577,7 +8588,7 @@
       "triangles": 54798,
       "textures": 56,
       "geometries": 169,
-      "walked_m": 15.43
+      "walked_m": 15.51
      },
      "save_reload": {
       "ok": true,
@@ -8618,18 +8629,18 @@
      "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)",
      "gpu": false,
      "attempts": 1,
-     "load_ms": 6983,
+     "load_ms": 6542,
      "fps": {
-      "fps": 12,
-      "frame_ms_p50": 83.3,
-      "frame_ms_p95": 100,
-      "frames": 49,
-      "seconds": 4.08,
-      "draw_calls": 133,
-      "triangles": 54798,
+      "fps": 10.62,
+      "frame_ms_p50": 100,
+      "frame_ms_p95": 116.7,
+      "frames": 43,
+      "seconds": 4.05,
+      "draw_calls": 134,
+      "triangles": 54800,
       "textures": 56,
       "geometries": 169,
-      "walked_m": 15.66
+      "walked_m": 14.91
      },
      "save_reload": {
       "ok": true,
@@ -8693,23 +8704,23 @@
    "template": "lock_and_key",
    "objective_kinds": [
     "collect",
-    "activate",
-    "collect",
     "reach",
     "collect",
     "activate",
     "collect",
-    "reach",
+    "activate",
+    "collect",
+    "activate",
     "reach",
     "activate"
    ],
-   "build_ms": 144,
+   "build_ms": 379,
    "notes": [],
    "launch": {
     "headless_ok": true,
     "browser_ok": true,
-    "load_ms": 1023,
-    "cpu_load_ms": 8449,
+    "load_ms": 1100,
+    "cpu_load_ms": 8100,
     "headless_load_ms": 1,
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
     "cpu_renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
@@ -8719,14 +8730,15 @@
     "done": 10,
     "pct": 100,
     "won": true,
-    "sim_seconds": 129.38
+    "sim_seconds": 129.97
    },
    "collision": {
     "stuck_recoveries": 0,
+    "unstuck_uses": 0,
     "falls": 0,
     "player_inside_solid_samples": 0,
-    "samples": 5202,
-    "steps": 7763,
+    "samples": 5096,
+    "steps": 7798,
     "examples": [],
     "replay_matches": true
    },
@@ -8734,18 +8746,18 @@
     "fps": 60,
     "frame_ms_p50": 16.7,
     "frame_ms_p95": 16.7,
-    "draw_calls": 240,
-    "triangles": 160479,
+    "draw_calls": 260,
+    "triangles": 159417,
     "frames": 241,
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)"
    },
    "fps_cpu_worst_case": {
-    "fps": 7.81,
-    "frame_ms_p50": 133.3,
-    "frame_ms_p95": 150,
-    "draw_calls": 265,
-    "triangles": 141643,
-    "frames": 32,
+    "fps": 6.47,
+    "frame_ms_p50": 150.1,
+    "frame_ms_p95": 183.3,
+    "draw_calls": 300,
+    "triangles": 142653,
+    "frames": 26,
     "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
    },
    "save_reload": {
@@ -8964,47 +8976,45 @@
       "lib:reeds": 0.172
      },
      "placement": {
-      "lib:signpost": 0.037,
-      "lib:stone_hut": 0.019,
-      "lib:cottage": 0.019,
-      "lib:well": 0.019,
-      "lib:lantern_post": 0.056,
-      "lib:fence": 0.037,
-      "lib:crate": 0.056,
-      "lib:barrel": 0.037,
-      "lib:campfire": 0.019,
-      "lib:tent": 0.037,
-      "lib:chest": 0.037,
-      "lib:cliff_rock": 0.056,
-      "lib:rock_large": 0.056,
-      "lib:altar": 0.019,
-      "lib:broadleaf_tree": 0.13,
-      "lib:flowers": 0.056,
-      "lib:mushroom": 0.037,
-      "lib:ruin_arch": 0.019,
-      "lib:ruin_wall": 0.037,
-      "lib:ruin_pillar": 0.074,
-      "lib:rock_small": 0.037,
-      "lib:lighthouse": 0.019,
-      "lib:relic": 0.093
+      "lib:signpost": 0.04,
+      "lib:stone_hut": 0.06,
+      "lib:cottage": 0.04,
+      "lib:well": 0.04,
+      "lib:lantern_post": 0.08,
+      "lib:fence": 0.04,
+      "lib:crate": 0.06,
+      "lib:barrel": 0.04,
+      "lib:gate": 0.02,
+      "lib:cart": 0.02,
+      "lib:campfire": 0.02,
+      "lib:tent": 0.04,
+      "lib:chest": 0.02,
+      "lib:cliff_rock": 0.04,
+      "lib:rock_large": 0.06,
+      "lib:altar": 0.02,
+      "lib:broadleaf_tree": 0.14,
+      "lib:flowers": 0.06,
+      "lib:mushroom": 0.04,
+      "lib:lighthouse": 0.02,
+      "lib:relic": 0.1
      },
      "footprint": [
       0,
-      0.093,
-      0.019,
+      0.1,
+      0.02,
       0,
-      0.204,
-      0.019,
-      0.13,
-      0.056,
+      0.28,
+      0.02,
+      0.1,
+      0.12,
       0,
-      0.278,
-      0.13,
-      0.019,
+      0.12,
+      0.18,
       0,
-      0.019,
-      0.037,
-      0
+      0,
+      0.02,
+      0.02,
+      0.02
      ],
      "labels": [
       "ruins",
@@ -9129,11 +9139,11 @@
       0,
       0,
       0.027,
-      0.505,
+      0.503,
       0,
       0,
       0,
-      0.108,
+      0.11,
       0.006,
       0,
       0,
@@ -9144,13 +9154,13 @@
       0,
       0,
       0,
-      0.004,
+      0.003,
       0.002,
       0,
       0,
       0,
-      0.021,
-      0.097,
+      0.026,
+      0.094,
       0,
       0,
       0,
@@ -9165,8 +9175,8 @@
       0,
       0,
       0,
-      0.002,
       0.001,
+      0,
       0,
       0,
       0,
@@ -9177,15 +9187,15 @@
    },
    "deterministic": {
     "rebuild_sha_equal": true,
-    "sha256": "80409fbdc9892abb7c824ffc7bac52197953bed4c117727cb749beb2447fd3f7"
+    "sha256": "f48871d5bd2bbe247042beb4cfe0d33f018ab3efae6f2544f0ba9e89f8c43674"
    },
    "budgets": {
     "ok": true,
     "scale": "medium",
     "figures": {
-     "package_bytes": 386032,
-     "records": 105,
-     "placements": 54,
+     "package_bytes": 382060,
+     "records": 104,
+     "placements": 50,
      "scatter_instances": 251,
      "characters": 5,
      "texture_px": 256,
@@ -9205,18 +9215,18 @@
      "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
      "gpu": true,
      "attempts": 1,
-     "load_ms": 1023,
+     "load_ms": 1100,
      "fps": {
       "fps": 60,
       "frame_ms_p50": 16.7,
       "frame_ms_p95": 16.7,
       "frames": 241,
       "seconds": 4.02,
-      "draw_calls": 240,
-      "triangles": 160479,
+      "draw_calls": 260,
+      "triangles": 159417,
       "textures": 57,
-      "geometries": 276,
-      "walked_m": 18.24
+      "geometries": 299,
+      "walked_m": 18.32
      },
      "save_reload": {
       "ok": true,
@@ -9257,18 +9267,18 @@
      "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)",
      "gpu": false,
      "attempts": 1,
-     "load_ms": 8449,
+     "load_ms": 8100,
      "fps": {
-      "fps": 7.81,
-      "frame_ms_p50": 133.3,
-      "frame_ms_p95": 150,
-      "frames": 32,
-      "seconds": 4.1,
-      "draw_calls": 265,
-      "triangles": 141643,
+      "fps": 6.47,
+      "frame_ms_p50": 150.1,
+      "frame_ms_p95": 183.3,
+      "frames": 26,
+      "seconds": 4.02,
+      "draw_calls": 300,
+      "triangles": 142653,
       "textures": 57,
-      "geometries": 276,
-      "walked_m": 15.09
+      "geometries": 299,
+      "walked_m": 12.39
      },
      "save_reload": {
       "ok": true,
@@ -9306,7 +9316,7 @@
    },
    "headless_playtest": {
     "won": true,
-    "sim_seconds": 129.38,
+    "sim_seconds": 129.97,
     "plan_source": "solver",
     "reason": null
    }
@@ -9337,13 +9347,13 @@
     "reach",
     "activate"
    ],
-   "build_ms": 113,
+   "build_ms": 249,
    "notes": [],
    "launch": {
     "headless_ok": true,
     "browser_ok": true,
-    "load_ms": 967,
-    "cpu_load_ms": 7801,
+    "load_ms": 1071,
+    "cpu_load_ms": 7503,
     "headless_load_ms": 2,
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
     "cpu_renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
@@ -9353,33 +9363,34 @@
     "done": 5,
     "pct": 100,
     "won": true,
-    "sim_seconds": 71.62
+    "sim_seconds": 71.98
    },
    "collision": {
     "stuck_recoveries": 0,
+    "unstuck_uses": 0,
     "falls": 0,
     "player_inside_solid_samples": 0,
-    "samples": 2557,
-    "steps": 4297,
+    "samples": 2524,
+    "steps": 4319,
     "examples": [],
     "replay_matches": true
    },
    "fps": {
     "fps": 60,
     "frame_ms_p50": 16.7,
-    "frame_ms_p95": 16.8,
+    "frame_ms_p95": 16.7,
     "draw_calls": 379,
     "triangles": 373529,
     "frames": 241,
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)"
    },
    "fps_cpu_worst_case": {
-    "fps": 5.88,
-    "frame_ms_p50": 166.6,
-    "frame_ms_p95": 200,
+    "fps": 5.48,
+    "frame_ms_p50": 183.3,
+    "frame_ms_p95": 200.1,
     "draw_calls": 381,
     "triangles": 350617,
-    "frames": 24,
+    "frames": 22,
     "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
    },
    "save_reload": {
@@ -9828,13 +9839,13 @@
    },
    "deterministic": {
     "rebuild_sha_equal": true,
-    "sha256": "12e78f37b60c8c555d36e55706cbfbf0dfa9551248947679e1304c90dbdaf60c"
+    "sha256": "368662b7b63ae23ec40b091166daa7eb3225fd77fe5de262d6834c813e4b07b7"
    },
    "budgets": {
     "ok": true,
     "scale": "large",
     "figures": {
-     "package_bytes": 387594,
+     "package_bytes": 387634,
      "records": 100,
      "placements": 56,
      "scatter_instances": 824,
@@ -9856,18 +9867,18 @@
      "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
      "gpu": true,
      "attempts": 1,
-     "load_ms": 967,
+     "load_ms": 1071,
      "fps": {
       "fps": 60,
       "frame_ms_p50": 16.7,
-      "frame_ms_p95": 16.8,
+      "frame_ms_p95": 16.7,
       "frames": 241,
       "seconds": 4.02,
       "draw_calls": 379,
       "triangles": 373529,
       "textures": 55,
       "geometries": 417,
-      "walked_m": 18.17
+      "walked_m": 18.32
      },
      "save_reload": {
       "ok": true,
@@ -9908,18 +9919,18 @@
      "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)",
      "gpu": false,
      "attempts": 1,
-     "load_ms": 7801,
+     "load_ms": 7503,
      "fps": {
-      "fps": 5.88,
-      "frame_ms_p50": 166.6,
-      "frame_ms_p95": 200,
-      "frames": 24,
-      "seconds": 4.08,
+      "fps": 5.48,
+      "frame_ms_p50": 183.3,
+      "frame_ms_p95": 200.1,
+      "frames": 22,
+      "seconds": 4.02,
       "draw_calls": 381,
       "triangles": 350617,
       "textures": 55,
       "geometries": 417,
-      "walked_m": 11.49
+      "walked_m": 10.59
      },
      "save_reload": {
       "ok": true,
@@ -9957,7 +9968,7 @@
    },
    "headless_playtest": {
     "won": true,
-    "sim_seconds": 71.62,
+    "sim_seconds": 71.98,
     "plan_source": "solver",
     "reason": null
    }
@@ -9990,13 +10001,13 @@
     "reach",
     "interact"
    ],
-   "build_ms": 101,
+   "build_ms": 134,
    "notes": [],
    "launch": {
     "headless_ok": true,
     "browser_ok": true,
-    "load_ms": 1125,
-    "cpu_load_ms": 6791,
+    "load_ms": 945,
+    "cpu_load_ms": 6696,
     "headless_load_ms": 0,
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
     "cpu_renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
@@ -10010,6 +10021,7 @@
    },
    "collision": {
     "stuck_recoveries": 0,
+    "unstuck_uses": 0,
     "falls": 0,
     "player_inside_solid_samples": 0,
     "samples": 1569,
@@ -10020,19 +10032,19 @@
    "fps": {
     "fps": 60,
     "frame_ms_p50": 16.7,
-    "frame_ms_p95": 16.8,
+    "frame_ms_p95": 16.7,
     "draw_calls": 142,
     "triangles": 89430,
     "frames": 241,
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)"
    },
    "fps_cpu_worst_case": {
-    "fps": 6.97,
-    "frame_ms_p50": 133.4,
-    "frame_ms_p95": 183.4,
-    "draw_calls": 147,
-    "triangles": 66524,
-    "frames": 28,
+    "fps": 7.69,
+    "frame_ms_p50": 133.3,
+    "frame_ms_p95": 150,
+    "draw_calls": 143,
+    "triangles": 66432,
+    "frames": 31,
     "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
    },
    "save_reload": {
@@ -10475,13 +10487,13 @@
    },
    "deterministic": {
     "rebuild_sha_equal": true,
-    "sha256": "613d5fff7ac956aadef54ba3d0b84692fbc4454c4021b17952ba7968ae36ee9f"
+    "sha256": "00b59669b1d4cf073d495358b9f49e82bd322b24f842c7bc7d5beb2c7005d608"
    },
    "budgets": {
     "ok": true,
     "scale": "small",
     "figures": {
-     "package_bytes": 323634,
+     "package_bytes": 323674,
      "records": 95,
      "placements": 48,
      "scatter_instances": 40,
@@ -10503,18 +10515,18 @@
      "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
      "gpu": true,
      "attempts": 1,
-     "load_ms": 1125,
+     "load_ms": 945,
      "fps": {
       "fps": 60,
       "frame_ms_p50": 16.7,
-      "frame_ms_p95": 16.8,
+      "frame_ms_p95": 16.7,
       "frames": 241,
       "seconds": 4.02,
       "draw_calls": 142,
       "triangles": 89430,
       "textures": 51,
       "geometries": 178,
-      "walked_m": 18.32
+      "walked_m": 18.25
      },
      "save_reload": {
       "ok": true,
@@ -10555,18 +10567,18 @@
      "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)",
      "gpu": false,
      "attempts": 1,
-     "load_ms": 6791,
+     "load_ms": 6696,
      "fps": {
-      "fps": 6.97,
-      "frame_ms_p50": 133.4,
-      "frame_ms_p95": 183.4,
-      "frames": 28,
-      "seconds": 4.02,
-      "draw_calls": 147,
-      "triangles": 66524,
+      "fps": 7.69,
+      "frame_ms_p50": 133.3,
+      "frame_ms_p95": 150,
+      "frames": 31,
+      "seconds": 4.03,
+      "draw_calls": 143,
+      "triangles": 66432,
       "textures": 51,
       "geometries": 178,
-      "walked_m": 13.3
+      "walked_m": 14.65
      },
      "save_reload": {
       "ok": true,
@@ -10635,14 +10647,14 @@
     "reach",
     "reach"
    ],
-   "build_ms": 92,
+   "build_ms": 251,
    "notes": [],
    "launch": {
     "headless_ok": true,
     "browser_ok": true,
-    "load_ms": 825,
-    "cpu_load_ms": 6905,
-    "headless_load_ms": 0,
+    "load_ms": 826,
+    "cpu_load_ms": 6762,
+    "headless_load_ms": 1,
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
     "cpu_renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
    },
@@ -10655,6 +10667,7 @@
    },
    "collision": {
     "stuck_recoveries": 0,
+    "unstuck_uses": 0,
     "falls": 0,
     "player_inside_solid_samples": 0,
     "samples": 1218,
@@ -10665,19 +10678,19 @@
    "fps": {
     "fps": 60,
     "frame_ms_p50": 16.7,
-    "frame_ms_p95": 16.8,
+    "frame_ms_p95": 16.7,
     "draw_calls": 232,
     "triangles": 126049,
     "frames": 241,
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)"
    },
    "fps_cpu_worst_case": {
-    "fps": 7.65,
-    "frame_ms_p50": 133.3,
-    "frame_ms_p95": 150,
-    "draw_calls": 233,
-    "triangles": 126105,
-    "frames": 31,
+    "fps": 8.96,
+    "frame_ms_p50": 116.6,
+    "frame_ms_p95": 133.4,
+    "draw_calls": 232,
+    "triangles": 126049,
+    "frames": 36,
     "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
    },
    "save_reload": {
@@ -11082,13 +11095,13 @@
    },
    "deterministic": {
     "rebuild_sha_equal": true,
-    "sha256": "9d7de28df5d1ae25f19f13f7895c6b3aac40ab004a40515ae2d651d91bf4ce2d"
+    "sha256": "cab9bef3d3a4d50677a5a82663e2e35c824ddf004fbb8c43540e7870aab7501f"
    },
    "budgets": {
     "ok": true,
     "scale": "medium",
     "figures": {
-     "package_bytes": 356772,
+     "package_bytes": 356810,
      "records": 94,
      "placements": 45,
      "scatter_instances": 232,
@@ -11110,11 +11123,11 @@
      "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
      "gpu": true,
      "attempts": 1,
-     "load_ms": 825,
+     "load_ms": 826,
      "fps": {
       "fps": 60,
       "frame_ms_p50": 16.7,
-      "frame_ms_p95": 16.8,
+      "frame_ms_p95": 16.7,
       "frames": 241,
       "seconds": 4.02,
       "draw_calls": 232,
@@ -11162,18 +11175,18 @@
      "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)",
      "gpu": false,
      "attempts": 1,
-     "load_ms": 6905,
+     "load_ms": 6762,
      "fps": {
-      "fps": 7.65,
-      "frame_ms_p50": 133.3,
-      "frame_ms_p95": 150,
-      "frames": 31,
-      "seconds": 4.05,
-      "draw_calls": 233,
-      "triangles": 126105,
+      "fps": 8.96,
+      "frame_ms_p50": 116.6,
+      "frame_ms_p95": 133.4,
+      "frames": 36,
+      "seconds": 4.02,
+      "draw_calls": 232,
+      "triangles": 126049,
       "textures": 56,
       "geometries": 266,
-      "walked_m": 14.64
+      "walked_m": 16.52
      },
      "save_reload": {
       "ok": true,
@@ -11241,13 +11254,13 @@
     "activate",
     "survive"
    ],
-   "build_ms": 71,
+   "build_ms": 109,
    "notes": [],
    "launch": {
     "headless_ok": true,
     "browser_ok": true,
-    "load_ms": 885,
-    "cpu_load_ms": 6994,
+    "load_ms": 909,
+    "cpu_load_ms": 6663,
     "headless_load_ms": 0,
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
     "cpu_renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
@@ -11261,6 +11274,7 @@
    },
    "collision": {
     "stuck_recoveries": 4,
+    "unstuck_uses": 0,
     "falls": 0,
     "player_inside_solid_samples": 0,
     "samples": 3721,
@@ -11278,12 +11292,12 @@
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)"
    },
    "fps_cpu_worst_case": {
-    "fps": 11.45,
+    "fps": 10.69,
     "frame_ms_p50": 83.4,
-    "frame_ms_p95": 100,
+    "frame_ms_p95": 116.7,
     "draw_calls": 118,
     "triangles": 39814,
-    "frames": 46,
+    "frames": 44,
     "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
    },
    "save_reload": {
@@ -11740,8 +11754,8 @@
       0.12,
       0,
       0.001,
-      0.022,
-      0.311,
+      0.023,
+      0.309,
       0,
       0,
       0,
@@ -11756,13 +11770,13 @@
       0,
       0,
       0,
-      0.005,
-      0.142,
-      0.001,
+      0.004,
+      0.14,
+      0,
       0,
       0.003,
-      0.175,
-      0.006,
+      0.177,
+      0.007,
       0,
       0,
       0,
@@ -11777,8 +11791,8 @@
       0,
       0,
       0,
-      0.028,
-      0.022,
+      0.03,
+      0.023,
       0,
       0,
       0.001,
@@ -11788,13 +11802,13 @@
    },
    "deterministic": {
     "rebuild_sha_equal": true,
-    "sha256": "da90ccf915118863c2ce4390d1030b30e13534b9b0d86a597bc3f3272ce82e89"
+    "sha256": "d6c79090c7e3809242bc2c268de8ed323811c3d2f17648ed82249dac134d9321"
    },
    "budgets": {
     "ok": true,
     "scale": "small",
     "figures": {
-     "package_bytes": 290349,
+     "package_bytes": 290386,
      "records": 91,
      "placements": 35,
      "scatter_instances": 23,
@@ -11816,7 +11830,7 @@
      "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
      "gpu": true,
      "attempts": 1,
-     "load_ms": 885,
+     "load_ms": 909,
      "fps": {
       "fps": 60,
       "frame_ms_p50": 16.7,
@@ -11868,18 +11882,18 @@
      "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)",
      "gpu": false,
      "attempts": 1,
-     "load_ms": 6994,
+     "load_ms": 6663,
      "fps": {
-      "fps": 11.45,
+      "fps": 10.69,
       "frame_ms_p50": 83.4,
-      "frame_ms_p95": 100,
-      "frames": 46,
-      "seconds": 4.02,
+      "frame_ms_p95": 116.7,
+      "frames": 44,
+      "seconds": 4.12,
       "draw_calls": 118,
       "triangles": 39814,
       "textures": 52,
       "geometries": 168,
-      "walked_m": 16.51
+      "walked_m": 16.66
      },
      "save_reload": {
       "ok": true,
@@ -11948,14 +11962,14 @@
     "defeat",
     "talk"
    ],
-   "build_ms": 118,
+   "build_ms": 253,
    "notes": [],
    "launch": {
     "headless_ok": true,
     "browser_ok": true,
-    "load_ms": 875,
-    "cpu_load_ms": 8213,
-    "headless_load_ms": 0,
+    "load_ms": 1008,
+    "cpu_load_ms": 7730,
+    "headless_load_ms": 1,
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
     "cpu_renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
    },
@@ -11964,33 +11978,34 @@
     "done": 5,
     "pct": 100,
     "won": true,
-    "sim_seconds": 65.08
+    "sim_seconds": 65.7
    },
    "collision": {
     "stuck_recoveries": 0,
+    "unstuck_uses": 0,
     "falls": 0,
     "player_inside_solid_samples": 0,
-    "samples": 2744,
-    "steps": 3905,
+    "samples": 2959,
+    "steps": 3942,
     "examples": [],
     "replay_matches": true
    },
    "fps": {
     "fps": 60,
     "frame_ms_p50": 16.7,
-    "frame_ms_p95": 16.8,
+    "frame_ms_p95": 16.7,
     "draw_calls": 226,
     "triangles": 153186,
     "frames": 241,
     "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)"
    },
    "fps_cpu_worst_case": {
-    "fps": 8.5,
-    "frame_ms_p50": 116.7,
-    "frame_ms_p95": 166.6,
-    "draw_calls": 228,
-    "triangles": 130274,
-    "frames": 35,
+    "fps": 7.38,
+    "frame_ms_p50": 133.4,
+    "frame_ms_p95": 150.1,
+    "draw_calls": 229,
+    "triangles": 130354,
+    "frames": 30,
     "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
    },
    "save_reload": {
@@ -12348,8 +12363,8 @@
       }
      ],
      "screen": [
-      0.198,
-      0.312,
+      0.196,
+      0.31,
       0.024,
       0,
       0,
@@ -12365,12 +12380,12 @@
       0,
       0,
       0.008,
-      0.04,
+      0.039,
       0.004,
       0,
       0.001,
-      0.126,
-      0.184,
+      0.124,
+      0.183,
       0.001,
       0,
       0,
@@ -12384,46 +12399,46 @@
       0,
       0,
       0,
-      0.002,
+      0.003,
       0.01,
-      0.028,
-      0.001,
+      0.031,
+      0.002,
       0,
       0.001,
-      0.02,
-      0.017,
+      0.025,
+      0.006,
       0,
       0,
       0,
-      0.001,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0.001,
       0.001,
       0,
       0,
       0,
       0,
-      0.005
+      0,
+      0,
+      0,
+      0,
+      0,
+      0.001,
+      0.001,
+      0.005,
+      0,
+      0,
+      0.001,
+      0.011
      ]
     }
    },
    "deterministic": {
     "rebuild_sha_equal": true,
-    "sha256": "3e2e7d2f15c1c69a59f208b14086d7f42a0b8b34335415025942a49c6c414022"
+    "sha256": "fa3c9719bb175b5dbc7ea4d984de9383e7ee9ec19fc1e067a3c2b0e941540f4e"
    },
    "budgets": {
     "ok": true,
     "scale": "large",
     "figures": {
-     "package_bytes": 391471,
+     "package_bytes": 391511,
      "records": 103,
      "placements": 51,
      "scatter_instances": 216,
@@ -12445,11 +12460,11 @@
      "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
      "gpu": true,
      "attempts": 1,
-     "load_ms": 875,
+     "load_ms": 1008,
      "fps": {
       "fps": 60,
       "frame_ms_p50": 16.7,
-      "frame_ms_p95": 16.8,
+      "frame_ms_p95": 16.7,
       "frames": 241,
       "seconds": 4.02,
       "draw_calls": 226,
@@ -12497,18 +12512,18 @@
      "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)",
      "gpu": false,
      "attempts": 1,
-     "load_ms": 8213,
+     "load_ms": 7730,
      "fps": {
-      "fps": 8.5,
-      "frame_ms_p50": 116.7,
-      "frame_ms_p95": 166.6,
-      "frames": 35,
-      "seconds": 4.12,
-      "draw_calls": 228,
-      "triangles": 130274,
+      "fps": 7.38,
+      "frame_ms_p50": 133.4,
+      "frame_ms_p95": 150.1,
+      "frames": 30,
+      "seconds": 4.07,
+      "draw_calls": 229,
+      "triangles": 130354,
       "textures": 58,
       "geometries": 257,
-      "walked_m": 14.64
+      "walked_m": 12.62
      },
      "save_reload": {
       "ok": true,
@@ -12546,7 +12561,7 @@
    },
    "headless_playtest": {
     "won": true,
-    "sim_seconds": 65.08,
+    "sim_seconds": 65.7,
     "plan_source": "solver",
     "reason": null
    }
