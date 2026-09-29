@@ -6,7 +6,7 @@ This is one controlled candidate built from the completed lanes. Nothing has bee
 
 | Repo | Branch | Base | Head |
 |---|---|---|---|
-| backend (`dcs-games-backend`) | `integration/dcs-games-candidate-29sep2026` | Games-D `c1a23e0` | this commit's parent chain (see `git log`) |
+| backend (`dcs-games-backend`) | `integration/dcs-games-candidate-29sep2026` | Games-D `c1a23e0` | the commit that adds this final gate section (code unchanged since `9218595`) |
 | frontend (`dcs-games-frontend`) | `integration/dcs-games-frontend-candidate-29sep2026` | recovery `e64ffe7` | `3c2e092` |
 | netcode (`dcs-games-netcode`) | `integration/dcs-games-netcode-hardening-29sep2026` | Games-C netcode `bdd8b74` | `4f51915` |
 
@@ -99,11 +99,11 @@ Merged `32d697e`.
 | API | 142 / 142. Includes `integration-candidate` (15) and `integration-restart` (1). |
 | load | 6 / 6 |
 | Games-B | 190 / 190 |
-| Games-B browser | 27 / 27 |
+| Games-B browser | 27 / 27 (final gate run) |
 | Games-D | 130 / 130 |
 | Games-C | inside unit (7 suites) |
-| browser + responsive + security | 200 / 206 in the full run. See the note below. |
-| e2e / game-flow | 12 / 12 |
+| browser + responsive + security | **206 / 206** in the final gate run. See "Final staging-preview gate" below. |
+| e2e / game-flow | 12 / 12 (final gate run) |
 | netcode | exit 0, 0 failures (17 suites) |
 | deterministic rebuild | Lanternfall: two rebuilds are identical to each other and to the committed build. All 18 Games-D fallback games rebuild identical and match the committed files; 18/18 won headless. |
 | save/reload | a world, its versions, B5 state, v2 ledger, undo stack and staging package all survive a server restart |
@@ -114,12 +114,41 @@ Merged `32d697e`.
 - `runtime-perf` passed 16/16 twice in a row.
 - The `play-v3` diff does not touch the frame loop.
 - At `52be8b7` the same suite was 164/164.
-- These are load-induced, but a clean full run on an idle machine is still owed.
+- These were load-induced. The final gate run below settles it.
+
+## Final staging-preview gate (29 Sep 2026, 19:27–19:59 IST)
+
+This was one clean full run, with no code changes before or during it.
+- **Candidate:** backend `9218595` and a `git archive` of frontend `3c2e092`.
+- **Environment:** `CEREBRAS_API_KEY*` and `DCS_GAMES_ENGINE_EXTERNAL` unset; `DCS_PROVIDERS_OFFLINE=1`.
+
+| Suite | Tests | Pass | Fail | Cancelled | Skipped |
+|---|---|---|---|---|---|
+| `test:browser` (browser, responsive, a11y, B4/B6, security edge) | 206 | 206 | 0 | 0 | 0 |
+| `test:gamesb:browser` | 27 | 27 | 0 | 0 | 0 |
+| `test:e2e` (game flow) | 12 | 12 | 0 | 0 | 0 |
+| **Total** | **245** | **245** | **0** | 0 | 0 |
+
+**Load average**, sampled every 30s (65 samples):
+- At start: 5.78 / 7.35 / 11.22.
+- During the run: mean 1-minute 11.85, mean 5-minute 11.64, peak 1-minute 28.83 (from other applications on the host).
+- On 14 cores, the suite passed under that load with no timeouts. That confirms the 6 earlier timeouts were environmental.
+
+The Games-B browser suite rewrites the committed evidence screenshots under `docs/games-b/evidence/`. Those rewrites were discarded, so Games-B's recorded evidence is unchanged.
 
 **Paid calls.**
 - REAL_API_CALLS = 0.
 - A preload that logs any non-loopback socket or fetch recorded 0 attempts across the unit, tsx, API and load suites.
 - Browser tests stub the API at `https://stub.api.invalid`.
+
+## Staging follow-ups (not integration regressions)
+
+Items 1, 3, 4 and 5 below do not block a staging preview:
+- Multiplayer stays disabled, so `/persistence/delta` is not reached.
+- Tester accounts and the migration are environment setup.
+- The package limits are documented.
+
+Item 2 (netcode push and CI re-pin) and every deploy still need founder approval. Item 6 is carried over from the QA sweep and was not addressed in this candidate.
 
 ## Blockers and open items
 
