@@ -66,6 +66,7 @@ function env() {
     DCS_DATA_DIR: DATA,
     PAYMENTS_LIVE: "0",
     NODE_ENV: "test",
+    DCS_PUBLISH_VISIBILITY: "public",   // anonymous catalogue reads are what this suite loads; internal is the default and is pinned in test/games-b-backend-closure.test.mjs
     DCS_PROVIDERS_OFFLINE: "1",
     DCS_INTERNAL_TESTERS: "loadsmoke@dcsai.ai",
     ATLAS_PRIVATE_KEY: ATLAS_SEED,

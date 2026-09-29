@@ -30,7 +30,7 @@ async function boot(instanceId) {
       ...process.env, PORT: String(port), DCS_DATA_DIR: dir,
       DCS_INSTANCE_ID: instanceId,
       DCS_AUTH_SECRET: crypto.randomBytes(16).toString("hex"),
-      PAYMENTS_LIVE: "0", NODE_ENV: "test", DCS_PROVIDERS_OFFLINE: "1",
+      PAYMENTS_LIVE: "0", NODE_ENV: "test", DCS_PUBLISH_VISIBILITY: "public",   // the PUBLIC (production-canary) visibility semantics are what this suite pins; internal is the default and is pinned in test/games-b-backend-closure.test.mjs DCS_PROVIDERS_OFFLINE: "1",
       SUPABASE_URL: "", SUPABASE_SERVICE_ROLE_KEY: "", DATABASE_URL: "",
       CEREBRAS_API_KEY: "", CEREBRAS_API_KEY_1: "", CEREBRAS_API_KEY_2: "",
     },

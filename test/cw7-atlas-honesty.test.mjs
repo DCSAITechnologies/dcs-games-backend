@@ -207,7 +207,7 @@ before(async () => {
     env: {
       ...process.env,
       PORT: String(PORT), DCS_AUTH_SECRET: SECRET, DCS_DATA_DIR: DATA,
-      PAYMENTS_LIVE: "0", NODE_ENV: "test", DCS_INTERNAL_TESTERS: "owner@dcsai.ai",
+      PAYMENTS_LIVE: "0", NODE_ENV: "test", DCS_PUBLISH_VISIBILITY: "public",   // the PUBLIC (production-canary) visibility semantics are what this suite pins; internal is the default and is pinned in test/games-b-backend-closure.test.mjs DCS_INTERNAL_TESTERS: "owner@dcsai.ai",
       // A real signing key, so publishing genuinely signs rather than skipping.
       // Deliberately a DIFFERENT key from this process's: the server must verify
       // its own receipts with its own key, not with the test harness's.

@@ -32,6 +32,7 @@ import { planRollback, recordRollback } from "./src/v3/expansion/rollback.mjs"; 
 import { diffManifests } from "./src/v3/expansion/diff.mjs";                 // B6: what actually changed between two versions
 import { createSubscriptionsService } from "./src/core/subscriptions.mjs";
 import path from "node:path";
+import fs from "node:fs";
 import { createCollection } from "./src/core/collection.mjs";                 // durable rows for the issued-receipt store
 import { createLiveStateService, mergeLiveState, cw5RuntimeStateSource, companionMemorySource } from "./src/core/livestate.mjs";
 import { readBuildInfo } from "./src/core/build-info.mjs";
@@ -45,7 +46,7 @@ import { createMarketplaceService } from "./src/core/marketplace.mjs";        //
 import { createProgressionService } from "./src/core/progression.mjs";        // B15: retention from measured data only
 import { createSocialService } from "./src/core/social.mjs";                    // B15: durable profiles, friends, parties, teams, studios, discovery
 import { createSafetyService, REPORT_REASONS, MOD_ACTIONS, REPORT_STATES, AGE_TIERS, MEDIA_KINDS, CONSENT_SOURCES, AGE_METHODS, SUBJECT_TYPES } from "./src/core/safety.mjs";                    // A5: age tiers, consent, report/block, moderation audit
-import { assertSchema, currentVersion } from "./src/core/schema.mjs";           // A2: boot-time schema assertion — refuse to serve an unsupported schema
+import { assertSchema, currentVersion, REQUIRED_SCHEMA_VERSION } from "./src/core/schema.mjs";           // A2: boot-time schema assertion — refuse to serve an unsupported schema
 import { createWorldRepository, manifestHash } from "./src/core/worldstore.mjs";          // A3: durable, lossless, idempotent, ownership-aware world persistence
 import { createPrincipalResolver } from "./src/core/principal.mjs";         // A1: PARENT-OWNED canonical principal. No x-user-id fallback, ever.
 import { AppError, Errors, newCorrelationId, logError, optional } from "./src/core/errors.mjs"; // A4: structured errors, correlation ids, no silent swallow
@@ -55,6 +56,7 @@ import { createWorldMemoryV2WithPatchModule, createFsAdapter } from "./src/v3/ga
 import { buildStagingPackage, atlasEnvSigner, createStagingRegistry, PublishError } from "./src/v3/gamesc/publish/index.mjs"; // GAMES-C: signed, content-addressed STAGING packages
 import { guardManifest, guardUserPrompt, createUserDailyCap } from "./src/v3/gamesc/guard/index.mjs";                   // GAMES-C: manifest/prompt threat checks + spend cap
 import { createGenerationEngine } from "./src/v3/engine/index.mjs";                                                       // GAMES-A: provider engine, local-only unless approved
+import { createAuditLog, promptFields } from "./src/core/audit-log.mjs";                                                  // Games-B closure: append-only prompt/output/publish log
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const PAYMENTS_LIVE = process.env.PAYMENTS_LIVE === "1";
@@ -165,6 +167,74 @@ const { memory: worldMemV2 } = await createWorldMemoryV2WithPatchModule({ adapte
 // publish that needs it, not the boot of every other route.
 let _stagingRegistry: any = null;
 const stagingRegistry = () => (_stagingRegistry ??= createStagingRegistry({ root: path.join(DATA_DIR, "staging-packages"), readOnly: process.env.DCS_STAGING_READONLY === "1" }));
+// STAGING INTERNAL PUBLISH CONTROL (Games-B closure, 30 Sep 2026).
+//
+// Publishing is a builder action for internal testers only (mustBeInternalTester
+// on the publish route). What was missing was the other half: a published world
+// was readable, listable and discoverable by ANYONE, which is a public launch
+// in all but name — and the public bar (classifier, human review, takedown) is
+// the production-canary gate, not this one. So visibility is its own switch:
+//
+//   internal (DEFAULT)  a published world is visible to its owner and to
+//                       internal testers only. Everyone else gets exactly the
+//                       answer a world that does not exist gives, and every
+//                       public listing is empty for them.
+//   public              the pre-closure behaviour. Set explicitly, and only
+//                       once the production-canary moderation bar is met.
+//
+// Anything other than the literal "public" is internal: a typo fails closed.
+const PUBLISH_VISIBILITY: "internal" | "public" = String(process.env.DCS_PUBLISH_VISIBILITY || "").trim().toLowerCase() === "public" ? "public" : "internal";
+const TESTERS_CONFIGURED = String(process.env.DCS_INTERNAL_TESTERS || "").split(",").map((s) => s.trim()).filter(Boolean).length;
+/** May this caller see a PUBLISHED world they do not own? */
+function canSeePublished(p: any) { return PUBLISH_VISIBILITY === "public" || !!p?.isInternalTester; }
+/** The published catalogue as THIS caller may see it. */
+async function listPublishedFor(p: any, limit: number) { return canSeePublished(p) ? await repo.listPublished(limit) : []; }
+/**
+ * repo.get with the visibility rule applied on top. The repository already
+ * decides drafts (owner only); this decides published worlds in internal mode.
+ * A refusal is the same 404 a missing world gets, including the requireOwner
+ * path's 403-for-published, which would otherwise confirm the id exists.
+ */
+async function getWorldFor(p: any, worldId: string, opts: any) {
+  let rec: any;
+  try { rec = await repo.get(worldId, opts); }
+  catch (e: any) {
+    if (e instanceof AppError && e.httpStatus === 403 && !canSeePublished(p)) throw Errors.notFound(`world ${worldId}`);
+    throw e;
+  }
+  if (rec.state === "published" && !canSeePublished(p) && !(p?.id != null && rec.owner_id === p.id)) throw Errors.notFound(`world ${worldId}`);
+  return rec;
+}
+
+// Append-only prompt / output-hash / publish-action log. See src/core/audit-log.mjs.
+const auditLog = createAuditLog({ dir: path.join(DATA_DIR, "audit") });
+{
+  const bc: any = auditLog.describe().boot_check;
+  if (!bc.ok) console.error(JSON.stringify({ level: "error", alert: "AUDIT_LOG_CHAIN_BROKEN", broken_at: bc.broken_at, reason: bc.reason, ts: new Date().toISOString() }));
+}
+/** Write an audit entry or refuse the action. Used BEFORE an action happens. */
+function auditOrRefuse(kind: "prompt" | "output" | "publish", fields: any, cid: string) {
+  try { return auditLog.append(kind, { ...fields, correlation_id: cid }); }
+  catch (e: any) {
+    throw new AppError("audit_log_unavailable", 503, "the audit log could not be written, so this action was not taken", { correlationId: cid, cause: e });
+  }
+}
+/** Write an audit entry AFTER an action that has already happened: degraded, never fatal. */
+function auditAfter(kind: "prompt" | "output" | "publish", fields: any, cid: string) {
+  try { auditLog.append(kind, { ...fields, correlation_id: cid }); return undefined; }
+  catch (e: any) { logError(Errors.internal("audit log append failed: " + String(e?.message || e), { correlationId: cid }), "audit-log"); return "audit_log_write_failed"; }
+}
+
+// The prompt guard is not a setting. It is exercised once at boot against a
+// credential-shaped prompt; if it would let that through, the process reports
+// itself not ready rather than serving an unguarded generator.
+const PROMPT_GUARD_SELFTEST = (() => {
+  try {
+    const g: any = guardUserPrompt("please use sk-ant-api03-" + "A".repeat(40) + " to build it");
+    return g && g.ok === false;
+  } catch { return false; }
+})();
+
 // One per-user daily cap across every generating route. Local/deterministic
 // generation costs nothing and is never refused by it.
 const generationDailyCap = createUserDailyCap({ capUsd: Number(process.env.DCS_GAMES_USER_DAILY_USD || 5) });
@@ -338,13 +408,17 @@ async function publicRead(key: string, build: () => Promise<any>) {
   return value;
 }
 
+// Every API answer can carry a principal's data, and /auth/login's carries the
+// bearer and refresh tokens themselves. None of it may sit in a shared or
+// browser cache, be sniffed into another type, or leak its URL onward.
+const NO_STORE_HEADERS = { "Cache-Control": "no-store", Pragma: "no-cache", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer" };
 function send(res: http.ServerResponse, code: number, body: any) {
-  res.writeHead(code, { "Content-Type": "application/json", ...corsFor(res) });
+  res.writeHead(code, { "Content-Type": "application/json", ...NO_STORE_HEADERS, ...corsFor(res) });
   res.end(JSON.stringify(body));
 }
 function sendHTML(res: http.ServerResponse, code: number, html: string) {
   const { "Access-Control-Allow-Origin": acao, Vary } = corsFor(res) as any;
-  const h: Record<string, string> = { "Content-Type": "text/html; charset=utf-8" };
+  const h: Record<string, string> = { "Content-Type": "text/html; charset=utf-8", ...NO_STORE_HEADERS };
   if (acao) h["Access-Control-Allow-Origin"] = acao;
   if (Vary) h.Vary = Vary;
   res.writeHead(code, h);
@@ -370,8 +444,16 @@ function readBody(req: http.IncomingMessage): Promise<any> {
 // ---- GAMES-C integration helpers -------------------------------------------
 
 /** A prompt is DATA for a model. Empty, oversize and credential-bearing prompts are refused; other flags are logged, never the text. */
-function guardPromptOrRefuse(text: unknown, field: string, cid: string) {
+// Every prompt is written to the append-only audit log BEFORE anything acts on
+// it — accepted or refused — and an accepted prompt is not acted on if that
+// write fails. A refused prompt is logged by hash only (see audit-log.mjs).
+function guardPromptOrRefuse(text: unknown, field: string, cid: string, ctx: { actor: string; route: string; world_id?: string | null }) {
   const g: any = guardUserPrompt(text);
+  auditOrRefuse("prompt", {
+    actor: ctx.actor, route: ctx.route, world_id: ctx.world_id ?? null, field,
+    guard: { ok: !!g.ok, code: g.ok ? undefined : g.code, suspicious: !!g.suspicious, flags: (g.flags || []).slice(0, 5).map((f: any) => f.code || f.kind || "flag") },
+    ...promptFields(text, { accepted: !!g.ok }),
+  }, cid);
   if (!g.ok) throw Errors.validation(`${field} was refused: ${g.reason || g.code}`, { correlationId: cid, meta: { field, code: g.code } });
   if (g.suspicious) console.warn(JSON.stringify({ level: "warn", prompt_flags: g.flags.slice(0, 5).map((f: any) => f.code || f.kind || "flag"), field, correlation_id: cid }));
   return g;
@@ -425,7 +507,10 @@ async function commitContentChange({ rec, me, manifest, stage, cid }: { rec: any
   for (const k of TRUST_META_FIELDS) delete stored.meta[k];
   const state = wasPublished ? "draft" : rec.state;
   const saved = await repo.upsert({ worldId: rec.world_id, ownerId: me.id, manifest: stored, state, title: stored.meta.title });
-  const publication = wasPublished ? { state, unpublished: true, unpublished_reason: UNPUBLISH_REASON } : { state };
+  const publication: any = wasPublished ? { state, unpublished: true, unpublished_reason: UNPUBLISH_REASON } : { state };
+  const a1 = auditAfter("output", { actor: me.id, route: stage, world_id: rec.world_id, version: saved.version, manifest_hash: saved.manifest_hash, content_hash: contentHashOf(stored) }, cid);
+  const a2 = wasPublished ? auditAfter("publish", { actor: me.id, action: "returned_to_draft", world_id: rec.world_id, version: saved.version, reason: stage, previous_package_id: rec.manifest?.meta?.published_package_id ?? null }, cid) : undefined;
+  if (a1 || a2) publication.audit_degraded = a1 || a2;
   return { saved, manifest: stored, publication };
 }
 
@@ -634,6 +719,16 @@ const server = http.createServer(async (req, res) => {
   (res as any).__dcsOrigin = (req.headers.origin as string) || "";
   try {
     if (method === "OPTIONS") return send(res, 204, {});
+    // A credential in a URL is written to every access log, proxy log and
+    // browser history it passes through, and sent onward in Referer. This API
+    // only ever reads the Authorization header, so a token in the query string
+    // is refused outright rather than silently ignored — a client that puts it
+    // there must find out, not keep leaking it.
+    {
+      const qs = new URLSearchParams((req.url || "").split("?")[1] || "");
+      const leaked = ["access_token", "token", "refresh_token", "id_token", "jwt", "apikey", "api_key"].filter((k) => qs.has(k));
+      if (leaked.length) return send(res, 400, { ok: false, error: "credential_in_url", detail: "credentials are accepted only in the Authorization header; the request was refused and nothing was read", params: leaked, correlation_id: cid });
+    }
     if (url === "/health" && method === "GET") {
       // A degraded SAFETY collection is not the same kind of news as a degraded
       // anything-else, and nothing distinguished them. Reports of csam,
@@ -691,7 +786,7 @@ const server = http.createServer(async (req, res) => {
       routes: {
         // The V2 surface is still live and still carries real traffic; leaving
         // it out of the inventory made it look retired when it is not.
-        world_v2: ["POST /worlds/generate", "GET /worlds/mine", "GET /worlds/:id/manifest", "POST /worlds/:id/save", "GET /worlds/:id/load", "POST /worlds/:id/publish", "POST /worlds/:id/staging/rollback"],
+        world_v2: ["POST /worlds/generate", "GET /worlds/mine", "GET /worlds/:id/manifest", "POST /worlds/:id/save", "GET /worlds/:id/load", "POST /worlds/:id/publish", "POST /worlds/:id/staging/rollback", "GET /worlds/:id/staging/verify"],
         world: ["POST /v3/worlds/generate", "POST /v3/worlds/generate/async", "GET /v3/worlds/:id/manifest", "POST /v3/worlds/:id/playtest", "POST /v3/worlds/:id/expand", "POST /v3/worlds/:id/edit", "POST /v3/worlds/:id/stitch", "POST /v3/worlds/:id/fork", "GET /v3/worlds/:id/versions", "POST /v3/worlds/:id/rollback", "GET /v3/worlds/:id/diff", "GET /v3/worlds/:id/memory", "POST /v3/worlds/:id/companion", "POST /v3/worlds/:id/media", "GET /v3/worlds/:id/attribution", "GET /v3/worlds/:id/parts", "POST /v3/worlds/:id/quests/generate", "POST /v3/worlds/:id/stitch/preview", "GET /v3/worlds/:id/versions/:n", "GET /v3/worlds/:id/npcs/:npc/memory", "POST /v3/worlds/:id/undo", "GET /v3/worlds/:id/integrity"],
         discovery: ["GET /v3/discover", "GET /api/public/worlds", "GET /api/public/stats", "GET /api/public/events", "GET /api/public/market", "GET /api/public/atlas/feed", "GET /api/public/atlas/stats", "POST /v3/worlds/:id/play", "POST /v3/worlds/:id/rate", "GET /v3/worlds/:id/stats"],
         identity: ["POST /auth/signup", "POST /auth/login", "GET /me/home", "GET /me/profile", "GET /me/achievements", "GET /me/streak", "GET /me/dashboard", "GET /profiles/:username", "GET /verify/status", "POST /verify/:channel/start", "POST /verify/:channel/confirm"],
@@ -700,6 +795,7 @@ const server = http.createServer(async (req, res) => {
         subscriptions: ["GET /v3/subscriptions/plans", "POST /v3/subscriptions/subscribe", "POST /v3/subscriptions/grant", "POST /v3/subscriptions/revoke", "GET /v3/subscriptions/grants", "GET /v3/subscriptions/assert-dark", "GET /me/subscription", "GET /me/entitlements"],
         safety: ["GET /safety/age", "GET /safety/blocks", "POST /safety/consent/parental", "POST /safety/report", "GET /safety/reports", "POST /safety/block", "GET /safety/consent/media", "GET /safety/moderation-history", "POST /safety/reports/:id/moderate"],
         jobs: ["GET /v3/jobs", "GET /v3/jobs/:id"],
+        audit: ["GET /v3/audit", "GET /v3/audit/verify"],
         // Live, and previously invisible: these are dispatched inside the cw1
         // slice rather than by the main router, so nothing that scanned
         // server.mts alone could see them. /ts/* is the LEGACY moderation
@@ -709,7 +805,7 @@ const server = http.createServer(async (req, res) => {
         moderation_legacy: ["GET /ts/reports (superseded by GET /safety/reports; its store is no longer written to)", "POST /ts/reports/:id/action", "POST /ts/reports/:id/appeal/decide"],
         // Shells only. No provider is contacted and no money can move.
         payouts_dark: ["GET /payout/kyc", "POST /payout/kyc/start"],
-        trust: ["GET /health", "GET /atlas/key", "DELETE /verify/:channel", "GET /atlas/receipt/:id", "GET /verify", "GET /v3/providers", "GET /v3/engine"],
+        trust: ["GET /health", "GET /ready", "GET /atlas/key", "DELETE /verify/:channel", "GET /atlas/receipt/:id", "GET /verify", "GET /v3/providers", "GET /v3/engine"],
         retired: ["GET /api/marketplace (410)", "GET /api/me/payouts (410)", "GET /me/revenue (410)", "POST /auth/ensure (410)", ...retiredSocialRoutes()],
       },
       manifest_version: MANIFEST_VERSION,
@@ -750,8 +846,48 @@ const server = http.createServer(async (req, res) => {
           report_subject_type: SUBJECT_TYPES,
         },
       },
+      // The internal-preview controls, stated so a watcher does not have to infer them.
+      publish_control: { visibility: PUBLISH_VISIBILITY, publish_requires: "internal_tester", testers_configured: TESTERS_CONFIGURED > 0, prompt_guard: PROMPT_GUARD_SELFTEST, audit_log: { seq: auditLog.describe().seq, boot_chain_ok: !!auditLog.describe().boot_check.ok }, ready_url: "/ready" },
       netcode: "ws-separate-service", ts: new Date().toISOString(),
     });
+    }
+
+    // READINESS, distinct from liveness. /health says the process answers;
+    // /ready says whether this instance may take staging-preview traffic, and
+    // names every check that says no. It discloses check names and verdicts
+    // only — no paths, keys, ids or configuration values.
+    if (url === "/ready" && method === "GET") {
+      const checks: any[] = [];
+      const add = (name: string, ok: boolean, required: boolean, detail?: string) => checks.push({ name, ok: !!ok, required, detail: ok ? undefined : detail });
+      add("auth_configured", auth.mode === "supabase-jwt" || auth.mode === "local-hs256", true, "the auth secret is ephemeral, so every token dies at the next restart");
+      if (process.env.DATABASE_URL) {
+        add("schema_version", SCHEMA_STATE.ok === true && Number(SCHEMA_STATE.version) >= REQUIRED_SCHEMA_VERSION, true, `the database schema is not at the version this build requires (v${REQUIRED_SCHEMA_VERSION})`);
+      } else {
+        checks.push({ name: "schema_version", ok: true, required: false, detail: "not checked: no DATABASE_URL on this instance" });
+      }
+      const probe = (dir: string) => { try { fs.mkdirSync(dir, { recursive: true }); const f = path.join(dir, `.ready-${process.pid}`); fs.writeFileSync(f, "1"); fs.rmSync(f); return true; } catch { return false; } };
+      add("data_dir_writable", probe(DATA_DIR), true, "the data directory is not writable");
+      add("world_memory_writable", probe(path.join(DATA_DIR, "world-memory-v2")), true, "the World Memory v2 store is not writable");
+      // Restart survival of every file store depends on the data directory
+      // being a declared, persistent location rather than the default under the
+      // working directory, which a container redeploy discards.
+      add("data_dir_declared", !!process.env.DCS_DATA_DIR, false, "DCS_DATA_DIR is unset, so state lives under the working directory; point it at a persistent volume for restart survival");
+      const av: any = auditLog.verify();
+      add("audit_log_chain", av.ok, true, `the audit log chain is broken at line ${av.broken_at}`);
+      add("prompt_guard", PROMPT_GUARD_SELFTEST, true, "the prompt guard did not refuse a credential-bearing prompt at boot");
+      add("publish_visibility_internal", PUBLISH_VISIBILITY === "internal", false, "published worlds are PUBLIC on this instance (DCS_PUBLISH_VISIBILITY=public); that is the production-canary bar, not the internal preview");
+      add("tester_allowlist", TESTERS_CONFIGURED > 0, true, "DCS_INTERNAL_TESTERS is empty, so nobody can publish or see a published world");
+      add("atlas_signing", atlasReady(), true, "no Atlas signing key, so nothing can be published");
+      let stagingOk = true;
+      try { stagingRegistry(); } catch { stagingOk = false; }
+      add("staging_registry", stagingOk, true, "the staging package registry refused this environment");
+      const ready = checks.every((c) => c.ok || !c.required);
+      return send(res, ready ? 200 : 503, {
+        ok: ready, ready, publish_visibility: PUBLISH_VISIBILITY, checks,
+        failing: checks.filter((c) => !c.ok && c.required).map((c) => c.name),
+        advisories: checks.filter((c) => !c.ok && !c.required).map((c) => c.name),
+        ts: new Date().toISOString(),
+      });
     }
 
     // A1: resolve once. Anonymous is null; a *bad* credential throws 401 here and
@@ -768,7 +904,7 @@ const server = http.createServer(async (req, res) => {
       // It was invisible to every test because in file mode supaGet returns [].
       // It now goes through the repository, which applies the same permission
       // rules as every other read and returns discovery cards, not manifests.
-      const worlds = await publicRead("public-worlds", () => repo.listPublished(50));
+      const worlds = await publicRead("public-worlds" + (canSeePublished(principal) ? ":all" : ":none"), () => listPublishedFor(principal, 50));
       return send(res, 200, { ok: true, count: worlds.length, worlds, source: repo.kind });
     }
     // Public platform figures, MEASURED.
@@ -784,8 +920,8 @@ const server = http.createServer(async (req, res) => {
     // on it answers zero rather than something encouraging. `measured_at` and
     // `source` are included so a caller can tell a real count from a cache.
     if (url === "/api/public/stats" && method === "GET") {
-      return send(res, 200, await publicRead("public-stats", async () => {
-      const published = await repo.listPublished(1000);
+      return send(res, 200, await publicRead("public-stats" + (canSeePublished(principal) ? ":all" : ":none"), async () => {
+      const published = await listPublishedFor(principal, 1000);
       const statsFor = await social._statsIndex();
       let plays = 0, seconds = 0, rated = 0;
       const creators = new Set<string>();
@@ -846,7 +982,7 @@ const server = http.createServer(async (req, res) => {
     // served this; an empty platform now returns an empty list, which is the
     // honest answer and is what the truth layer renders as "nothing yet".
     if (url === "/api/public/events" && method === "GET") {
-      const published = await repo.listPublished(200);
+      const published = await listPublishedFor(principal, 200);
       // `updated_at` is the LAST EDIT, not the publication. Labelling it
       // `world_published` and sorting on it meant an edit re-ordered the
       // publication feed and back-dated nothing: the world published first led
@@ -902,7 +1038,7 @@ const server = http.createServer(async (req, res) => {
       // world is still published. The receipt is not withdrawn; it is simply
       // not advertised on a surface that means "here is what you can go and
       // look at".
-      const publicNow = new Set((await repo.listPublished(1000)).map((w: any) => w.world_id));
+      const publicNow = new Set((await listPublishedFor(principal, 1000)).map((w: any) => w.world_id));
       const feed = rows
         .filter((r) => publicNow.has(r.subject_id))
         .map((r) => ({ receipt_hash: r.receipt_hash, subject_id: r.subject_id, issued_at: r.issued_at, signed: !!r.receipt?.sig }))
@@ -1047,7 +1183,11 @@ const server = http.createServer(async (req, res) => {
         const access = j.access_token || (j.session && j.session.access_token) || null;
         const usr = j.user || (j.session && j.session.user) || null;
         return send(res, 200, { ok: true, token: access, access_token: access, refresh_token: j.refresh_token || null, user: usr, needs_confirmation: isSignup && !access });
-      } catch (e: any) { return send(res, 502, { ok: false, error: "auth_upstream", detail: String(e?.message || e) }); }
+      } catch (e: any) {
+        // The upstream message can carry the auth host and request detail; it is logged, not sent.
+        logError(Errors.upstream("supabase-auth", String(e?.message || e), { correlationId: cid }), method + " " + url);
+        return send(res, 502, { ok: false, error: "auth_upstream", detail: "the authentication service could not be reached; quote the correlation id", correlation_id: cid });
+      }
     }
 
     if (await handleIdentity(req, res, idCtx)) return;
@@ -1169,7 +1309,23 @@ const server = http.createServer(async (req, res) => {
       // and the UI must be able to prove that rather than imply activity.
       const q = new URLSearchParams((req.url || "").split("?")[1] || "");
       const rows = await safety.moderationHistory(q.get("subject_type"), q.get("subject_id"));
-      return send(res, 200, { ok: true, count: rows.length, actions: rows, automated_moderation: false, note: "DCS Games runs no automated content moderation; this log contains human decisions only." });
+      // SEC-01. This served the stored rows verbatim to anonymous callers: the
+      // moderator's auth UUID (decided_by, audit.by), the report id, and a
+      // rationale that embeds the report id and the reporter's stated reason.
+      // The PUBLIC log proves that human decisions were taken and what they
+      // were; it never says who took them or which report asked for them.
+      // Staff (internal testers — the same gate as the queue) get full rows.
+      const staff = !!principal?.isInternalTester;
+      const actions = staff ? rows : rows.map((a: any) => ({
+        action: a.action,
+        subject_type: a.subject_type,
+        // A moderated USER is a person; their id is never published. A world id
+        // is a public identifier only while published worlds are public.
+        subject_id: a.subject_type === "world" && PUBLISH_VISIBILITY === "public" ? a.subject_id : undefined,
+        decided_at: a.created_at ?? a.audit?.ts ?? null,
+        decided_by: "human_moderator",
+      }));
+      return send(res, 200, { ok: true, count: rows.length, actions, redacted: !staff, automated_moderation: false, note: "DCS Games runs no automated content moderation; this log contains human decisions only." });
     }
     if (url === "/safety/block" && method === "POST") {
       const me = await mustBe(req, cid);
@@ -1255,7 +1411,7 @@ const server = http.createServer(async (req, res) => {
       const me = await mustBeInternalTester(req, cid);
       const b = await readBody(req);
       // Only your own world may be listed.
-      if (b.world_id) await repo.get(b.world_id, { requesterId: me.id, requireOwner: true });
+      if (b.world_id) await getWorldFor(principal, b.world_id, { requesterId: me.id, requireOwner: true });
       const listing = await market.createListing(me.id, {
         storefrontId: b.storefront_id, worldId: b.world_id, kind: b.kind || "world",
         title: b.title, description: b.description, priceMinor: b.price_minor ?? 0,
@@ -1570,7 +1726,7 @@ const server = http.createServer(async (req, res) => {
     // ---- discovery: ranks on MEASURED activity only ---------------------
     if (url === "/v3/discover" && method === "GET") {
       const q = new URLSearchParams((req.url || "").split("?")[1] || "");
-      const published = await repo.listPublished(200);
+      const published = await listPublishedFor(principal, 200);
       const result = await social.discover(published, {
         sort: q.get("sort") || "recent",
         genre: q.get("genre"),
@@ -1590,7 +1746,7 @@ const server = http.createServer(async (req, res) => {
         // not a measurement.
         const me = await mustBe(req, cid);
         const b = await readBody(req);
-        const rec = await repo.get(mm[1], { requesterId: me.id });
+        const rec = await getWorldFor(principal, mm[1], { requesterId: me.id });
         await social.recordPlay(mm[1], me.id, b.seconds);
         {
           // The server placed this player at the world's spawn, so it can say so.
@@ -1609,7 +1765,7 @@ const server = http.createServer(async (req, res) => {
       if (mm && method === "POST") {
         const me = await mustBe(req, cid);
         const b = await readBody(req);
-        await repo.get(mm[1], { requesterId: me.id });
+        await getWorldFor(principal, mm[1], { requesterId: me.id });
         await social.rateWorld(me.id, mm[1], b.rating);
         return send(res, 200, { ok: true, stats: await social.worldStats(mm[1]) });
       }
@@ -1621,9 +1777,26 @@ const server = http.createServer(async (req, res) => {
         // may see the world. A draft's play counts, unique players and rating
         // were readable by anyone with the id — and it answered for worlds that
         // do not exist too. Every sibling route takes this permission check.
-        await repo.get(mm[1], { requesterId: principal?.id ?? null });
+        await getWorldFor(principal, mm[1], { requesterId: principal?.id ?? null });
         return send(res, 200, { ok: true, world_id: mm[1], stats: await social.worldStats(mm[1]) });
       }
+    }
+
+    // The audit log, read back. Testers are the people being logged, so being
+    // one is not enough: the reader must ALSO be on DCS_AUDIT_READERS. Unset
+    // means nobody reads it over HTTP (the file is still there for an operator).
+    if ((url === "/v3/audit" || url === "/v3/audit/verify") && method === "GET") {
+      const me = await mustBeInternalTester(req, cid);
+      const readers = new Set(String(process.env.DCS_AUDIT_READERS || "").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean));
+      // Principal IDs only. principal.email is reported even when the identity
+      // provider never confirmed it, so an address is not an identity here.
+      if (!readers.has(String(me.id).toLowerCase())) {
+        throw Errors.forbidden("the audit log is readable only by principal ids listed in DCS_AUDIT_READERS", { correlationId: cid });
+      }
+      if (url === "/v3/audit/verify") return send(res, 200, { ok: true, ...auditLog.verify(), correlation_id: cid });
+      const q = new URLSearchParams((req.url || "").split("?")[1] || "");
+      const entries = auditLog.tail(Number(q.get("limit") || 50));
+      return send(res, 200, { ok: true, count: entries.length, entries, head: { seq: auditLog.describe().seq }, correlation_id: cid });
     }
 
     // ================= DCS GAMES V3 =====================================
@@ -1655,10 +1828,10 @@ const server = http.createServer(async (req, res) => {
       await safety.requireCapability(me.id, "create");
       const b = await readBody(req);
       if (!b.prompt || typeof b.prompt !== "string") throw Errors.validation("prompt is required", { correlationId: cid });
-      guardPromptOrRefuse(b.prompt, "prompt", cid);
+      const worldId = "w3_" + crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+      guardPromptOrRefuse(b.prompt, "prompt", cid, { actor: me.id, route: "POST /v3/worlds/generate/async", world_id: worldId });
       reserveGenerationSpend(me, await externalLaneAvailable(), cid);
 
-      const worldId = "w3_" + crypto.randomUUID().replace(/-/g, "").slice(0, 16);
       const job = await jobsvc.create({
         kind: "world_generate",
         principalId: me.id,
@@ -1697,6 +1870,7 @@ const server = http.createServer(async (req, res) => {
         guardManifestOrRefuse(gate.manifest, "generated world", cid);
         const saved = await repo.upsert({ worldId, ownerId: me.id, manifest: gate.manifest, state: "draft", title: gate.manifest.meta.title });
         await mirrorV2(() => worldMemV2.save(worldId, { manifest: gate.manifest, author: me.id, label: "generated" }), cid);
+        auditAfter("output", { actor: me.id, route: "POST /v3/worlds/generate/async", world_id: worldId, version: saved.version, manifest_hash: saved.manifest_hash, content_hash: contentHashOf(gate.manifest), playtest: gate.verdict, job_id: job.id }, cid);
         await worldMemory.record(worldId, { kind: "created", summary: `"${gate.manifest.meta.title}" was generated from a prompt`, worldVersion: 1, actorId: me.id, detail: { prompt: b.prompt } });
         await social.ensureProfile(me);
         await social.recordWorldCreated(me.id);
@@ -1742,10 +1916,10 @@ const server = http.createServer(async (req, res) => {
       await safety.requireCapability(me.id, "create");
       const b = await readBody(req);
       if (!b.prompt || typeof b.prompt !== "string") throw Errors.validation("prompt is required", { correlationId: cid });
-      guardPromptOrRefuse(b.prompt, "prompt", cid);
+      const worldId = "w3_" + crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+      guardPromptOrRefuse(b.prompt, "prompt", cid, { actor: me.id, route: "POST /v3/worlds/generate", world_id: worldId });
       reserveGenerationSpend(me, await externalLaneAvailable(), cid);
 
-      const worldId = "w3_" + crypto.randomUUID().replace(/-/g, "").slice(0, 16);
       // 9.1 multimodal: an optional reference image is READ into a description
       // that conditions generation. The bytes never enter the manifest.
       const built = await v3.assemble({
@@ -1792,6 +1966,7 @@ const server = http.createServer(async (req, res) => {
       guardManifestOrRefuse(gate.manifest, "generated world", cid);
       const saved = await repo.upsert({ worldId, ownerId: me.id, manifest: gate.manifest, state: "draft", title: gate.manifest.meta.title });
       const v2m = await mirrorV2(() => worldMemV2.save(worldId, { manifest: gate.manifest, author: me.id, label: "generated" }), cid);
+      const auditDegraded = auditAfter("output", { actor: me.id, route: "POST /v3/worlds/generate", world_id: worldId, version: saved.version, manifest_hash: saved.manifest_hash, content_hash: contentHashOf(gate.manifest), playtest: gate.verdict }, cid);
       // The world now exists to the runtime as well as to the store, so player
       // ownership and inventory become checkable for it.
       await registerV3BaseWorld(worldId, gate.manifest, cid);
@@ -1816,6 +1991,7 @@ const server = http.createServer(async (req, res) => {
         degraded: built.degraded.length ? built.degraded : undefined,
         manifest_url: "/v3/worlds/" + worldId + "/manifest",
         ...v2m,
+        audit_degraded: auditDegraded,
         correlation_id: cid,
       });
     }
@@ -1823,7 +1999,7 @@ const server = http.createServer(async (req, res) => {
     {
       let mm = url.match(/^\/v3\/worlds\/([^/]+)\/manifest$/);
       if (mm && method === "GET") {
-        const rec = await repo.get(mm[1], { requesterId: principal?.id ?? null });
+        const rec = await getWorldFor(principal, mm[1], { requesterId: principal?.id ?? null });
         // Any world still on the v1 contract is upgraded on read, so old worlds
         // keep working without a migration job.
         const { manifest, migrated } = ensureV3(rec.manifest, { worldVersion: rec.version, creatorId: rec.owner_id });
@@ -1840,7 +2016,7 @@ const server = http.createServer(async (req, res) => {
       mm = url.match(/^\/v3\/worlds\/([^/]+)\/playtest$/);
       if (mm && method === "POST") {
         const me = await mustBe(req, cid);
-        const rec = await repo.get(mm[1], { requesterId: me.id });
+        const rec = await getWorldFor(principal, mm[1], { requesterId: me.id });
         const { manifest } = ensureV3(rec.manifest, { worldVersion: rec.version, creatorId: rec.owner_id });
         const gate = await playtestAndRepair(manifest);
         return send(res, gate.passed ? 200 : 422, {
@@ -1854,8 +2030,8 @@ const server = http.createServer(async (req, res) => {
         const me = await mustBeInternalTester(req, cid);
         const b = await readBody(req);
         if (!b.request) throw Errors.validation("request is required, e.g. 'add a hospital district'", { correlationId: cid });
-        guardPromptOrRefuse(b.request, "request", cid);
-        const rec = await repo.get(mm[1], { requesterId: me.id, requireOwner: true });
+        guardPromptOrRefuse(b.request, "request", cid, { actor: me.id, route: "POST /v3/worlds/:id/expand", world_id: mm[1] });
+        const rec = await getWorldFor(principal, mm[1], { requesterId: me.id, requireOwner: true });
         const { manifest: before } = ensureV3(rec.manifest, { worldVersion: rec.version, creatorId: rec.owner_id });
 
         const live = (await liveStateFor(mm[1], b.live_state)).live;
@@ -1910,7 +2086,7 @@ const server = http.createServer(async (req, res) => {
       if (mm && method === "POST") {
         const me = await mustBeInternalTester(req, cid);
         const b = await readBody(req);
-        const rec = await repo.get(mm[1], { requesterId: me.id, requireOwner: true });
+        const rec = await getWorldFor(principal, mm[1], { requesterId: me.id, requireOwner: true });
         const { manifest: before } = ensureV3(rec.manifest, { worldVersion: rec.version, creatorId: rec.owner_id });
 
         // GAMES-C: three ways in, one way out. A typed `patch` (the edit patch
@@ -1932,7 +2108,7 @@ const server = http.createServer(async (req, res) => {
           editSummary = patch.intent?.text ? String(patch.intent.text).slice(0, 200) : `${(patch.ops || []).length}-op patch`;
           editIntent = `patch:${patch.intent?.category || "unspecified"}`;
         } else {
-          if (typeof b.request === "string") guardPromptOrRefuse(b.request, "request", cid);
+          if (typeof b.request === "string") guardPromptOrRefuse(b.request, "request", cid, { actor: me.id, route: "POST /v3/worlds/:id/edit", world_id: mm[1] });
           plan = planEdit(before, { request: b.request, author: me.id });
           editSummary = plan.summary; editIntent = plan.intent;
           if (plan.error && typeof b.request !== "string") {
@@ -1986,7 +2162,7 @@ const server = http.createServer(async (req, res) => {
         const me = await mustBeInternalTester(req, cid);
         const b = await readBody(req);
         const kind = b.kind || "image";
-        const rec = await repo.get(mm[1], { requesterId: me.id, requireOwner: true });
+        const rec = await getWorldFor(principal, mm[1], { requesterId: me.id, requireOwner: true });
         const { manifest } = ensureV3(rec.manifest, { worldVersion: rec.version, creatorId: rec.owner_id });
 
         // A5 gate. It keys on WHETHER A SUBJECT IS NAMED, not on a list of words.
@@ -2043,7 +2219,12 @@ const server = http.createServer(async (req, res) => {
         }
 
         const target = b.target || "thumbnail";
+        // A caller-supplied media prompt is a prompt like any other: guarded and
+        // logged. The derived one is built from the world itself and is logged
+        // as such, so every media request has a prompt entry.
+        if (b.prompt !== undefined && b.prompt !== null) guardPromptOrRefuse(b.prompt, "prompt", cid, { actor: me.id, route: "POST /v3/worlds/:id/media", world_id: rec.world_id });
         const prompt = b.prompt || mediaPromptFor(manifest, target, b);
+        if (b.prompt === undefined || b.prompt === null) auditOrRefuse("prompt", { actor: me.id, route: "POST /v3/worlds/:id/media", world_id: rec.world_id, field: "derived", guard: { ok: true, derived: true }, ...promptFields(prompt, { accepted: true }) }, cid);
         const r = await v3.lanes[LANES.MEDIA].run({
           kind, target, prompt, label: manifest.meta.title,
           subjectId: b.subject_id ?? null, style: manifest.meta.style,
@@ -2093,8 +2274,8 @@ const server = http.createServer(async (req, res) => {
         const b = await readBody(req);
         if (!b.guest_world_id) throw Errors.validation("guest_world_id is required", { correlationId: cid });
 
-        const hostRec = await repo.get(mm[1], { requesterId: me.id, requireOwner: true });
-        const guestRec = await repo.get(b.guest_world_id, { requesterId: me.id });
+        const hostRec = await getWorldFor(principal, mm[1], { requesterId: me.id, requireOwner: true });
+        const guestRec = await getWorldFor(principal, b.guest_world_id, { requesterId: me.id });
         const host = { world_id: hostRec.world_id, owner_id: hostRec.owner_id, state: hostRec.state, version: hostRec.version, manifest: ensureV3(hostRec.manifest, { worldVersion: hostRec.version, creatorId: hostRec.owner_id }).manifest };
         const guest = { world_id: guestRec.world_id, owner_id: guestRec.owner_id, state: guestRec.state, version: guestRec.version, manifest: ensureV3(guestRec.manifest, { worldVersion: guestRec.version, creatorId: guestRec.owner_id }).manifest };
 
@@ -2145,8 +2326,8 @@ const server = http.createServer(async (req, res) => {
         // Dry run: what WOULD be joined, and whether it is permitted. Saves nothing.
         const me = await mustBeInternalTester(req, cid);
         const b = await readBody(req);
-        const hostRec = await repo.get(mm[1], { requesterId: me.id, requireOwner: true });
-        const guestRec = await repo.get(b.guest_world_id, { requesterId: me.id });
+        const hostRec = await getWorldFor(principal, mm[1], { requesterId: me.id, requireOwner: true });
+        const guestRec = await getWorldFor(principal, b.guest_world_id, { requesterId: me.id });
         const host = { world_id: hostRec.world_id, owner_id: hostRec.owner_id, state: hostRec.state, version: hostRec.version, manifest: ensureV3(hostRec.manifest, { worldVersion: hostRec.version, creatorId: hostRec.owner_id }).manifest };
         const guest = { world_id: guestRec.world_id, owner_id: guestRec.owner_id, state: guestRec.state, version: guestRec.version, manifest: ensureV3(guestRec.manifest, { worldVersion: guestRec.version, creatorId: guestRec.owner_id }).manifest };
         const perm = checkStitchPermission(host, guest, me.id);
@@ -2157,7 +2338,7 @@ const server = http.createServer(async (req, res) => {
 
       mm = url.match(/^\/v3\/worlds\/([^/]+)\/parts$/);
       if (mm && method === "GET") {
-        const rec = await repo.get(mm[1], { requesterId: principal?.id ?? null });
+        const rec = await getWorldFor(principal, mm[1], { requesterId: principal?.id ?? null });
         const { manifest } = ensureV3(rec.manifest, { worldVersion: rec.version, creatorId: rec.owner_id });
         return send(res, 200, { ok: true, world_id: rec.world_id, ...stitchSummary(manifest) });
       }
@@ -2169,7 +2350,7 @@ const server = http.createServer(async (req, res) => {
         await safety.requireCapability(me.id, "create");
         const b = await readBody(req);
         // Read as a stranger would: a draft is not forkable, and this proves it.
-        const source = await repo.get(mm[1], { requesterId: me.id });
+        const source = await getWorldFor(principal, mm[1], { requesterId: me.id });
         const { manifest: forked, attribution } = forkWorld(
           { world_id: source.world_id, owner_id: source.owner_id, state: source.state, version: source.version, manifest: ensureV3(source.manifest, { worldVersion: source.version, creatorId: source.owner_id }).manifest },
           { forkerId: me.id, newWorldId: "w3_" + crypto.randomUUID().replace(/-/g, "").slice(0, 16), title: b.title }
@@ -2184,6 +2365,7 @@ const server = http.createServer(async (req, res) => {
         const v2m = await mirrorV2(async () => (await worldMemV2.head(source.world_id))
           ? await worldMemV2.expand(source.world_id, { child_world_id: forked.world_id, manifest: gate.manifest, kind: "fork", author: me.id, label: gate.manifest.meta.title })
           : await worldMemV2.save(forked.world_id, { manifest: gate.manifest, author: me.id, kind: "fork", label: gate.manifest.meta.title, idempotent: false }), cid);
+        const forkAudit = auditAfter("output", { actor: me.id, route: "POST /v3/worlds/:id/fork", world_id: forked.world_id, source_world_id: source.world_id, version: saved.version, manifest_hash: saved.manifest_hash, content_hash: contentHashOf(gate.manifest) }, cid);
         await worldMemory.record(forked.world_id, { kind: "created", summary: `remixed from "${attribution.forked_from_title || attribution.forked_from_world_id}"`, worldVersion: 1, actorId: me.id, detail: attribution });
         await social.ensureProfile(me);
         await social.recordWorldCreated(me.id);
@@ -2193,13 +2375,14 @@ const server = http.createServer(async (req, res) => {
           payments_live: PAYMENTS_LIVE,
           revenue_policy: gate.manifest.meta.revenue_policy,
           ...v2m,
+          audit_degraded: forkAudit,
           playtest: gate.verdict, correlation_id: cid,
         });
       }
 
       mm = url.match(/^\/v3\/worlds\/([^/]+)\/attribution$/);
       if (mm && method === "GET") {
-        const rec = await repo.get(mm[1], { requesterId: principal?.id ?? null });
+        const rec = await getWorldFor(principal, mm[1], { requesterId: principal?.id ?? null });
         const { manifest } = ensureV3(rec.manifest, { worldVersion: rec.version, creatorId: rec.owner_id });
         return send(res, 200, { ok: true, world_id: rec.world_id, fork_policy: forkPolicyOf(manifest), policies: FORK_POLICIES, ...attributionChain(manifest) });
       }
@@ -2207,7 +2390,7 @@ const server = http.createServer(async (req, res) => {
       // ---- 9.5 NPC memory: only what was actually recorded --------------
       mm = url.match(/^\/v3\/worlds\/([^/]+)\/npcs\/([^/]+)\/memory$/);
       if (mm && method === "GET") {
-        const rec = await repo.get(mm[1], { requesterId: principal?.id ?? null });
+        const rec = await getWorldFor(principal, mm[1], { requesterId: principal?.id ?? null });
         const { manifest } = ensureV3(rec.manifest, { worldVersion: rec.version, creatorId: rec.owner_id });
         // This is the server conducting a dialogue turn with a named NPC for an
         // authenticated principal — which is what "someone a player has met"
@@ -2225,7 +2408,7 @@ const server = http.createServer(async (req, res) => {
       if (mm && method === "POST") {
         const me = await mustBeInternalTester(req, cid);
         const b = await readBody(req);
-        const rec = await repo.get(mm[1], { requesterId: me.id, requireOwner: true });
+        const rec = await getWorldFor(principal, mm[1], { requesterId: me.id, requireOwner: true });
         const { manifest } = ensureV3(rec.manifest, { worldVersion: rec.version, creatorId: rec.owner_id });
         const gen = await npcMemory.proceduralQuest(rec.world_id, manifest, { giverNpcId: b.giver_npc_id, seed: b.seed });
 
@@ -2251,10 +2434,12 @@ const server = http.createServer(async (req, res) => {
       // ---- retained world versions (what rollback and diff target) --------
       mm = url.match(/^\/v3\/worlds\/([^/]+)\/versions$/);
       if (mm && method === "GET") {
+        await getWorldFor(principal, mm[1], { requesterId: principal?.id ?? null });   // publish visibility first
         return send(res, 200, { ok: true, world_id: mm[1], versions: await repo.listVersions(mm[1], { requesterId: principal?.id ?? null }) });
       }
       mm = url.match(/^\/v3\/worlds\/([^/]+)\/versions\/(\d+)$/);
       if (mm && method === "GET") {
+        await getWorldFor(principal, mm[1], { requesterId: principal?.id ?? null });   // publish visibility first
         const v = await repo.getVersion(mm[1], Number(mm[2]), { requesterId: principal?.id ?? null });
         return send(res, 200, { ok: true, world_id: mm[1], version: v.version, manifest_hash: v.manifest_hash, label: v.label, created_at: v.created_at, manifest: v.manifest });
       }
@@ -2278,14 +2463,14 @@ const server = http.createServer(async (req, res) => {
         let undoEntry: any = null;
         let toVersion = Number(b.to_version);
         if (isUndo) {
-          await repo.get(mm[1], { requesterId: me.id, requireOwner: true });
+          await getWorldFor(principal, mm[1], { requesterId: me.id, requireOwner: true });
           undoEntry = await peekUndo(mm[1]);
           if (!undoEntry) return send(res, 409, { ok: false, error: "nothing_to_undo", detail: "no edit on this world can be undone", correlation_id: cid });
           toVersion = undoEntry.before_version;
         }
         if (!Number.isInteger(toVersion) || toVersion < 1) throw Errors.validation("to_version must be a version number to roll back to", { correlationId: cid });
 
-        const rec = await repo.get(mm[1], { requesterId: me.id, requireOwner: true });
+        const rec = await getWorldFor(principal, mm[1], { requesterId: me.id, requireOwner: true });
         if (isUndo && Number(rec.version) !== undoEntry.after_version) {
           return send(res, 409, {
             ok: false, error: "undo_history_diverged",
@@ -2409,6 +2594,7 @@ const server = http.createServer(async (req, res) => {
         const from = Number(q.get("from")), to = Number(q.get("to"));
         if (!Number.isInteger(from) || !Number.isInteger(to)) throw Errors.validation("from and to must both be version numbers, e.g. ?from=1&to=3", { correlationId: cid });
         const requesterId = principal?.id ?? null;
+        await getWorldFor(principal, mm[1], { requesterId });   // publish visibility first
         const a = await repo.getVersion(mm[1], from, { requesterId });
         const bV = await repo.getVersion(mm[1], to, { requesterId });
         return send(res, 200, { ok: true, world_id: mm[1], from, to, ...diffManifests(a.manifest, bV.manifest) });
@@ -2418,7 +2604,7 @@ const server = http.createServer(async (req, res) => {
       mm = url.match(/^\/v3\/worlds\/([^/]+)\/integrity$/);
       if (mm && method === "GET") {
         const me = await mustBe(req, cid);
-        await repo.get(mm[1], { requesterId: me.id, requireOwner: true });
+        await getWorldFor(principal, mm[1], { requesterId: me.id, requireOwner: true });
         if (!(await worldMemV2.head(mm[1]))) {
           return send(res, 200, { ok: true, world_id: mm[1], tracked: false, detail: "this world has no World Memory v2 history yet; it starts at its next change", correlation_id: cid });
         }
@@ -2433,7 +2619,7 @@ const server = http.createServer(async (req, res) => {
 
       mm = url.match(/^\/v3\/worlds\/([^/]+)\/memory$/);
       if (mm && method === "GET") {
-        await repo.get(mm[1], { requesterId: principal?.id ?? null });   // read permission
+        await getWorldFor(principal, mm[1], { requesterId: principal?.id ?? null });   // read permission
         return send(res, 200, { ok: true, world_id: mm[1], timeline: await worldMemory.timeline(mm[1]), chronology: await worldMemory.chronology(mm[1]) });
       }
 
@@ -2446,7 +2632,7 @@ const server = http.createServer(async (req, res) => {
         if (method === "POST") {
           const b = await readBody(req);
           const action = b.action || "adopt";
-          const rec = await repo.get(worldId, { requesterId: me.id });
+          const rec = await getWorldFor(principal, worldId, { requesterId: me.id });
           const { manifest } = ensureV3(rec.manifest, { worldVersion: rec.version, creatorId: rec.owner_id });
           if (action === "adopt") {
             const c = await companions.adopt(me.id, worldId, { name: b.name, persona: b.persona });
@@ -2457,7 +2643,7 @@ const server = http.createServer(async (req, res) => {
           if (action === "remember") return send(res, 200, { ok: true, companion: await companions.remember(me.id, worldId, { text: b.text, kind: b.kind, refs: b.refs }) });
           if (action === "forget") return send(res, 200, { ok: true, companion: await companions.forget(me.id, worldId, b.memory_id) });
           if (action === "context") return send(res, 200, { ok: true, companion: await companions.updateContext(me.id, worldId, { zone: b.zone ?? null, activeQuest: b.active_quest ?? null }) });
-          if (action === "ask" && typeof b.question === "string") guardPromptOrRefuse(b.question, "question", cid);
+          if (action === "ask" && typeof b.question === "string") guardPromptOrRefuse(b.question, "question", cid, { actor: me.id, route: "POST /v3/worlds/:id/companion", world_id: worldId });
           if (action === "ask") return send(res, 200, { ok: true, ...(await companions.ask(me.id, worldId, manifest, b.question, { zone: b.zone, activeQuest: b.active_quest })) });
           if (action === "caption") return send(res, 200, { ok: true, ...(await companions.caption(me.id, worldId, manifest, { zone: b.zone, activeQuest: b.active_quest })) });
           throw Errors.validation(`unknown companion action '${action}'`, { correlationId: cid, meta: { supported: ["adopt", "follow", "dismiss", "remember", "forget", "context", "ask", "caption"] } });
@@ -2477,6 +2663,9 @@ const server = http.createServer(async (req, res) => {
       if (!b.prompt || typeof b.prompt !== "string" || !b.prompt.trim()) {
         throw Errors.validation("prompt is required, and describes the world to build", { correlationId: cid });
       }
+      // The V2 generator was the one prompt path with no guard: a credential or
+      // an oversize prompt went straight to the adapter, and nothing logged it.
+      guardPromptOrRefuse(b.prompt, "prompt", cid, { actor: me.id, route: "POST /worlds/generate" });
       const world = await generateVia(b.prompt); // adapter seam: Cerebras hybrid when keyed, else seeder (always C1-valid)
       // A4: signing is genuinely optional, but a failure is now logged and reported,
       // not swallowed. An unsigned world is never presented as verified.
@@ -2490,6 +2679,7 @@ const server = http.createServer(async (req, res) => {
       const runtime = toRuntimeWorld(world);                 // render-ready (env/material/transform.position/spawn)
       // A3: durable, ownership-stamped, lossless. A write failure surfaces as an error.
       const saved = await repo.upsert({ worldId: world.world_id, ownerId: me.id, manifest: runtime, state: "draft", title: (world as any)?.meta?.title });
+      const genAudit = auditAfter("output", { actor: me.id, route: "POST /worlds/generate", world_id: world.world_id, version: saved.version, manifest_hash: saved.manifest_hash, content_hash: contentHashOf(runtime) }, cid);
       const base = { world_id: world.world_id, objects: (world.objects || []).map((o: any) => ({ object_id: o.object_id, kind: o.kind, transform: o.transform || { x: 0, y: 0, z: 0 }, owner_id: o.owner_id ?? null })) };
       await persistence.registerBaseWorld(base);
       // Creating a world counts however it was created, so /me stays measured.
@@ -2503,6 +2693,7 @@ const server = http.createServer(async (req, res) => {
         // Honest: "signed" is not "verified". Verification is what /verify proves.
         atlas_signing_error: signed.ok ? undefined : signed.error,
         persistence_degraded: saved._mirrored === false ? saved._mirror_error : undefined,
+        audit_degraded: genAudit,
         correlation_id: cid,
       });
     }
@@ -2510,7 +2701,7 @@ const server = http.createServer(async (req, res) => {
     if (m && method === "GET") {
       // A3: served from durable storage, so it survives a restart. Drafts are
       // owner-only; published worlds are public. A miss is a real 404.
-      const rec = await repo.get(m[1], { requesterId: principal?.id ?? null });
+      const rec = await getWorldFor(principal, m[1], { requesterId: principal?.id ?? null });
       return send(res, 200, rec.manifest);
     }
     // Publish: issue a real ed25519 Atlas receipt, mark published, return a verify link. Play stays instant (generate already serves it).
@@ -2518,7 +2709,7 @@ const server = http.createServer(async (req, res) => {
     if (m && method === "POST") {
       const me = await mustBeInternalTester(req, cid);
       const id = m[1];
-      const rec = await repo.get(id, { requesterId: me.id, requireOwner: true });   // only the owner publishes
+      const rec = await getWorldFor(principal, id, { requesterId: me.id, requireOwner: true });   // only the owner publishes
       const wm: any = rec.manifest;
       if (!atlasReady()) {
         // A4/B10: refuse to mark a world published-and-verified when no signing key
@@ -2543,6 +2734,7 @@ const server = http.createServer(async (req, res) => {
       guardManifestOrRefuse(pubV3, "world being published", cid);
       const pt: any = await playtestAndRepair(pubV3, { maxRounds: 1 });
       if (!pt.passed) {
+        auditAfter("publish", { actor: me.id, action: "publish_refused", world_id: id, version: rec.version, reason: "playtest", verdict: pt.verdict }, cid);
         return send(res, 422, { ok: false, error: "publish_failed_playtest", detail: "the world as stored does not pass the playtest gate, so it was not published; edit it and try again", verdict: pt.verdict, findings: pt.rounds.at(-1).findings.slice(0, 10), correlation_id: cid });
       }
       const built: any = buildStagingPackage({
@@ -2552,12 +2744,39 @@ const server = http.createServer(async (req, res) => {
         playtestVerdict: pt, signer: atlasEnvSigner(),
         hostAllowlist: (process.env.DCS_ASSET_HOST_ALLOWLIST || "").split(",").map((s) => s.trim()).filter(Boolean),
       });
-      if (!built.ok) throw Errors.validation("the world could not be packaged for publishing", { correlationId: cid, meta: { errors: built.errors.slice(0, 10) } });
+      if (!built.ok) {
+        auditAfter("publish", { actor: me.id, action: "publish_refused", world_id: id, version: rec.version, reason: "package_build", errors: built.errors.slice(0, 5) }, cid);
+        throw Errors.validation("the world could not be packaged for publishing", { correlationId: cid, meta: { errors: built.errors.slice(0, 10) } });
+      }
       let staged: any;
       try { staged = stagingRegistry().publishStaging(built.package); }
-      catch (e: any) { if (e instanceof PublishError) throw Errors.conflict(`staging package refused: ${e.message}`, { correlationId: cid, meta: { code: e.code } }); throw e; }
+      catch (e: any) {
+        auditAfter("publish", { actor: me.id, action: "publish_refused", world_id: id, version: rec.version, reason: "staging_registry", code: e?.code ?? null, package_id: built.package.package_id }, cid);
+        if (e instanceof PublishError) throw Errors.conflict(`staging package refused: ${e.message}`, { correlationId: cid, meta: { code: e.code } });
+        throw e;
+      }
+
+      // PACKAGE INTEGRITY. What was just written is re-opened from disk and
+      // verified end to end — directory name == sha256(archive) == the signed
+      // subject, the ed25519 signature, every file against the descriptor, the
+      // manifest against its hash — with the deployment's own Atlas key as the
+      // ONLY trusted signer. A package that fails is never pointed at by a
+      // published world.
+      const trustedKey = atlasPublicKeyBase64();
+      const opened: any = stagingRegistry().openPreview(id, built.package.package_id, { trustedPublicKeys: trustedKey ? [trustedKey] : [] });
+      if (!opened.ok || opened.key_trusted !== true) {
+        auditAfter("publish", { actor: me.id, action: "publish_refused", world_id: id, version: rec.version, reason: "package_integrity", code: opened.code || "signing_key_untrusted", package_id: built.package.package_id }, cid);
+        throw new AppError("package_integrity_failed", 500, `the staged package did not verify after it was written (${opened.code || "signing key not trusted"}); the world was not published`, { correlationId: cid });
+      }
 
       const receipt: any = issueWorldReceipt(id, me.id);
+      // The publish action is logged BEFORE the world is marked published, and
+      // it is not marked published if the log cannot be written.
+      const auditEntry: any = auditOrRefuse("publish", {
+        actor: me.id, action: "publish", world_id: id, version_before: rec.version, visibility: PUBLISH_VISIBILITY,
+        package_id: built.package.package_id, package_sha256: opened.package_id, descriptor_manifest_hash: opened.manifest_hash,
+        content_hash: contentHashOf(pubV3), receipt_hash: receipt.receipt_hash, playtest: pt.verdict,
+      }, cid);
       wm.meta = wm.meta || {}; wm.meta.atlas_receipt_hash = receipt.receipt_hash; wm.meta.atlas_signed = !!receipt.sig;
       wm.meta.published_package_id = built.package.package_id;
       const pubHash = contentHashOf(pubV3);
@@ -2574,7 +2793,13 @@ const server = http.createServer(async (req, res) => {
       const verify_url = "/verify?receipt=" + Buffer.from(JSON.stringify(receipt)).toString("base64");
       return send(res, 200, {
         ok: true, published: true, signed: !!receipt.sig, world_version: saved.version, receipt, verify_url,
-        staging_package: { package_id: built.package.package_id, channel: "staging", preview_url: staged.preview_url, created: staged.created, manifest_hash: pubHash },
+        staging_package: {
+          package_id: built.package.package_id, channel: "staging", preview_url: staged.preview_url, created: staged.created, manifest_hash: pubHash,
+          // The integrity proof, as verified from disk after writing.
+          integrity: { verified: true, package_sha256: opened.package_id, descriptor_manifest_hash: opened.manifest_hash, signature_key_trusted: true },
+        },
+        visibility: PUBLISH_VISIBILITY,
+        audit: { seq: auditEntry.seq, hash: auditEntry.hash },
         correlation_id: cid,
       });
     }
@@ -2583,9 +2808,10 @@ const server = http.createServer(async (req, res) => {
     m = url.match(/^\/worlds\/([^/]+)\/staging\/rollback$/);
     if (m && method === "POST") {
       const me = await mustBeInternalTester(req, cid);
-      await repo.get(m[1], { requesterId: me.id, requireOwner: true });
+      await getWorldFor(principal, m[1], { requesterId: me.id, requireOwner: true });
       const b = await readBody(req);
       if (typeof b.to_package_id !== "string") throw Errors.validation("to_package_id is required", { correlationId: cid });
+      auditOrRefuse("publish", { actor: me.id, action: "staging_rollback", world_id: m[1], to_package_id: b.to_package_id, reason: typeof b.reason === "string" ? b.reason.slice(0, 200) : null }, cid);
       try {
         const channel = stagingRegistry().rollback(m[1], b.to_package_id, { reason: typeof b.reason === "string" ? b.reason.slice(0, 200) : null });
         return send(res, 200, { ok: true, world_id: m[1], channel: "staging", current: channel.current, history: channel.history.slice(-10), correlation_id: cid });
@@ -2593,6 +2819,29 @@ const server = http.createServer(async (req, res) => {
         if (e instanceof PublishError) throw Errors.conflict(e.message, { correlationId: cid, meta: { code: e.code } });
         throw e;
       }
+    }
+    // Publish package integrity, on demand: re-verify the package the staging
+    // channel points at, and check that it is the one the world says it
+    // published. Internal testers only, and only for a world they may read.
+    m = url.match(/^\/worlds\/([^/]+)\/staging\/verify$/);
+    if (m && method === "GET") {
+      const me = await mustBeInternalTester(req, cid);
+      const rec = await getWorldFor(me, m[1], { requesterId: me.id });
+      const trustedKey = atlasPublicKeyBase64();
+      const ch: any = stagingRegistry().channel(m[1]);
+      const cur: any = ch.current ? stagingRegistry().openPreview(m[1], ch.current, { trustedPublicKeys: trustedKey ? [trustedKey] : [] }) : { ok: false, code: "no_current" };
+      const publishedPkg = rec.manifest?.meta?.published_package_id ?? null;
+      return send(res, 200, {
+        ok: true, world_id: m[1], state: rec.state, world_version: rec.version,
+        published_package_id: publishedPkg, staging_current: ch.current ?? null,
+        package: cur.ok
+          ? { verified: true, package_sha256: cur.package_id, descriptor_manifest_hash: cur.manifest_hash, signature_key_trusted: cur.key_trusted === true, runtime: cur.runtime }
+          : { verified: false, code: cur.code, detail: cur.message },
+        // A published world must point at a verifying package on the current
+        // staging pointer. A draft has no such claim to check.
+        consistent: rec.state === "published" ? (cur.ok && cur.key_trusted === true && publishedPkg === ch.current) : null,
+        correlation_id: cid,
+      });
     }
     m = url.match(/^\/worlds\/([^/]+)\/save$/);
     if (m && method === "POST") {
@@ -2638,7 +2887,7 @@ const server = http.createServer(async (req, res) => {
         if (!b.manifest || typeof b.manifest !== "object" || Array.isArray(b.manifest)) {
           throw Errors.validation("manifest must be an object", { correlationId: cid });
         }
-        const prior = await repo.get(m[1], { requesterId: me.id }).catch(() => null);
+        const prior = await getWorldFor(principal, m[1], { requesterId: me.id }).catch(() => null);
 
         // CREATING a world through save requires what creating one anywhere
         // else requires.
@@ -2697,7 +2946,7 @@ const server = http.createServer(async (req, res) => {
       // a delta could set another player's inventory or hand itself ownership.
       // Both feed livestate, which decides whether a rollback may delete things.
       const delta = b.delta || b; delta.world_id = m[1];
-      await repo.get(m[1], { requesterId: me.id, requireOwner: true });
+      await getWorldFor(principal, m[1], { requesterId: me.id, requireOwner: true });
       // The persistence engine throws plain Errors, and the top-level handler
       // classifies anything that is not an AppError as an internal fault and
       // withholds the message — correctly, since an unexpected exception can
@@ -2725,7 +2974,7 @@ const server = http.createServer(async (req, res) => {
     }
     m = url.match(/^\/worlds\/([^/]+)\/load$/);
     if (m && method === "GET") {
-      const rec = await repo.get(m[1], { requesterId: principal?.id ?? null });
+      const rec = await getWorldFor(principal, m[1], { requesterId: principal?.id ?? null });
       // A world that has never been played has no runtime state, and that is not
       // an error. The runtime registers a "base world" when a world is generated
       // or entered; a world created through POST /worlds/:id/save has simply

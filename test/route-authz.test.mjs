@@ -68,7 +68,7 @@ function baseEnv() {
     DCS_AUTH_SECRET: SECRET,
     DCS_DATA_DIR: DATA,
     PAYMENTS_LIVE: "0",                       // stays false, always
-    NODE_ENV: "test",
+    NODE_ENV: "test", DCS_PUBLISH_VISIBILITY: "public",   // the PUBLIC (production-canary) visibility semantics are what this suite pins; internal is the default and is pinned in test/games-b-backend-closure.test.mjs
     DCS_PROVIDERS_OFFLINE: "1",               // deterministic, free, no live LLM
     ATLAS_PRIVATE_KEY: ATLAS_SEED,            // so publish can genuinely sign
     DCS_INTERNAL_TESTERS: "owner@dcsai.ai,tester@dcsai.ai",
