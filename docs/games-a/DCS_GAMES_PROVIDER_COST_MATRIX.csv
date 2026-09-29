@@ -1,0 +1,36 @@
+PROVIDER,MODEL,TASK_CLASS,UNIT,LIST_PRICE_USD,ENGINE_ESTIMATE_BASIS,EST_USD_PER_BENCH_CALL,TYPICAL_LATENCY,IN_ROUTE,SOURCE,CONFIDENCE,NOTES
+openai,gpt-6-sol,WORLD_DESIGN/GAMEPLAY_LOGIC,1M tokens in/out,2.00/10.00,tokens (pessimistic: full max output),0.083-0.123,5-60s (est),yes,developers.openai.com/api/docs/pricing,HIGH,model id post-dates training data; verify on first live call
+openai,gpt-5.3-codex,CODE_GENERATION,1M tokens in/out,1.75/14.00,tokens,0.1707,10-90s (est),yes,developers.openai.com/api/docs/pricing,HIGH,
+openai,gpt-5.4-nano,FAST_ITERATION,1M tokens in/out,0.20/1.25,tokens,0.001,<2s (est),default only,developers.openai.com/api/docs/pricing,HIGH,
+openai,gpt-image-1-mini,IMAGE_ASSET/TEXTURE/CHARACTER,image (1024-1536px),~0.04 (token-billed 2.50/8.00 per M),image,0.04,10-30s (est),yes,developers.openai.com/api/docs/pricing,MED,per-image figure derived from token rates
+openai,gpt-4o-mini-tts,VOICE_AUDIO,1K chars (approx),~0.015,kchars,0.015,0.5-1s first audio (est),yes,3rd party (tokenmix/costgoat),MED,
+openai,sora-2,VIDEO_CINEMATIC,second,0.10-0.70,n/a,n/a,n/a,NO,costgoat.com,MED,API sunset 24 Sep 2026 — excluded
+google,gemini-3.1-pro-preview,WORLD_DESIGN,1M tokens in/out (<=200k),2.00/12.00,tokens,0.099,10-60s (est),yes,ai.google.dev/gemini-api/docs/pricing,HIGH,
+google,gemini-3.5-flash-lite,FAST_ITERATION,1M tokens in/out,0.30/2.50,tokens,0.0022,<2s (est),yes,ai.google.dev/gemini-api/docs/pricing,HIGH,
+google,gemini-3.8-flash,FAST_ITERATION,1M tokens in/out,0.75/3.75,tokens,n/a,1-5s (est),no,ai.google.dev/gemini-api/docs/pricing,HIGH,promo price to 31 Dec 2026 then 1.50/7.50
+google,gemini-3.1-flash-image,IMAGE_ASSET/TEXTURE,image 1K,0.067,image,0.067,5-15s (est),yes,ai.google.dev/gemini-api/docs/pricing,HIGH,KINIX paid 0.039 for gemini-2.5-flash-image edits (10 Sep)
+google,gemini-3-pro-image,CHARACTER,image 1-2K,0.134,image,0.134,15-40s (est),yes,ai.google.dev/gemini-api/docs/pricing,HIGH,
+google,veo-3.1-fast-generate-preview,VIDEO_CINEMATIC,second 1080p,0.12,second (4s bench clip),0.48,~1 min per clip (est),yes,ai.google.dev/gemini-api/docs/pricing,HIGH,KINIX seeded 0.10/s; durations 4/6/8s only
+google,veo-3.1-lite-generate-preview,VIDEO_CINEMATIC,second 1080p,0.08,second,n/a,<1 min (est),no (candidate),ai.google.dev/gemini-api/docs/pricing,HIGH,cheaper preview-quality option
+google,gemini-3.8-flash-tts,VOICE_AUDIO,1K chars (approx),~0.012,kchars,0.012,~1s (est),yes,ai.google.dev/gemini-api/docs/pricing,HIGH,returns raw PCM (L16 24kHz) — media store must wrap as WAV
+google,imagen-4,IMAGE_ASSET,image,0.02-0.06,n/a,n/a,n/a,NO,invideo.io,MED,shut down on Gemini API 17 Aug 2026 — excluded
+deepseek,deepseek-v4-pro,GAMEPLAY_LOGIC/CODE_GENERATION,1M tokens miss-in/out (peak),1.32/3.96,tokens,0.0495,30-60 tok/s (est),yes,api-docs.deepseek.com/quick_start/pricing,HIGH,off-peak half price
+deepseek,deepseek-flash,FAST_ITERATION,1M tokens in/out (peak),0.30/1.20,tokens,n/a,(est),default only,api-docs.deepseek.com/quick_start/pricing,HIGH,
+cerebras,gpt-oss-120b,FAST_ITERATION/WORLD_DESIGN/GAMEPLAY_LOGIC,1M tokens in/out,0.35/0.75,tokens,0.0011-0.0095,~1000-1800 tok/s,yes,morphllm.com / artificialanalysis.ai,MED,only text vendor proven on DCS staging; shell key rejected 28 Sep
+together,zai-org/GLM-5.3,CODE_GENERATION,1M tokens in/out,1.40/4.40,tokens,0.0549,60-100 tok/s (est),yes,together.ai/pricing,HIGH,
+together,zai-org/GLM-5.3-Flash,FAST_ITERATION,1M tokens in/out,0.15/0.50,tokens,0.0006,(est),yes,together.ai/pricing,HIGH,
+together,black-forest-labs/FLUX.2-pro,IMAGE_ASSET/CHARACTER,image,0.03,image,0.03,2-8s (est),yes,together.ai/pricing,HIGH,
+together,black-forest-labs/FLUX.2-dev,TEXTURE,image,0.0154,image,0.0154,2-8s (est),yes,together.ai/pricing,HIGH,
+together,cartesia/sonic-3,VOICE_AUDIO,1K chars,~0.065,kchars,n/a,(est),B1 media lane only,UNVERIFIED,LOW,
+ltx,ltx-2-5-fast,VIDEO_CINEMATIC,second 1080p,0.13 (KINIX seeded 0.09),second,0.52,10-30s (est),yes,ltx.io pricing / KINIX migration 060:190,MED,KINIX paid ltx-2-3-fast 5s = 0.30 (10 Sep)
+ltx,ltx-2-5-pro,VIDEO_CINEMATIC,second 1080p,0.17,second,n/a,30-90s (est),no (candidate),ltx.io pricing,MED,
+runway,gen4.5,VIDEO_CINEMATIC,second,0.12 (12 credits x $0.01),second,0.48,1-2 min (est),yes,docs.dev.runwayml.com/guides/pricing,HIGH,KINIX verified 10 Sep on pre-existing credits
+runway,gen4_image_turbo,IMAGE_ASSET,image,0.02,image,n/a,10-30s (est),no (candidate),docs.dev.runwayml.com/guides/pricing,HIGH,text_to_image requires referenceImages array
+worldlabs,marble-1.1,SPATIAL_3D,world,1.26,gen (settles to reported credits x 0.0008),1.26,~5 min,yes,docs.worldlabs.ai/api/pricing,HIGH,KINIX measured 1580 credits (10 Sep)
+worldlabs,marble-1.0-draft,SPATIAL_3D,world,0.12-0.20,gen,0.20,30-60s (est),yes,docs.worldlabs.ai/api/pricing,HIGH,
+worldlabs,HQ mesh export (GLB),SPATIAL_3D,world,2.80,n/a,n/a,minutes,not automated,docs.worldlabs.ai/api/pricing,HIGH,collider GLB + SPZ splats are free with generation
+hedra,character-3,VIDEO_CINEMATIC (talking character),second,0.025-0.0625 (KINIX seeded 0.05),second,n/a,1-3x clip length (est),registered NOT dispatched,usagepricing / KINIX migration 104:477,MED,upload path unverified in KINIX
+elevenlabs,eleven_flash_v2_5,VOICE_AUDIO,1K chars,0.04,kchars,0.04,~75ms (vendor),yes,elevenlabs.io/pricing/api,HIGH,v4 Turbo 0.011 promo to 12 Oct
+tripo,text-to-3d,SPATIAL_3D/CHARACTER (mesh),generation,0.20 textured,gen,n/a,10-60s (est),via external-3d seam,developers.tripo3d.ai/en/pricing,HIGH,no adapter anywhere in estate; recommended seam backend
+meshy,meshy-7,SPATIAL_3D/CHARACTER (mesh),generation,~0.20-0.40,gen,n/a,1-3 min (est),via external-3d seam,docs.meshy.ai/en/api/pricing,MED,
+local,deterministic (all local:*),all,call,0,0,0,<50 ms,yes (last step),measured in tests,HIGH,

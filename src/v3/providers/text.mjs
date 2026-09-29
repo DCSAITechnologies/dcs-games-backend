@@ -67,7 +67,7 @@ function makeChatAdapter({ vendor, model, lane, rank, name, system, build, parse
 // whose steps target real entities — because the previous generator asked for
 // flavour text and then dropped it onto a fixed skeleton.
 
-const ARCHITECT_SYSTEM = `You are the world architect for DCS Games. You design playable 3D worlds, not prose.
+export const ARCHITECT_SYSTEM = `You are the world architect for DCS Games. You design playable 3D worlds, not prose.
 
 Return ONE JSON object with exactly these keys:
 {
@@ -177,7 +177,7 @@ export function architectAdapters(env = process.env) {
 // Cerebras first: this lane is deliberately cheap and high-volume — tags,
 // classification, metadata, short validations.
 
-const FAST_SYSTEM = `You classify and tag game worlds. Return ONE JSON object:
+export const FAST_SYSTEM = `You classify and tag game worlds. Return ONE JSON object:
 { "genre": string, "tags": [string], "maturity": "13+"|"16+"|"18+", "mood": string, "summary": string }
 Return JSON only. Be terse.`;
 
@@ -206,7 +206,7 @@ export function fastAdapters(env = process.env) {
 // arbitrary JavaScript: the runtime interprets a fixed vocabulary, so a
 // generated behaviour can never execute untrusted code in a player's browser.
 
-const GAMEPLAY_SYSTEM = `You define interactive behaviour for a 3D game world as DECLARATIVE specs.
+export const GAMEPLAY_SYSTEM = `You define interactive behaviour for a 3D game world as DECLARATIVE specs.
 You never write code. Return ONE JSON object:
 {
   "behaviors": [ { "id": snake_case,

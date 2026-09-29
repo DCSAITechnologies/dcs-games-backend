@@ -1,0 +1,4 @@
+PROVIDER,MODEL,TASK,LATENCY_MS,QUALITY,COST_ESTIMATE_USD,SUCCESS,RECOMMENDED_ROLE,FAILURE_CLASS,NOTES,RUN_AT
+"cerebras","gpt-oss-120b","FAST_ITERATION","626","","0.0011","NO","","AUTH","cerebras: HTTP 401 {""message"":""Wrong API Key"",""type"":""invalid_request_error"",""param"":""api_key"",""code"":""wrong_api_key""}","2026-09-28T18:56:09.071Z"
+"cerebras","gpt-oss-120b","WORLD_DESIGN","","","0.0065","SKIPPED","","","provider dropped earlier in this run (credential rejected, or repeated failures); not called","2026-09-28T18:56:09.071Z"
+"cerebras","gpt-oss-120b","GAMEPLAY_LOGIC","","","0.0095","SKIPPED","","","provider dropped earlier in this run (credential rejected, or repeated failures); not called","2026-09-28T18:56:09.071Z"
