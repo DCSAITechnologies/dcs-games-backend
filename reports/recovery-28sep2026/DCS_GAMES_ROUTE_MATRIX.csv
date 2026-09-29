@@ -1,0 +1,192 @@
+ROUTE,LOADS,AUTH_REQUIRED,REDIRECT_BEHAVIOR,SCROLL_WORKS,HEADER,SIDEBAR,RESPONSIVE,API_ERRORS,JS_ERRORS,BROKEN_CONTROLS,PLACEHOLDERS,NOTES,STATUS
+/,yes,no,none,yes,yes,no,yes,none,none,none,sample-data banner,,GREEN
+/404,yes,no,none,yes,no,no,yes,none,none,none,none,intended 404 page,GREEN
+/at-creators,yes,no,none,yes,yes,no,yes,none,none,none,none,,GREEN
+/at-docs,yes,no,none,yes,yes,no,yes,none,none,none,sample-data banner; 2 SOON block(s),,GREEN
+/at-explorer,yes,no,none,yes,yes,no,yes,none,none,none,none,,GREEN
+/at-receipts,yes,no,none,yes,yes,no,yes,none,none,none,none,,GREEN
+/at-reputation,yes,no,none,yes,yes,no,yes,none,none,none,none,,GREEN
+/at-worlds,yes,no,none,yes,yes,no,yes,none,none,none,none,,GREEN
+/auth-callback,yes,login redirect,/login?reason=expired&next=%2Fplayer-home.html,yes,yes,yes,yes,/v3/discover NETERR x2; /api/public/events NETERR x1,none,none,sample-data banner,beta-lock overlay on production host; NETERR = staging timeout under 8-way crawl concurrency; endpoint answers 200 in 1.4-2.4s when called directly,GREEN
+/cm-challenges,yes,no,none,yes,yes,no,yes,none,none,none,sample-data banner; 2 SOON block(s),,GREEN
+/cm-clubs,yes,no,none,yes,yes,no,yes,none,none,none,sample-data banner; 2 SOON block(s),,GREEN
+/cm-crews,yes,no,none,yes,yes,no,yes,none,none,none,sample-data banner,,GREEN
+/cm-forums,yes,no,none,yes,yes,no,yes,none,none,none,sample-data banner; 2 SOON block(s),,GREEN
+/cm-friends,yes,no,none,yes,yes,no,yes,none,none,none,sample-data banner; 2 SOON block(s),,GREEN
+/cm-leaderboards,yes,no,none,yes,yes,no,yes,none,none,none,sample-data banner,,GREEN
+/cm-lfg,yes,no,none,yes,yes,no,yes,none,none,none,sample-data banner; 2 SOON block(s),,GREEN
+/cm-livestreams,yes,no,none,yes,yes,no,yes,none,none,8 dead link(s),sample-data banner,,GREEN
+/cm-recruit,yes,no,none,yes,yes,no,yes,none,none,none,sample-data banner; 2 SOON block(s),,GREEN
+/cr-economy,yes,login redirect,/login?next=%2Fstudio%2Fpages%2Fstudio-overview-ai-world-builder,yes,yes,no,yes,none,none,none,sample-data banner,beta-lock overlay on production host,GREEN
+/cr-event,yes,internal-tester gate,/create-v3,yes,yes,no,yes,none,none,none,none,,GREEN
+/cr-npc,yes,internal-tester gate,/create-v3,yes,yes,no,yes,none,none,none,none,,GREEN
+/cr-quest,yes,internal-tester gate,/create-v3,yes,yes,no,yes,none,none,none,none,,GREEN
+/cr-story,yes,internal-tester gate,/create-v3,yes,yes,no,yes,none,none,none,none,,GREEN
+/cr-studio,yes,login redirect,/login?next=%2Fstudio%2Fpages%2Fstudio-overview-ai-world-builder,yes,yes,no,yes,none,none,none,sample-data banner,beta-lock overlay on production host,GREEN
+/cr-voice,yes,internal-tester gate,/create-v3,yes,yes,no,yes,none,none,none,none,,GREEN
+/cr-world,yes,internal-tester gate,/create-v3,yes,yes,no,yes,none,none,none,none,,GREEN
+/create-v3,yes,internal-tester gate,none,yes,yes,no,yes,none,none,none,none,,GREEN
+/ev-community,yes,no,none,yes,yes,no,yes,none,none,10 dead link(s),sample-data banner,,GREEN
+/ev-crew,yes,no,none,yes,yes,no,yes,none,none,10 dead link(s),sample-data banner,,GREEN
+/ev-daily,yes,no,none,yes,yes,no,yes,none,none,10 dead link(s),sample-data banner,,GREEN
+/ev-drops,yes,no,none,yes,yes,no,yes,none,none,10 dead link(s),sample-data banner,,GREEN
+/ev-live,yes,no,none,yes,yes,no,yes,none,none,10 dead link(s),sample-data banner,,GREEN
+/ev-seasonal,yes,no,none,yes,yes,no,yes,none,none,10 dead link(s),sample-data banner,,GREEN
+/ev-tournaments,yes,no,none,yes,yes,no,yes,none,none,10 dead link(s),sample-data banner,,GREEN
+/ev-weekend,yes,no,none,yes,yes,no,yes,none,none,10 dead link(s),sample-data banner,,GREEN
+/explore-v3,yes,no,none,yes,yes,no,yes,none,none,none,none,,GREEN
+/games-atlas,yes,no,none,yes,yes,no,yes,none,none,none,none,,GREEN
+/games-community,yes,no,none,yes,yes,no,yes,none,none,none,none,,GREEN
+/games-create,yes,internal-tester gate,none,yes,yes,no,yes,none,none,none,none,,GREEN
+/games-events,yes,no,none,yes,yes,no,yes,none,none,none,sample-data banner,,GREEN
+/games-explore,yes,no,none,yes,yes,no,yes,none,none,none,sample-data banner,,GREEN
+/games-home,yes,no,none,yes,yes,no,yes,none,none,none,sample-data banner,,GREEN
+/games-marketplace,yes,internal-tester gate,none,yes,yes,no,yes,none,none,none,sample-data banner,,GREEN
+/games-rewards,yes,no,none,yes,yes,no,yes,none,none,none,none,,GREEN
+/genre-adventure,yes,no,none,yes,yes,no,yes,/v3/discover NETERR x1,none,none,none,NETERR = staging timeout under 8-way crawl concurrency; endpoint answers 200 in 1.4-2.4s when called directly,GREEN
+/genre-coop,yes,no,none,yes,yes,no,yes,/v3/discover NETERR x2,none,none,none,NETERR = staging timeout under 8-way crawl concurrency; endpoint answers 200 in 1.4-2.4s when called directly,GREEN
+/genre-education,yes,no,none,yes,yes,no,yes,/v3/discover NETERR x2,none,none,none,NETERR = staging timeout under 8-way crawl concurrency; endpoint answers 200 in 1.4-2.4s when called directly,GREEN
+/genre-fantasy,yes,no,none,yes,yes,no,yes,none,none,none,none,,GREEN
+/genre-horror,yes,no,none,yes,yes,no,yes,none,none,none,none,,GREEN
+/genre-openworld,yes,no,none,yes,yes,no,yes,none,none,none,none,,GREEN
+/genre-puzzle,yes,no,none,yes,yes,no,yes,none,none,none,none,,GREEN
+/genre-racing,yes,no,none,yes,yes,no,yes,none,none,none,none,,GREEN
+/genre-roleplay,yes,no,none,yes,yes,no,yes,none,none,none,none,,GREEN
+/genre-scifi,yes,no,none,yes,yes,no,yes,none,none,none,none,,GREEN
+/genre-simulator,yes,no,none,yes,yes,no,yes,none,none,none,none,,GREEN
+/genre-sports,yes,no,none,yes,yes,no,yes,none,none,none,none,,GREEN
+/genre-survival,yes,no,none,yes,yes,no,yes,none,none,none,none,,GREEN
+/genre-tycoon,yes,no,none,yes,yes,no,yes,none,none,none,none,,GREEN
+/history-v3,yes,internal-tester gate,none,yes,yes,no,yes,none,none,none,none,,GREEN
+/legal/,yes,no,none,yes,yes,no,yes,none,none,none,none,,GREEN
+/legal/dmca,yes,no,none,yes,yes,no,yes,none,none,none,none,,GREEN
+/legal/privacy,yes,no,none,yes,yes,no,yes,none,none,none,none,,GREEN
+/legal/safety,yes,no,none,yes,yes,no,yes,none,none,none,none,,GREEN
+/legal/terms,yes,no,none,yes,yes,no,yes,none,none,none,none,,GREEN
+/login,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,beta-lock overlay on production host,GREEN
+/mk-agents,yes,internal-tester gate,none,yes,yes,no,yes,none,none,none,sample-data banner,,GREEN
+/mk-anim,yes,internal-tester gate,none,yes,yes,no,yes,none,none,none,sample-data banner,,GREEN
+/mk-assets,yes,internal-tester gate,none,yes,yes,no,yes,none,none,none,sample-data banner,,GREEN
+/mk-econ,yes,internal-tester gate,none,yes,yes,no,yes,none,none,none,sample-data banner,,GREEN
+/mk-fx,yes,internal-tester gate,none,yes,yes,no,yes,none,none,none,sample-data banner,,GREEN
+/mk-music,yes,internal-tester gate,none,yes,yes,no,yes,none,none,none,sample-data banner,,GREEN
+/mk-npcs,yes,internal-tester gate,none,yes,yes,no,yes,none,none,none,sample-data banner,,GREEN
+/mk-passes,yes,internal-tester gate,none,yes,yes,no,yes,none,none,none,sample-data banner,,GREEN
+/mk-rewards,yes,internal-tester gate,none,yes,yes,no,yes,none,none,none,sample-data banner,,GREEN
+/mk-scripts,yes,internal-tester gate,none,yes,yes,no,yes,none,none,none,sample-data banner,,GREEN
+/mk-subs,yes,internal-tester gate,none,yes,yes,no,yes,none,none,none,sample-data banner,,GREEN
+/mk-voice,yes,internal-tester gate,none,yes,yes,no,yes,none,none,none,sample-data banner,,GREEN
+/mk-worlds,yes,internal-tester gate,none,yes,yes,no,yes,none,none,none,sample-data banner,,GREEN
+/play,yes,no,none,yes,no,no,yes,none,none,none,none,,GREEN
+/play-v3,yes,no,none,yes,yes,no,yes,none,none,none,none,,GREEN
+/player-achievements,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 14 unreachable element-checks before (baseline),GREEN
+/player-crew-chat,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-crew-events,yes,no,none,yes,yes,yes,yes,none,none,4 dead link(s),sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-crew-mycrew,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 10 unreachable element-checks before (baseline),GREEN
+/player-crew-ranking,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-crew-recruit,yes,no,none,yes,yes,yes,yes,none,none,3 dead link(s),sample-data banner,FIXED: 14 unreachable element-checks before (baseline),GREEN
+/player-crew-store,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,sample-data banner,,GREEN
+/player-crews,yes,no,none,yes,yes,yes,yes,none,none,2 dead link(s),sample-data banner,FIXED: 22 unreachable element-checks before (baseline),GREEN
+/player-ev-history,yes,no,none,yes,yes,yes,yes,none,none,2 dead link(s),sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-ev-joined,yes,no,none,yes,yes,yes,yes,none,none,2 dead link(s),sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-ev-live,yes,no,none,yes,yes,yes,yes,none,none,4 dead link(s),sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-ev-upcoming,yes,no,none,yes,yes,yes,yes,none,none,3 dead link(s),sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-events,yes,no,none,yes,yes,yes,yes,none,none,11 dead link(s),sample-data banner,FIXED: 19 unreachable element-checks before (baseline),GREEN
+/player-fr-invites,yes,no,none,yes,yes,yes,yes,none,none,3 dead link(s),sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-fr-messages,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-fr-online,yes,no,none,yes,yes,yes,yes,none,none,4 dead link(s),sample-data banner,FIXED: 5 unreachable element-checks before (baseline),GREEN
+/player-fr-parties,yes,no,none,yes,yes,yes,yes,none,none,1 dead link(s),sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-fr-requests,yes,no,none,yes,yes,yes,yes,none,none,5 dead link(s),sample-data banner,FIXED: 6 unreachable element-checks before (baseline),GREEN
+/player-friends,yes,no,none,yes,yes,yes,yes,none,none,5 dead link(s),sample-data banner,FIXED: 27 unreachable element-checks before (baseline),GREEN
+/player-home,yes,login redirect,/login?next=%2Fplayer-home,yes,yes,yes,yes,none,none,none,sample-data banner,beta-lock overlay on production host,GREEN
+/player-inv-artifacts,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-inv-assets,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-inv-items,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-inv-vehicles,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-inventory,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-lb-crew,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-lb-friends,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-lb-global,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-lb-season,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-lb-world,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-leaderboards,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-marketplace,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,sample-data banner,,GREEN
+/player-mkt-purchases,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-mkt-store,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 5 unreachable element-checks before (baseline),GREEN
+/player-mkt-wishlist,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-notifications,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-pets,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-play,yes,no,none,yes,yes,yes,yes,none,none,23 dead link(s),sample-data banner,FIXED: 36 unreachable element-checks before (baseline),GREEN
+/player-play-browse,yes,no,none,yes,yes,yes,yes,none,none,24 dead link(s),sample-data banner,FIXED: 16 unreachable element-checks before (baseline),GREEN
+/player-play-downloads,yes,no,none,yes,yes,yes,yes,none,none,4 dead link(s),sample-data banner,FIXED: 12 unreachable element-checks before (baseline),GREEN
+/player-play-favorites,yes,no,none,yes,yes,yes,yes,none,none,6 dead link(s),sample-data banner,FIXED: 20 unreachable element-checks before (baseline),GREEN
+/player-play-recent,yes,no,none,yes,yes,yes,yes,none,none,8 dead link(s),sample-data banner,FIXED: 27 unreachable element-checks before (baseline),GREEN
+/player-play-search,yes,no,none,yes,yes,yes,yes,none,none,3 dead link(s),sample-data banner,FIXED: 10 unreachable element-checks before (baseline),GREEN
+/player-pr-badges,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-pr-crews,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-pr-followers,yes,no,none,yes,yes,yes,yes,none,none,8 dead link(s),sample-data banner,FIXED: 12 unreachable element-checks before (baseline),GREEN
+/player-pr-history,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-pr-stats,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-pr-worlds,yes,no,none,yes,yes,yes,yes,none,none,7 dead link(s),sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-profile,yes,no,none,yes,yes,yes,yes,none,none,7 dead link(s),sample-data banner,FIXED: 48 unreachable element-checks before (baseline),GREEN
+/player-replays,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-rewards,yes,no,none,yes,yes,yes,yes,none,none,8 dead link(s),sample-data banner,FIXED: 20 unreachable element-checks before (baseline),GREEN
+/player-set-account,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-set-controls,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-set-language,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-set-privacy,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-set-security,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-set-voice,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,FIXED: 8 unreachable element-checks before (baseline),GREEN
+/player-settings,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner; 2 SOON block(s),FIXED: 8 unreachable element-checks before (baseline),GREEN
+/profile-v3,yes,no,none,yes,yes,no,yes,/profiles/founder 404 x5,none,none,none,"404 is the audit fixture: stub identity ""founder"" has no staging profile. Needs a real signed-in account.",UNVERIFIED
+/rw-achievements,yes,no,none,yes,yes,no,yes,none,none,6 dead link(s),sample-data banner,,GREEN
+/rw-battlepass,yes,no,none,yes,yes,no,yes,none,none,none,sample-data banner,,GREEN
+/rw-codes,yes,no,none,yes,yes,no,yes,none,none,none,sample-data banner,,GREEN
+/rw-collections,yes,no,none,yes,yes,no,yes,none,none,6 dead link(s),sample-data banner,,GREEN
+/rw-daily,yes,no,none,yes,yes,no,yes,none,none,none,sample-data banner,,GREEN
+/rw-season,yes,no,none,yes,yes,no,yes,none,none,6 dead link(s),sample-data banner,,GREEN
+/rw-special,yes,no,none,yes,yes,no,yes,none,none,6 dead link(s),sample-data banner,,GREEN
+/safety-v3,yes,no,none,yes,yes,no,yes,none,none,none,none,,GREEN
+/signup,yes,no,none,yes,yes,yes,yes,none,none,none,sample-data banner,,GREEN
+/social-v3,yes,no,none,yes,yes,no,yes,none,none,none,none,,GREEN
+/studio,yes,login redirect,/login?next=%2Fstudio%2Fpages%2Fstudio-overview-ai-world-builder,yes,yes,yes,yes,none,none,none,sample-data banner,beta-lock overlay on production host,GREEN
+/studio/pages/,yes,internal-tester gate,none,yes,no,yes,yes,none,none,none,sample-data banner,,GREEN
+/studio/pages/ai-studio/boss-builder,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,none,,GREEN
+/studio/pages/ai-studio/crafting-builder,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,none,,GREEN
+/studio/pages/ai-studio/director-builder,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,none,,GREEN
+/studio/pages/ai-studio/dungeon-builder,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,none,,GREEN
+/studio/pages/ai-studio/economy-builder,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,none,,GREEN
+/studio/pages/ai-studio/event-builder,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,none,,GREEN
+/studio/pages/ai-studio/npc-builder,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,none,,GREEN
+/studio/pages/ai-studio/pet-builder,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,none,,GREEN
+/studio/pages/ai-studio/quest-builder,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,none,,GREEN
+/studio/pages/ai-studio/story-builder,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,none,,GREEN
+/studio/pages/ai-studio/terrain-builder,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,none,,GREEN
+/studio/pages/ai-studio/voice-builder,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,none,,GREEN
+/studio/pages/ai-studio/world-builder,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,none,,GREEN
+/studio/pages/analytics,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,none,,GREEN
+/studio/pages/assets,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,sample-data banner,,GREEN
+/studio/pages/atlas,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,sample-data banner,,GREEN
+/studio/pages/economy,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,sample-data banner,,GREEN
+/studio/pages/editors/assets-import,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,sample-data banner,,GREEN
+/studio/pages/editors/events-rewards,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,sample-data banner,,GREEN
+/studio/pages/editors/marketplace-listing,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,sample-data banner,,GREEN
+/studio/pages/editors/moderation-chatlog,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,sample-data banner,,GREEN
+/studio/pages/editors/npc-behavior,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,sample-data banner,,GREEN
+/studio/pages/editors/players-drilldown,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,sample-data banner,,GREEN
+/studio/pages/editors/quests-graph,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,sample-data banner,,GREEN
+/studio/pages/editors/retention-cohorts,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,sample-data banner,,GREEN
+/studio/pages/editors/revenue-payouts,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,sample-data banner,,GREEN
+/studio/pages/editors/settings-team,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,sample-data banner,,GREEN
+/studio/pages/editors/worlds-versions,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,sample-data banner,,GREEN
+/studio/pages/events,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,sample-data banner,,GREEN
+/studio/pages/marketplace,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,none,,GREEN
+/studio/pages/moderation,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,sample-data banner,,GREEN
+/studio/pages/npcs,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,sample-data banner,,GREEN
+/studio/pages/players,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,sample-data banner,,GREEN
+/studio/pages/quests,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,sample-data banner,,GREEN
+/studio/pages/retention,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,sample-data banner,,GREEN
+/studio/pages/revenue,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,none,,GREEN
+/studio/pages/settings,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,sample-data banner,,GREEN
+/studio/pages/studio-overview-ai-world-builder,yes,login redirect,/login?next=%2Fstudio%2Fpages%2Fstudio-overview-ai-world-builder,yes,yes,yes,yes,none,none,none,sample-data banner,beta-lock overlay on production host,GREEN
+/studio/pages/worlds,yes,internal-tester gate,none,yes,yes,yes,yes,none,none,none,none,,GREEN
