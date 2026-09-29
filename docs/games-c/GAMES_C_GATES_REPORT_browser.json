@@ -1,0 +1,229 @@
+{
+  "report_version": "1",
+  "world_id": "w_qa_cli",
+  "manifest_hash": "sha256:8badf2d3f6198b78cc9fbaf0d003371d3554e9c8f10ae68c40650727a668577c",
+  "started_at": "2026-09-28T18:20:39.420Z",
+  "finished_at": "2026-09-28T18:20:47.660Z",
+  "playtest_verdict": "PASSED",
+  "overall": "PASS",
+  "summary": {
+    "pass": 13,
+    "fail": 0,
+    "skipped": 0,
+    "total": 13
+  },
+  "modules": {
+    "patch": "loaded",
+    "memory": "loaded",
+    "publish": "loaded",
+    "companion": "loaded",
+    "multiplayer": "loaded"
+  },
+  "gates": [
+    {
+      "gate": "launch",
+      "status": "PASS",
+      "evidence": {
+        "mode": "headless (schema + guard + spawn); browser boot added when DCS_GAMESC_BROWSER_GATES=1",
+        "schema_ok": true,
+        "schema_errors": [],
+        "guard_ok": true,
+        "guard_blocking": [],
+        "has_spawn": true,
+        "browser": {
+          "booted": true,
+          "boot_ms": 1800,
+          "request_failures": [],
+          "bad_responses": []
+        }
+      },
+      "duration_ms": 9
+    },
+    {
+      "gate": "navigation",
+      "status": "PASS",
+      "evidence": {
+        "validator": "validators.validateNavigation",
+        "findings": []
+      },
+      "duration_ms": 0
+    },
+    {
+      "gate": "movement",
+      "status": "PASS",
+      "evidence": {
+        "simulator": "agent.simulatePlaythrough",
+        "ok": true,
+        "visited_cells": 2150,
+        "coverage": 1,
+        "step_m": 7,
+        "truncated": false,
+        "thresholds": {
+          "minCoverage": 0.05,
+          "minVisitedCells": 2
+        }
+      },
+      "duration_ms": 0
+    },
+    {
+      "gate": "collision",
+      "status": "PASS",
+      "evidence": {
+        "checks": [
+          "asset_no_collision",
+          "spawn_inside_structure",
+          "structure_out_of_bounds"
+        ],
+        "findings": [],
+        "overlaps_minor": 0,
+        "blocked_by_solids": "simulatePlaythrough treats structure footprints as solid (agent.mjs)",
+        "visited_cells": 2150
+      },
+      "duration_ms": 0
+    },
+    {
+      "gate": "objective_reachability",
+      "status": "PASS",
+      "evidence": {
+        "simulator": "agent.simulateQuests",
+        "quests": [
+          {
+            "quest": "quest_arrival",
+            "completable": true,
+            "blocked": []
+          },
+          {
+            "quest": "quest_errand",
+            "completable": true,
+            "blocked": []
+          }
+        ],
+        "validator_findings": []
+      },
+      "duration_ms": 0
+    },
+    {
+      "gate": "asset_load",
+      "status": "PASS",
+      "evidence": {
+        "mode": "headless (refs resolve, url policy, bomb limits); network load checked in browser mode",
+        "assets": 6,
+        "formats": [
+          "instanced"
+        ],
+        "totals": {
+          "bytes": 0,
+          "triangles": 0,
+          "instances": 0
+        },
+        "problems": []
+      },
+      "duration_ms": 0
+    },
+    {
+      "gate": "fps",
+      "status": "PASS",
+      "evidence": {
+        "fps": 44.9,
+        "min": 20,
+        "frames": {
+          "runtime": {
+            "fps_avg": 45,
+            "frame_ms_avg": 22.26,
+            "samples": 120
+          },
+          "raf_fps": 60.2,
+          "source": "runtime.stats().frame_ms_avg after >=120 frames"
+        },
+        "renderer": "headless Chrome + swiftshader (software GL)"
+      }
+    },
+    {
+      "gate": "memory",
+      "status": "PASS",
+      "evidence": {
+        "heap_mb": 11.8,
+        "max_mb": 512
+      }
+    },
+    {
+      "gate": "console_errors",
+      "status": "PASS",
+      "evidence": {
+        "page_errors": [],
+        "console_errors": [],
+        "max": 0
+      }
+    },
+    {
+      "gate": "save_reload",
+      "status": "PASS",
+      "evidence": {
+        "module": "gamesc/memory.createWorldMemoryV2 (in-memory adapter)",
+        "saved_version": 1,
+        "idempotent_resave": true,
+        "hash_before": "sha256:25ced015aff796f99700060a71711b94540a4d8db96ec0029c8a135abe10fd91",
+        "hash_after_reload": "sha256:25ced015aff796f99700060a71711b94540a4d8db96ec0029c8a135abe10fd91",
+        "integrity_ok": true
+      },
+      "duration_ms": 16
+    },
+    {
+      "gate": "edit_retest",
+      "status": "PASS",
+      "evidence": {
+        "module": "gamesc/patch",
+        "probe_source": "companion",
+        "probe_text": "make it stormy",
+        "patch_id": "p_5a1d5e3dfa105f0775ecf5f7",
+        "ops": [
+          {
+            "op": "set",
+            "path": "environment.weather",
+            "value": "storm"
+          }
+        ],
+        "verdict_before": "PASSED",
+        "verdict_after": "PASSED",
+        "coverage_after": 1,
+        "inverse_round_trip": true,
+        "guard_after_ok": true
+      },
+      "duration_ms": 43
+    },
+    {
+      "gate": "publish_package",
+      "status": "PASS",
+      "evidence": {
+        "module": "gamesc/publish.buildStagingPackage",
+        "package_id": "8924986ec8b2a38f14cb5111fbcb3b93786fe327e66cd543bd07775de6f25715",
+        "files": [
+          "manifest.json",
+          "game-package.json"
+        ],
+        "archive_bytes": 36857,
+        "manifest_hash": "sha256:8badf2d3f6198b78cc9fbaf0d003371d3554e9c8f10ae68c40650727a668577c",
+        "playtest": "PASSED",
+        "descriptor_guard_ok": true
+      },
+      "duration_ms": 25
+    },
+    {
+      "gate": "reopen_published_preview",
+      "status": "PASS",
+      "evidence": {
+        "module": "gamesc/publish.createStagingRegistry + openPreview",
+        "preview_url": "http://127.0.0.1:8788/preview/w_qa_cli/8924986ec8b2a38f14cb5111fbcb3b93786fe327e66cd543bd07775de6f25715/",
+        "channel_current": "8924986ec8b2a38f14cb5111fbcb3b93786fe327e66cd543bd07775de6f25715",
+        "opened_ok": true,
+        "open_code": null,
+        "manifest_hash": "sha256:8badf2d3f6198b78cc9fbaf0d003371d3554e9c8f10ae68c40650727a668577c",
+        "replayed_after_reopen": {
+          "coverage": 1,
+          "quests_completable": true
+        }
+      },
+      "duration_ms": 14
+    }
+  ]
+}
