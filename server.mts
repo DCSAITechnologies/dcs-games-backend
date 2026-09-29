@@ -19,7 +19,7 @@ import { makeKeyEndpoint } from "./src/cw7/atlas-key.mjs";       // CW7: GET /at
 import { atlasReady, verifyReceipt, atlasPublicKeyBase64, issueWorldReceipt, signedFields } from "./src/cw7/atlas-local-sign.mjs"; // CW7: local ed25519 sign+verify (off-chain, no gas)
 import { makeCrossProductRouter } from "./src/cw7/atlas-cross-product.mjs"; // CW7 v4.0: cross-product reputation (node-http routeTable)
 import { createEconomyRouter } from "./src/cw6/economy-router.mjs";          // CW6 v3.0: economy routes (DARK), non-express fallback router
-import { LANES } from "./src/v3/providers/contract.mjs";                        // B11: media lane
+import { LANES, STATUS as LANE_STATUS } from "./src/v3/providers/contract.mjs";                        // B11: media lane
 import { createAssemblyRouter } from "./src/v3/router/assembly.mjs";            // B1: multi-provider world assembly
 import { validateManifest, MANIFEST_VERSION } from "./src/v3/manifest/schema.mjs"; // B0: canonical world contract
 import { ensureV3 } from "./src/v3/manifest/migrate.mjs";                       // B0: v1 -> v3 upgrade
@@ -49,6 +49,12 @@ import { assertSchema, currentVersion } from "./src/core/schema.mjs";           
 import { createWorldRepository, manifestHash } from "./src/core/worldstore.mjs";          // A3: durable, lossless, idempotent, ownership-aware world persistence
 import { createPrincipalResolver } from "./src/core/principal.mjs";         // A1: PARENT-OWNED canonical principal. No x-user-id fallback, ever.
 import { AppError, Errors, newCorrelationId, logError, optional } from "./src/core/errors.mjs"; // A4: structured errors, correlation ids, no silent swallow
+import { applyPatch as applyEditPatch, hashManifest as contentHashOf } from "./src/v3/gamesc/patch/index.mjs";            // GAMES-C: typed, invertible edit patches
+import { interpret as companionInterpret, buildPatch as companionBuildPatch } from "./src/v3/gamesc/companion/index.mjs"; // GAMES-C: edit companion (planEdit fallback)
+import { createWorldMemoryV2WithPatchModule, createFsAdapter } from "./src/v3/gamesc/memory/index.mjs";                  // GAMES-C: hash-chained version ledger
+import { buildStagingPackage, atlasEnvSigner, createStagingRegistry, PublishError } from "./src/v3/gamesc/publish/index.mjs"; // GAMES-C: signed, content-addressed STAGING packages
+import { guardManifest, guardUserPrompt, createUserDailyCap } from "./src/v3/gamesc/guard/index.mjs";                   // GAMES-C: manifest/prompt threat checks + spend cap
+import { createGenerationEngine } from "./src/v3/engine/index.mjs";                                                       // GAMES-A: provider engine, local-only unless approved
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const PAYMENTS_LIVE = process.env.PAYMENTS_LIVE === "1";
@@ -148,6 +154,30 @@ const social = createSocialService(process.env, { safety, subscriptions: subs })
 const progression = createProgressionService({ social, worldMemory });
 const repo = createWorldRepository();                                        // A3: replaces the process-local Map + swallowed best-effort insert
 console.log("A3 world store:", repo.kind);
+
+// GAMES-C. The repository stays the head and the authority for "which version
+// is this"; World Memory v2 is a hash-chained MIRROR of it, so a v2 failure is
+// reported as degraded and never fails a write the repository accepted.
+const DATA_DIR = process.env.DCS_DATA_DIR || path.join(process.cwd(), ".dcs-data");
+const { memory: worldMemV2 } = await createWorldMemoryV2WithPatchModule({ adapter: createFsAdapter(path.join(DATA_DIR, "world-memory-v2")) });
+// STAGING only: the registry refuses production targets at construction and on
+// every preview URL it mints. Built lazily so a misconfigured target fails the
+// publish that needs it, not the boot of every other route.
+let _stagingRegistry: any = null;
+const stagingRegistry = () => (_stagingRegistry ??= createStagingRegistry({ root: path.join(DATA_DIR, "staging-packages"), readOnly: process.env.DCS_STAGING_READONLY === "1" }));
+// One per-user daily cap across every generating route. Local/deterministic
+// generation costs nothing and is never refused by it.
+const generationDailyCap = createUserDailyCap({ capUsd: Number(process.env.DCS_GAMES_USER_DAILY_USD || 5) });
+
+// GAMES-A. External provider routes are PROVISIONAL until credentials and the
+// live benchmark are separately approved. Until DCS_GAMES_ENGINE_EXTERNAL=1 the
+// engine runs with providers forced offline AND a fetch that refuses, so no
+// route step can reach a paid vendor even if a credential is present.
+const ENGINE_EXTERNAL_APPROVED = process.env.DCS_GAMES_ENGINE_EXTERNAL === "1" && process.env.DCS_PROVIDERS_OFFLINE !== "1";
+const genEngine = createGenerationEngine(ENGINE_EXTERNAL_APPROVED ? {} : {
+  env: { ...process.env, DCS_PROVIDERS_OFFLINE: "1" },
+  fetchImpl: async () => { throw new Error("games-engine: external providers are not approved in this deployment"); },
+});
 
 // A2: when a direct Postgres DSN is configured, assert the schema BEFORE serving.
 // An unsupported schema must stop the process, not surface later as empty data.
@@ -320,9 +350,155 @@ function sendHTML(res: http.ServerResponse, code: number, html: string) {
   res.writeHead(code, h);
   res.end(html);
 }
+// The largest legitimate body is a generate request carrying a reference image:
+// 6 MB of image (providers/vision.mjs) is ~8 MB as a base64 data URL.
+const MAX_BODY_BYTES = Number(process.env.DCS_MAX_BODY_BYTES || 10 * 1024 * 1024);
 function readBody(req: http.IncomingMessage): Promise<any> {
-  return new Promise((resolve) => { let d = ""; req.on("data", (c) => (d += c)); req.on("end", () => { try { resolve(d ? JSON.parse(d) : {}); } catch { resolve({}); } }); });
+  // Bounded. It used to concatenate whatever arrived, so one request could hold
+  // any amount of memory. Past the cap the rest is drained, not buffered, and
+  // the caller gets a 413 rather than a parse of half a document.
+  return new Promise((resolve, reject) => {
+    const declared = Number(req.headers["content-length"] || 0);
+    const tooLarge = () => new AppError("payload_too_large", 413, `request body exceeds ${MAX_BODY_BYTES} bytes`);
+    if (declared > MAX_BODY_BYTES) { req.resume(); return reject(tooLarge()); }
+    let d = "", n = 0, over = false;
+    req.on("data", (c) => { if (over) return; n += c.length; if (n > MAX_BODY_BYTES) { over = true; d = ""; return; } d += c; });
+    req.on("end", () => { if (over) return reject(tooLarge()); try { resolve(d ? JSON.parse(d) : {}); } catch { resolve({}); } });
+    req.on("error", reject);
+  });
 }
+// ---- GAMES-C integration helpers -------------------------------------------
+
+/** A prompt is DATA for a model. Empty, oversize and credential-bearing prompts are refused; other flags are logged, never the text. */
+function guardPromptOrRefuse(text: unknown, field: string, cid: string) {
+  const g: any = guardUserPrompt(text);
+  if (!g.ok) throw Errors.validation(`${field} was refused: ${g.reason || g.code}`, { correlationId: cid, meta: { field, code: g.code } });
+  if (g.suspicious) console.warn(JSON.stringify({ level: "warn", prompt_flags: g.flags.slice(0, 5).map((f: any) => f.code || f.kind || "flag"), field, correlation_id: cid }));
+  return g;
+}
+
+/** Every manifest the v3 surface stores or publishes passes the same threat checks first. */
+// The guard refuses every data:image/svg+xml, because SVG can carry script.
+// The media lane's own placeholder art IS an SVG data URI, so a blanket refusal
+// would block every media change. The exception is narrow: an SVG data URI is
+// accepted only when its decoded markup is provably inert — no script, no
+// event handler, no javascript: or external reference, no foreignObject. Any
+// other data_mime finding still blocks.
+function inertSvgDataUri(uri: unknown) {
+  const m = /^data:image\/svg\+xml(;base64)?,(.*)$/is.exec(String(uri ?? ""));
+  if (!m) return false;
+  let svg: string;
+  try { svg = m[1] ? Buffer.from(m[2], "base64").toString("utf8") : decodeURIComponent(m[2]); } catch { return false; }
+  if (svg.length > 64 * 1024) return false;
+  return !/<\s*script|<\s*foreignObject|<\s*iframe|<\s*embed|<\s*object|\son[a-z]+\s*=|javascript:|data:|(?:xlink:)?href\s*=\s*["']?(?![#"'])|@import|url\(\s*["']?(?![#"'])|<!ENTITY/i.test(svg);
+}
+function valueAtPath(root: any, p: string) {
+  let cur = root;
+  for (const part of String(p).replace(/^\$\.?/, "").split(/\.|\[(\d+)\]/).filter((x) => x !== undefined && x !== "")) {
+    if (cur == null) return undefined;
+    cur = cur[part];
+  }
+  return cur;
+}
+function guardManifestOrRefuse(manifest: any, stage: string, cid: string) {
+  const g: any = guardManifest(manifest);
+  g.blocking = g.blocking.filter((f: any) => !(f.code === "data_mime" && inertSvgDataUri(valueAtPath(manifest, f.path))));
+  g.ok = g.blocking.length === 0;
+  if (!g.ok) throw Errors.validation(`the ${stage} failed the security guard and was not saved`, { correlationId: cid, meta: { stage, blocking: g.blocking.slice(0, 10) } });
+}
+
+// B5: the policy for changing the content of a PUBLISHED world, stated once.
+//
+// Every v3 write path used to store `state: rec.state`, so an edit, expansion,
+// quest, stitch, media change or rollback swapped the content of a live world
+// under its Atlas receipt and staging package with no re-publish. The V2 save
+// route already refused that by returning the world to draft; the v3 paths now
+// do the same, through this one function, so no path can forget. The trust
+// fields are stripped whatever the state: they attest to content that is no
+// longer there. Publishing again re-runs the gate and re-signs the package.
+const TRUST_META_FIELDS = ["atlas_signed", "atlas_receipt_hash", "published_package_id", "published_manifest_hash"];
+const UNPUBLISH_REASON = "the content of a published world changed, so it returned to draft; its receipt and staging package attested to the previous content. Publish again to re-attest it.";
+async function commitContentChange({ rec, me, manifest, stage, cid }: { rec: any; me: any; manifest: any; stage: string; cid: string }) {
+  guardManifestOrRefuse(manifest, stage, cid);
+  const wasPublished = rec.state === "published";
+  const stored = { ...manifest, meta: { ...(manifest.meta || {}) } };
+  for (const k of TRUST_META_FIELDS) delete stored.meta[k];
+  const state = wasPublished ? "draft" : rec.state;
+  const saved = await repo.upsert({ worldId: rec.world_id, ownerId: me.id, manifest: stored, state, title: stored.meta.title });
+  const publication = wasPublished ? { state, unpublished: true, unpublished_reason: UNPUBLISH_REASON } : { state };
+  return { saved, manifest: stored, publication };
+}
+
+/**
+ * A patch is a change to the world's chronology like any delta, so it is
+ * recorded the way applyDelta records one: exactly one new expansion.history
+ * entry and a world_version one higher. verifyPreservation requires both, and
+ * without this every patch and companion edit was refused as "history not
+ * extended" — the chronicle is append-only whatever produced the change.
+ */
+function recordPatchInHistory(before: any, after: any, patch: any) {
+  const from = Number(before.world_version) || 1;
+  const ops: any[] = Array.isArray(patch.ops) ? patch.ops : [];
+  const next = structuredClone(after);
+  next.world_version = from + 1;
+  next.meta = { ...(next.meta || {}), updated_at: new Date().toISOString() };
+  next.expansion = next.expansion || { history: [], compatibility: { min_runtime: "3.0.0", migrated_from: null } };
+  next.expansion.history = [
+    ...(before.expansion?.history || []),
+    {
+      version: next.world_version, from_version: from,
+      label: String(patch.intent?.text || `${ops.length}-op patch`).slice(0, 200),
+      patch_id: patch.patch_id ?? null, delta_hash: contentHashOf(patch),
+      author: patch.author?.id ?? null, at: new Date().toISOString(),
+      added: ops.filter((o) => o.op === "add").length,
+      modified: ops.filter((o) => ["set", "unset", "update", "move", "replace_asset"].includes(o.op)).length,
+      removed: ops.filter((o) => o.op === "remove").length,
+    },
+  ];
+  return next;
+}
+
+/** Mirror a repository write into World Memory v2. Degraded, never fatal. */
+async function mirrorV2(op: () => Promise<any>, cid: string) {
+  const r: any = await optional("world-memory-v2", op, cid);
+  return r.ok ? { version_hash: r.value?.version?.version_hash ?? undefined } : { world_memory_degraded: r.error };
+}
+
+// Undo is "restore the version this edit replaced", and only while the world
+// is still at the version the edit produced. It runs through the rollback
+// path, so it gets the same live-state refusal and playtest gate; replaying an
+// inverse patch would not, and would be wrong after a repair changed more than
+// the patch did. The stack is server-held — a client never supplies an inverse.
+async function pushUndo(worldId: string, entry: any, cid: string) {
+  await optional("undo-stack", async () => {
+    const cur: any = (await worldMemV2.adapter.get(worldId, "undo", "stack")) || { entries: [] };
+    await worldMemV2.adapter.put(worldId, "undo", "stack", { entries: [...cur.entries, entry].slice(-50) });
+  }, cid);
+}
+async function peekUndo(worldId: string) {
+  const cur: any = (await worldMemV2.adapter.get(worldId, "undo", "stack")) || { entries: [] };
+  return cur.entries.at(-1) ?? null;
+}
+async function popUndo(worldId: string, cid: string) {
+  await optional("undo-stack", async () => {
+    const cur: any = (await worldMemV2.adapter.get(worldId, "undo", "stack")) || { entries: [] };
+    await worldMemV2.adapter.put(worldId, "undo", "stack", { entries: cur.entries.slice(0, -1) });
+  }, cid);
+}
+
+/** A flat estimate is reserved only when an external lane could actually be billed. */
+function reserveGenerationSpend(me: any, externalCapable: boolean, cid: string) {
+  const usd = externalCapable ? Number(process.env.DCS_GAMES_EST_GENERATION_USD || 0.05) : 0;
+  if (usd > 0 && generationDailyCap.wouldExceed(me.id, usd)) {
+    throw new AppError("budget_exceeded", 429, `the daily generation budget of $${generationDailyCap.capUsd} is used up; try again tomorrow`, { correlationId: cid });
+  }
+  if (usd > 0) generationDailyCap.add(me.id, usd);
+}
+async function externalLaneAvailable() {
+  const d: any = await v3.describe();
+  return d.lanes.some((l: any) => l.adapters.some((a: any) => !a.is_fallback && a.status === LANE_STATUS.AVAILABLE));
+}
+
 // A1: identity now comes from src/core/principal.mjs only. The former resolveUid()
 // trusted an x-user-id header and fell back to it when a token failed to verify —
 // confirmed exploitable against production on 6 Sep 2026. It is gone.
@@ -499,8 +675,8 @@ const server = http.createServer(async (req, res) => {
       routes: {
         // The V2 surface is still live and still carries real traffic; leaving
         // it out of the inventory made it look retired when it is not.
-        world_v2: ["POST /worlds/generate", "GET /worlds/mine", "GET /worlds/:id/manifest", "POST /worlds/:id/save", "GET /worlds/:id/load", "POST /worlds/:id/publish"],
-        world: ["POST /v3/worlds/generate", "POST /v3/worlds/generate/async", "GET /v3/worlds/:id/manifest", "POST /v3/worlds/:id/playtest", "POST /v3/worlds/:id/expand", "POST /v3/worlds/:id/edit", "POST /v3/worlds/:id/stitch", "POST /v3/worlds/:id/fork", "GET /v3/worlds/:id/versions", "POST /v3/worlds/:id/rollback", "GET /v3/worlds/:id/diff", "GET /v3/worlds/:id/memory", "POST /v3/worlds/:id/companion", "POST /v3/worlds/:id/media", "GET /v3/worlds/:id/attribution", "GET /v3/worlds/:id/parts", "POST /v3/worlds/:id/quests/generate", "POST /v3/worlds/:id/stitch/preview", "GET /v3/worlds/:id/versions/:n", "GET /v3/worlds/:id/npcs/:npc/memory"],
+        world_v2: ["POST /worlds/generate", "GET /worlds/mine", "GET /worlds/:id/manifest", "POST /worlds/:id/save", "GET /worlds/:id/load", "POST /worlds/:id/publish", "POST /worlds/:id/staging/rollback"],
+        world: ["POST /v3/worlds/generate", "POST /v3/worlds/generate/async", "GET /v3/worlds/:id/manifest", "POST /v3/worlds/:id/playtest", "POST /v3/worlds/:id/expand", "POST /v3/worlds/:id/edit", "POST /v3/worlds/:id/stitch", "POST /v3/worlds/:id/fork", "GET /v3/worlds/:id/versions", "POST /v3/worlds/:id/rollback", "GET /v3/worlds/:id/diff", "GET /v3/worlds/:id/memory", "POST /v3/worlds/:id/companion", "POST /v3/worlds/:id/media", "GET /v3/worlds/:id/attribution", "GET /v3/worlds/:id/parts", "POST /v3/worlds/:id/quests/generate", "POST /v3/worlds/:id/stitch/preview", "GET /v3/worlds/:id/versions/:n", "GET /v3/worlds/:id/npcs/:npc/memory", "POST /v3/worlds/:id/undo", "GET /v3/worlds/:id/integrity"],
         discovery: ["GET /v3/discover", "GET /api/public/worlds", "GET /api/public/stats", "GET /api/public/events", "GET /api/public/market", "GET /api/public/atlas/feed", "GET /api/public/atlas/stats", "POST /v3/worlds/:id/play", "POST /v3/worlds/:id/rate", "GET /v3/worlds/:id/stats"],
         identity: ["POST /auth/signup", "POST /auth/login", "GET /me/home", "GET /me/profile", "GET /me/achievements", "GET /me/streak", "GET /me/dashboard", "GET /profiles/:username", "GET /verify/status", "POST /verify/:channel/start", "POST /verify/:channel/confirm"],
         social: ["GET /social/friends", "POST /social/friends/accept", "GET /social/parties", "GET /social/teams", "POST /social/studios", "GET /social/orgs", "GET /social/orgs/:id", "POST /social/orgs/:id/members", "DELETE /social/orgs/:id/members", "POST /social/orgs/:id/seats", "GET /social/parties/:id", "POST /social/parties/:id/join", "POST /social/parties/:id/leave", "GET /social/studios/:id", "POST /social/studios/:id/members", "POST /social/studios/:id/split", "GET /social/teams/:id", "POST /social/teams/:id/members", "DELETE /social/teams/:id/members"],
@@ -517,7 +693,7 @@ const server = http.createServer(async (req, res) => {
         moderation_legacy: ["GET /ts/reports (superseded by GET /safety/reports; its store is no longer written to)", "POST /ts/reports/:id/action", "POST /ts/reports/:id/appeal/decide"],
         // Shells only. No provider is contacted and no money can move.
         payouts_dark: ["GET /payout/kyc", "POST /payout/kyc/start"],
-        trust: ["GET /health", "GET /atlas/key", "DELETE /verify/:channel", "GET /atlas/receipt/:id", "GET /verify", "GET /v3/providers"],
+        trust: ["GET /health", "GET /atlas/key", "DELETE /verify/:channel", "GET /atlas/receipt/:id", "GET /verify", "GET /v3/providers", "GET /v3/engine"],
         retired: ["GET /api/marketplace (410)", "GET /api/me/payouts (410)", "GET /me/revenue (410)", "POST /auth/ensure (410)", ...retiredSocialRoutes()],
       },
       manifest_version: MANIFEST_VERSION,
@@ -1440,6 +1616,20 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, ...(await v3.describe()) });
     }
 
+    // GAMES-A engine: where each task class WOULD route, without calling
+    // anything. Builder-only, like the rest of the provider detail.
+    if (url === "/v3/engine" && method === "GET") {
+      await mustBeInternalTester(req, cid);
+      return send(res, 200, {
+        ok: true,
+        mode: ENGINE_EXTERNAL_APPROVED ? "EXTERNAL_PROVISIONAL" : "LOCAL_ONLY",
+        external_routes: "PROVISIONAL — not approved until credentials and the live benchmark are separately signed off",
+        on_generation_path: false,
+        ...genEngine.describe(),
+        correlation_id: cid,
+      });
+    }
+
     // ---- P1 asynchronous generation -------------------------------------
     //
     // A premium-lane generation takes ~147s. Holding the request open times out
@@ -1449,6 +1639,8 @@ const server = http.createServer(async (req, res) => {
       await safety.requireCapability(me.id, "create");
       const b = await readBody(req);
       if (!b.prompt || typeof b.prompt !== "string") throw Errors.validation("prompt is required", { correlationId: cid });
+      guardPromptOrRefuse(b.prompt, "prompt", cid);
+      reserveGenerationSpend(me, await externalLaneAvailable(), cid);
 
       const worldId = "w3_" + crypto.randomUUID().replace(/-/g, "").slice(0, 16);
       const job = await jobsvc.create({
@@ -1486,7 +1678,9 @@ const server = http.createServer(async (req, res) => {
         }
 
         await ctx.startStage("save");
+        guardManifestOrRefuse(gate.manifest, "generated world", cid);
         const saved = await repo.upsert({ worldId, ownerId: me.id, manifest: gate.manifest, state: "draft", title: gate.manifest.meta.title });
+        await mirrorV2(() => worldMemV2.save(worldId, { manifest: gate.manifest, author: me.id, label: "generated" }), cid);
         await worldMemory.record(worldId, { kind: "created", summary: `"${gate.manifest.meta.title}" was generated from a prompt`, worldVersion: 1, actorId: me.id, detail: { prompt: b.prompt } });
         await social.ensureProfile(me);
         await social.recordWorldCreated(me.id);
@@ -1532,6 +1726,8 @@ const server = http.createServer(async (req, res) => {
       await safety.requireCapability(me.id, "create");
       const b = await readBody(req);
       if (!b.prompt || typeof b.prompt !== "string") throw Errors.validation("prompt is required", { correlationId: cid });
+      guardPromptOrRefuse(b.prompt, "prompt", cid);
+      reserveGenerationSpend(me, await externalLaneAvailable(), cid);
 
       const worldId = "w3_" + crypto.randomUUID().replace(/-/g, "").slice(0, 16);
       // 9.1 multimodal: an optional reference image is READ into a description
@@ -1577,7 +1773,9 @@ const server = http.createServer(async (req, res) => {
         });
       }
 
+      guardManifestOrRefuse(gate.manifest, "generated world", cid);
       const saved = await repo.upsert({ worldId, ownerId: me.id, manifest: gate.manifest, state: "draft", title: gate.manifest.meta.title });
+      const v2m = await mirrorV2(() => worldMemV2.save(worldId, { manifest: gate.manifest, author: me.id, label: "generated" }), cid);
       // The world now exists to the runtime as well as to the store, so player
       // ownership and inventory become checkable for it.
       await registerV3BaseWorld(worldId, gate.manifest, cid);
@@ -1601,6 +1799,7 @@ const server = http.createServer(async (req, res) => {
         reference_image: built.visual_reading ? { conditioned: built.conditioning.conditioned, reason: built.conditioning.reason, reading: built.visual_reading } : undefined,
         degraded: built.degraded.length ? built.degraded : undefined,
         manifest_url: "/v3/worlds/" + worldId + "/manifest",
+        ...v2m,
         correlation_id: cid,
       });
     }
@@ -1617,7 +1816,9 @@ const server = http.createServer(async (req, res) => {
         // and a caller loading a world had no way to check integrity at all.
         // It is computed over the manifest being RETURNED, so a world upgraded
         // on read hashes to what the caller actually got, not to what is stored.
-        return send(res, 200, { ok: true, world_id: rec.world_id, world_version: rec.version, state: rec.state, owner: rec.owner_id, migrated_on_read: migrated, manifest_hash: manifestHash(manifest), manifest });
+        // content_hash is the edit patch contract's hash (volatile fields
+        // excluded): what a client puts in a patch's base_hash.
+        return send(res, 200, { ok: true, world_id: rec.world_id, world_version: rec.version, state: rec.state, owner: rec.owner_id, migrated_on_read: migrated, manifest_hash: manifestHash(manifest), content_hash: contentHashOf(manifest), manifest });
       }
 
       mm = url.match(/^\/v3\/worlds\/([^/]+)\/playtest$/);
@@ -1637,6 +1838,7 @@ const server = http.createServer(async (req, res) => {
         const me = await mustBeInternalTester(req, cid);
         const b = await readBody(req);
         if (!b.request) throw Errors.validation("request is required, e.g. 'add a hospital district'", { correlationId: cid });
+        guardPromptOrRefuse(b.request, "request", cid);
         const rec = await repo.get(mm[1], { requesterId: me.id, requireOwner: true });
         const { manifest: before } = ensureV3(rec.manifest, { worldVersion: rec.version, creatorId: rec.owner_id });
 
@@ -1668,7 +1870,13 @@ const server = http.createServer(async (req, res) => {
           });
         }
 
-        const saved = await repo.upsert({ worldId: rec.world_id, ownerId: me.id, manifest: gate.manifest, state: rec.state, title: gate.manifest.meta.title });
+        const { saved, manifest: stored, publication } = await commitContentChange({ rec, me, manifest: gate.manifest, stage: "expanded world", cid });
+        const v2m = await mirrorV2(async () => {
+          // A world made before World Memory v2 has no v2 head yet: its pre-expansion content becomes its first v2 version.
+          if (!(await worldMemV2.head(rec.world_id))) await worldMemV2.save(rec.world_id, { manifest: before, author: rec.owner_id, label: "imported" });
+          return await worldMemV2.expand(rec.world_id, { manifest: stored, author: me.id, label: delta.label, kind: "expand_area" });
+        }, cid);
+        await pushUndo(rec.world_id, { kind: "expand", before_version: Number(rec.version), after_version: Number(saved.version), label: delta.label, at: new Date().toISOString() }, cid);
         await worldMemory.record(rec.world_id, { kind: "expanded", summary: `${delta.label} was added`, worldVersion: gate.manifest.world_version, actorId: me.id, detail: { request: b.request, delta_id: delta.delta_id } });
 
         return send(res, 200, {
@@ -1677,6 +1885,7 @@ const server = http.createServer(async (req, res) => {
           record_version: saved.version, label: delta.label, applied: applied.applied,
           preserved: preserved.ok, playtest: gate.verdict,
           expansion_history: gate.manifest.expansion.history,
+          ...publication, ...v2m,
           correlation_id: cid,
         });
       }
@@ -1688,10 +1897,45 @@ const server = http.createServer(async (req, res) => {
         const rec = await repo.get(mm[1], { requesterId: me.id, requireOwner: true });
         const { manifest: before } = ensureV3(rec.manifest, { worldVersion: rec.version, creatorId: rec.owner_id });
 
-        const plan = planEdit(before, { request: b.request, author: me.id });
-        if (plan.error) {
-          // Honest: an unrecognised edit is a 422 that says what IS supported.
-          return send(res, 422, { ok: false, error: "edit_not_understood", detail: plan.error, supported: plan.supported, hint: plan.hint, correlation_id: cid });
+        // GAMES-C: three ways in, one way out. A typed `patch` (the edit patch
+        // contract), a natural-language `request` that planEdit understands, or
+        // one it does not — which the companion then turns into a patch or a
+        // clarifying question. Whatever produced the change, the playtest gate,
+        // preservation check, guard and B5 policy below apply to it equally.
+        let editManifest: any = null, editSummary = "", editIntent = "", editPatchId: string | null = null, companionCtx: any = undefined, plan: any = null;
+        if (b.patch !== undefined) {
+          if (!b.patch || typeof b.patch !== "object" || Array.isArray(b.patch)) throw Errors.validation("patch must be an object", { correlationId: cid });
+          // The author is the principal, never what the client claims.
+          const patch = { ...b.patch, world_id: rec.world_id, author: { kind: b.patch.author?.kind === "companion" ? "companion" : "user", id: me.id } };
+          const ap: any = applyEditPatch(before, patch);      // untrusted: no {trusted:true}
+          if (!ap.ok) {
+            const stale = (ap.errors || []).some((e: any) => e.code === "stale_base" || /stale|base_hash|base_version/i.test(String(e.message)));
+            return send(res, stale ? 409 : 422, { ok: false, error: stale ? "stale_edit" : "invalid_patch", errors: (ap.errors || []).slice(0, 20), current_version: rec.version, current_hash: contentHashOf(before), correlation_id: cid });
+          }
+          editManifest = recordPatchInHistory(before, ap.manifest, patch); editPatchId = patch.patch_id ?? null;
+          editSummary = patch.intent?.text ? String(patch.intent.text).slice(0, 200) : `${(patch.ops || []).length}-op patch`;
+          editIntent = `patch:${patch.intent?.category || "unspecified"}`;
+        } else {
+          if (typeof b.request === "string") guardPromptOrRefuse(b.request, "request", cid);
+          plan = planEdit(before, { request: b.request, author: me.id });
+          editSummary = plan.summary; editIntent = plan.intent;
+          if (plan.error && typeof b.request !== "string") {
+            return send(res, 422, { ok: false, error: "edit_not_understood", detail: plan.error, supported: plan.supported, hint: plan.hint, correlation_id: cid });
+          }
+          if (plan.error) {
+            const cr: any = companionInterpret(b.request, before, { context: b.companion_context ?? null });
+            companionCtx = cr.context;
+            if (cr.status !== "ok") {
+              // Honest: an edit nobody understood is still a 422 that says what IS supported.
+              const code = cr.status === "rejected" ? 400 : 422;
+              const error = cr.status === "clarify" ? "edit_needs_clarification" : cr.status === "rejected" ? "edit_rejected_unsafe" : "edit_not_understood";
+              return send(res, code, { ok: false, error, detail: cr.clarification || cr.summary || plan.error, clarification: cr.clarification, options: cr.options, supported: plan.supported, capabilities: cr.capabilities, hint: plan.hint, reasons: cr.reasons, companion_context: companionCtx, correlation_id: cid });
+            }
+            const patch = companionBuildPatch(cr, before, { text: b.request, author: { kind: "companion", id: me.id } });
+            const ap: any = applyEditPatch(before, patch);
+            if (!ap.ok) return send(res, 422, { ok: false, error: "edit_patch_invalid", detail: "the companion's patch did not validate", errors: (ap.errors || []).slice(0, 6), correlation_id: cid });
+            editManifest = recordPatchInHistory(before, ap.manifest, patch); editSummary = cr.summary; editIntent = `companion:${(cr.categories || []).join("+")}`; editPatchId = patch.patch_id;
+          }
         }
         // Live state is hoisted rather than inlined into applyDelta, because it
         // is needed three times: to apply the delta safely, to tell the repair
@@ -1700,7 +1944,7 @@ const server = http.createServer(async (req, res) => {
         // change than an expansion, but a repair triggered by it can remove
         // exactly the same things.
         const live = (await liveStateFor(mm[1], b.live_state)).live;
-        const applied = applyDelta(before, plan.delta, live);
+        const applied = editManifest ? { manifest: editManifest } : applyDelta(before, plan.delta, live);
         const gate = await playtestAndRepair(applied.manifest, { liveState: live });
         if (!gate.passed) {
           return send(res, 422, { ok: false, error: "edit_failed_playtest", detail: "the edited world did not pass the playtest gate and was not saved", verdict: gate.verdict, findings: gate.rounds.at(-1).findings.slice(0, 6), correlation_id: cid });
@@ -1711,9 +1955,11 @@ const server = http.createServer(async (req, res) => {
             correlationId: cid, meta: { problems: editKept.problems },
           });
         }
-        const saved = await repo.upsert({ worldId: rec.world_id, ownerId: me.id, manifest: gate.manifest, state: rec.state, title: gate.manifest.meta.title });
-        await worldMemory.record(rec.world_id, { kind: "edited", summary: plan.summary, worldVersion: gate.manifest.world_version, actorId: me.id, detail: { request: b.request, intent: plan.intent } });
-        return send(res, 200, { ok: true, world_id: rec.world_id, summary: plan.summary, intent: plan.intent, world_version: gate.manifest.world_version, record_version: saved.version, playtest: gate.verdict, correlation_id: cid });
+        const { saved, manifest: stored, publication } = await commitContentChange({ rec, me, manifest: gate.manifest, stage: "edited world", cid });
+        const v2m = await mirrorV2(() => worldMemV2.save(rec.world_id, { manifest: stored, author: me.id, kind: "edit", label: editSummary, idempotent: false }), cid);
+        await pushUndo(rec.world_id, { kind: "edit", before_version: Number(rec.version), after_version: Number(saved.version), label: editSummary, patch_id: editPatchId, at: new Date().toISOString() }, cid);
+        await worldMemory.record(rec.world_id, { kind: "edited", summary: editSummary, worldVersion: gate.manifest.world_version, actorId: me.id, detail: { request: b.request, intent: editIntent, patch_id: editPatchId } });
+        return send(res, 200, { ok: true, world_id: rec.world_id, summary: editSummary, intent: editIntent, patch_id: editPatchId ?? undefined, companion_context: companionCtx, world_version: gate.manifest.world_version, record_version: saved.version, content_hash: contentHashOf(stored), undo_available: true, playtest: gate.verdict, ...publication, ...v2m, correlation_id: cid });
       }
 
       // ---- B11 KINIX/Kynex media -----------------------------------------
@@ -1812,8 +2058,9 @@ const server = http.createServer(async (req, res) => {
         (manifest.media as any)[target + "_is_placeholder"] = !!r.value.placeholder;
         manifest.provenance.generated_by = [...(manifest.provenance.generated_by || []), r.provenance];
 
-        const saved = await repo.upsert({ worldId: rec.world_id, ownerId: me.id, manifest, state: rec.state, title: manifest.meta.title });
+        const { saved, publication } = await commitContentChange({ rec, me, manifest, stage: "media change", cid });
         return send(res, 200, {
+          ...publication,
           ok: true, generated: true, target, kind, asset_id: assetId,
           // A placeholder is ALWAYS labelled, so it can never pass as generated art.
           placeholder: !!r.value.placeholder,
@@ -1860,7 +2107,7 @@ const server = http.createServer(async (req, res) => {
           });
         }
 
-        const saved = await repo.upsert({ worldId: host.world_id, ownerId: me.id, manifest: gate.manifest, state: hostRec.state, title: gate.manifest.meta.title });
+        const { saved, publication } = await commitContentChange({ rec: hostRec, me, manifest: gate.manifest, stage: "stitched world", cid });
         await worldMemory.record(host.world_id, {
           kind: "expanded",
           summary: `"${stitch.guest_title || stitch.guest_world_id}" was stitched into this world`,
@@ -1871,7 +2118,7 @@ const server = http.createServer(async (req, res) => {
           ok: true, world_id: host.world_id,
           world_version: gate.manifest.world_version, previous_version: applied.previous_version,
           record_version: saved.version,
-          stitch, preserved: preserved.ok, playtest: gate.verdict,
+          stitch, preserved: preserved.ok, playtest: gate.verdict, ...publication,
           summary: stitchSummary(gate.manifest),
           correlation_id: cid,
         });
@@ -1915,7 +2162,12 @@ const server = http.createServer(async (req, res) => {
         if (!gate.passed) {
           return send(res, 422, { ok: false, error: "fork_failed_playtest", detail: "the forked world did not pass the playtest gate and was not saved", verdict: gate.verdict, correlation_id: cid });
         }
+        guardManifestOrRefuse(gate.manifest, "forked world", cid);
         const saved = await repo.upsert({ worldId: forked.world_id, ownerId: me.id, manifest: gate.manifest, state: "draft", title: gate.manifest.meta.title });
+        // Lineage is recorded as a v2 edge when the source has v2 history; otherwise the fork still gets its own first version.
+        const v2m = await mirrorV2(async () => (await worldMemV2.head(source.world_id))
+          ? await worldMemV2.expand(source.world_id, { child_world_id: forked.world_id, manifest: gate.manifest, kind: "fork", author: me.id, label: gate.manifest.meta.title })
+          : await worldMemV2.save(forked.world_id, { manifest: gate.manifest, author: me.id, kind: "fork", label: gate.manifest.meta.title, idempotent: false }), cid);
         await worldMemory.record(forked.world_id, { kind: "created", summary: `remixed from "${attribution.forked_from_title || attribution.forked_from_world_id}"`, worldVersion: 1, actorId: me.id, detail: attribution });
         await social.ensureProfile(me);
         await social.recordWorldCreated(me.id);
@@ -1924,6 +2176,7 @@ const server = http.createServer(async (req, res) => {
           title: gate.manifest.meta.title, attribution,
           payments_live: PAYMENTS_LIVE,
           revenue_policy: gate.manifest.meta.revenue_policy,
+          ...v2m,
           playtest: gate.verdict, correlation_id: cid,
         });
       }
@@ -1970,9 +2223,11 @@ const server = http.createServer(async (req, res) => {
           if (!gate.passed) {
             return send(res, 422, { ok: false, error: "quest_failed_playtest", detail: "the generated quest did not pass the playtest gate and was not saved", verdict: gate.verdict, quest: gen.quest, correlation_id: cid });
           }
-          const saved = await repo.upsert({ worldId: rec.world_id, ownerId: me.id, manifest: gate.manifest, state: rec.state, title: gate.manifest.meta.title });
+          const { saved, manifest: stored, publication } = await commitContentChange({ rec, me, manifest: gate.manifest, stage: "world with a generated quest", cid });
+          const v2m = await mirrorV2(() => worldMemV2.save(rec.world_id, { manifest: stored, author: me.id, kind: "edit", label: `quest: ${gen.quest.title}`, idempotent: false }), cid);
+          await pushUndo(rec.world_id, { kind: "quest", before_version: Number(rec.version), after_version: Number(saved.version), label: gen.quest.title, at: new Date().toISOString() }, cid);
           await worldMemory.record(rec.world_id, { kind: "edited", summary: `a quest was added: ${gen.quest.title}`, worldVersion: gate.manifest.world_version, actorId: me.id });
-          return send(res, 200, { ok: true, applied: true, ...gen, world_version: gate.manifest.world_version, record_version: saved.version, playtest: gate.verdict, correlation_id: cid });
+          return send(res, 200, { ok: true, applied: true, ...gen, world_version: gate.manifest.world_version, record_version: saved.version, playtest: gate.verdict, ...publication, ...v2m, correlation_id: cid });
         }
         return send(res, 200, { ok: true, applied: false, ...gen, correlation_id: cid });
       }
@@ -1994,14 +2249,34 @@ const server = http.createServer(async (req, res) => {
       // was never left. It refuses rather than repairs when a player owns
       // something the target does not contain — a world is not the creator's
       // alone once people have built in it.
-      mm = url.match(/^\/v3\/worlds\/([^/]+)\/rollback$/);
+      //
+      // GAMES-C undo shares this path rather than replaying an inverse patch:
+      // undo IS "roll back to the version the last edit replaced", so it gets
+      // the ownership refusal and the playtest gate for free, and it is only
+      // offered while the world is still at the version that edit produced.
+      mm = url.match(/^\/v3\/worlds\/([^/]+)\/rollback$/) || url.match(/^\/v3\/worlds\/([^/]+)\/undo$/);
       if (mm && method === "POST") {
         const me = await mustBeInternalTester(req, cid);
         const b = await readBody(req);
-        const toVersion = Number(b.to_version);
+        const isUndo = url.endsWith("/undo");
+        let undoEntry: any = null;
+        let toVersion = Number(b.to_version);
+        if (isUndo) {
+          await repo.get(mm[1], { requesterId: me.id, requireOwner: true });
+          undoEntry = await peekUndo(mm[1]);
+          if (!undoEntry) return send(res, 409, { ok: false, error: "nothing_to_undo", detail: "no edit on this world can be undone", correlation_id: cid });
+          toVersion = undoEntry.before_version;
+        }
         if (!Number.isInteger(toVersion) || toVersion < 1) throw Errors.validation("to_version must be a version number to roll back to", { correlationId: cid });
 
         const rec = await repo.get(mm[1], { requesterId: me.id, requireOwner: true });
+        if (isUndo && Number(rec.version) !== undoEntry.after_version) {
+          return send(res, 409, {
+            ok: false, error: "undo_history_diverged",
+            detail: `the last ${undoEntry.kind} produced v${undoEntry.after_version}, but the world is now at v${rec.version}; something else changed it since. Use rollback with an explicit to_version instead.`,
+            current_version: rec.version, correlation_id: cid,
+          });
+        }
         const target = await repo.getVersion(mm[1], toVersion, { requesterId: me.id });
         const { manifest: current } = ensureV3(rec.manifest, { worldVersion: rec.version, creatorId: rec.owner_id });
         // The TARGET gets the same treatment. A version retained before the v3
@@ -2038,7 +2313,7 @@ const server = http.createServer(async (req, res) => {
         const ls = await liveStateFor(rec.world_id, b.live_state);
         const live = ls.live;
         const { manifest, record } = planRollback(currentM, targetM, {
-          actorId: me.id, toVersion, liveState: live, reason: b.reason ?? null,
+          actorId: me.id, toVersion, liveState: live, reason: isUndo ? `undo ${undoEntry.kind}: ${undoEntry.label ?? ""}`.slice(0, 200) : (b.reason ?? null),
           // The number the caller sent came from GET /versions, which lists the
           // REPOSITORY's counter. The manifest keeps its own, and the two skew
           // whenever a state-only save (a publish) bumps the record without
@@ -2083,7 +2358,9 @@ const server = http.createServer(async (req, res) => {
           return send(res, 422, { ok: false, error: "rollback_failed_playtest", detail: `v${toVersion} does not pass the current playtest gate, so the world was not changed`, verdict: gate.verdict, findings: gate.rounds.at(-1).findings.slice(0, 10), correlation_id: cid });
         }
 
-        const saved = await repo.upsert({ worldId: rec.world_id, ownerId: me.id, manifest: gate.manifest, state: rec.state, title: gate.manifest.meta.title });
+        const { saved, manifest: stored, publication } = await commitContentChange({ rec, me, manifest: gate.manifest, stage: isUndo ? "undone world" : "rolled-back world", cid });
+        const v2m = await mirrorV2(() => worldMemV2.save(rec.world_id, { manifest: stored, author: me.id, kind: "restore", restored_from: toVersion, label: isUndo ? "undo" : "rollback", idempotent: false }), cid);
+        if (isUndo) await popUndo(rec.world_id, cid);
         // Written through the seam rollback.mjs exports, which builds the event
         // from the history RECORD rather than from what this route believes.
         // Hand-rolling it here put the versions inside `detail`, while a
@@ -2103,6 +2380,8 @@ const server = http.createServer(async (req, res) => {
           live_state_from_client: ls.supplied ? ls.added : null,
           live_state_note: ls.determined.note,
           diff: diffManifests(currentM, gate.manifest).summary,
+          undone: isUndo ? { kind: undoEntry.kind, label: undoEntry.label ?? null, patch_id: undoEntry.patch_id ?? null } : undefined,
+          ...publication, ...v2m,
           playtest: gate.verdict, correlation_id: cid,
         });
       }
@@ -2117,6 +2396,23 @@ const server = http.createServer(async (req, res) => {
         const a = await repo.getVersion(mm[1], from, { requesterId });
         const bV = await repo.getVersion(mm[1], to, { requesterId });
         return send(res, 200, { ok: true, world_id: mm[1], from, to, ...diffManifests(a.manifest, bV.manifest) });
+      }
+
+      // ---- GAMES-C World Memory v2: is the version ledger intact? (owner only)
+      mm = url.match(/^\/v3\/worlds\/([^/]+)\/integrity$/);
+      if (mm && method === "GET") {
+        const me = await mustBe(req, cid);
+        await repo.get(mm[1], { requesterId: me.id, requireOwner: true });
+        if (!(await worldMemV2.head(mm[1]))) {
+          return send(res, 200, { ok: true, world_id: mm[1], tracked: false, detail: "this world has no World Memory v2 history yet; it starts at its next change", correlation_id: cid });
+        }
+        return send(res, 200, {
+          ok: true, world_id: mm[1], tracked: true,
+          integrity: await worldMemV2.verifyIntegrity(mm[1], { deep: false }),
+          lineage: await worldMemV2.verifyLineage(mm[1]),
+          undo: await peekUndo(mm[1]),
+          correlation_id: cid,
+        });
       }
 
       mm = url.match(/^\/v3\/worlds\/([^/]+)\/memory$/);
@@ -2145,6 +2441,7 @@ const server = http.createServer(async (req, res) => {
           if (action === "remember") return send(res, 200, { ok: true, companion: await companions.remember(me.id, worldId, { text: b.text, kind: b.kind, refs: b.refs }) });
           if (action === "forget") return send(res, 200, { ok: true, companion: await companions.forget(me.id, worldId, b.memory_id) });
           if (action === "context") return send(res, 200, { ok: true, companion: await companions.updateContext(me.id, worldId, { zone: b.zone ?? null, activeQuest: b.active_quest ?? null }) });
+          if (action === "ask" && typeof b.question === "string") guardPromptOrRefuse(b.question, "question", cid);
           if (action === "ask") return send(res, 200, { ok: true, ...(await companions.ask(me.id, worldId, manifest, b.question, { zone: b.zone, activeQuest: b.active_quest })) });
           if (action === "caption") return send(res, 200, { ok: true, ...(await companions.caption(me.id, worldId, manifest, { zone: b.zone, activeQuest: b.active_quest })) });
           throw Errors.validation(`unknown companion action '${action}'`, { correlationId: cid, meta: { supported: ["adopt", "follow", "dismiss", "remember", "forget", "context", "ask", "caption"] } });
@@ -2213,8 +2510,42 @@ const server = http.createServer(async (req, res) => {
         // rendered as a successful publish.
         throw Errors.notConfigured("Atlas signing key (ATLAS_PRIVATE_KEY)", { correlationId: cid });
       }
+      // B5 / GAMES-C: publishing attests to CONTENT, not only to a world id.
+      //
+      // The Atlas world receipt signs {attestation:"create", subject_id} and
+      // nothing about the manifest, so on its own it could never tell whether
+      // the public content was the content that was published. The staging
+      // package closes that: it is content-addressed and signed with the same
+      // key, and it is only built from a manifest that passes the security
+      // guard and the playtest gate AS STORED — gate only, no silent repair on
+      // publish. Any later content change returns the world to draft
+      // (commitContentChange), so a live world always matches its package.
+      // A copy: ensureV3 may hand back the stored object itself, and the trust
+      // fields written onto `wm` below must not leak into what was packaged.
+      const pubV3: any = structuredClone(ensureV3(wm, { worldVersion: rec.version, creatorId: rec.owner_id }).manifest);
+      if (pubV3.meta) for (const k of TRUST_META_FIELDS) delete pubV3.meta[k];
+      guardManifestOrRefuse(pubV3, "world being published", cid);
+      const pt: any = await playtestAndRepair(pubV3, { maxRounds: 1 });
+      if (!pt.passed) {
+        return send(res, 422, { ok: false, error: "publish_failed_playtest", detail: "the world as stored does not pass the playtest gate, so it was not published; edit it and try again", verdict: pt.verdict, findings: pt.rounds.at(-1).findings.slice(0, 10), correlation_id: cid });
+      }
+      const built: any = buildStagingPackage({
+        manifest: pubV3, assets: [],
+        runtime: { version: process.env.DCS_RUNTIME_VERSION || "3.0.0", sha256: process.env.DCS_RUNTIME_SHA256 || undefined },
+        provenance: { generated_by: pubV3.provenance?.generated_by || [] },
+        playtestVerdict: pt, signer: atlasEnvSigner(),
+        hostAllowlist: (process.env.DCS_ASSET_HOST_ALLOWLIST || "").split(",").map((s) => s.trim()).filter(Boolean),
+      });
+      if (!built.ok) throw Errors.validation("the world could not be packaged for publishing", { correlationId: cid, meta: { errors: built.errors.slice(0, 10) } });
+      let staged: any;
+      try { staged = stagingRegistry().publishStaging(built.package); }
+      catch (e: any) { if (e instanceof PublishError) throw Errors.conflict(`staging package refused: ${e.message}`, { correlationId: cid, meta: { code: e.code } }); throw e; }
+
       const receipt: any = issueWorldReceipt(id, me.id);
       wm.meta = wm.meta || {}; wm.meta.atlas_receipt_hash = receipt.receipt_hash; wm.meta.atlas_signed = !!receipt.sig;
+      wm.meta.published_package_id = built.package.package_id;
+      const pubHash = contentHashOf(pubV3);
+      wm.meta.published_manifest_hash = pubHash;
       // Stored so GET /atlas/receipt/:id can serve it. Keyed on the hash, which
       // is what the receipt is identified by everywhere else.
       await optional("atlas-receipt-store", () => atlasReceipts.upsert((x: any) => x.receipt_hash === receipt.receipt_hash, {
@@ -2225,7 +2556,27 @@ const server = http.createServer(async (req, res) => {
       await social.recordWorldPublished(me.id);
       await worldMemory.record(id, { kind: "published", summary: "the world was published with a signed Atlas receipt", worldVersion: saved.version, actorId: me.id });
       const verify_url = "/verify?receipt=" + Buffer.from(JSON.stringify(receipt)).toString("base64");
-      return send(res, 200, { ok: true, published: true, signed: !!receipt.sig, world_version: saved.version, receipt, verify_url, correlation_id: cid });
+      return send(res, 200, {
+        ok: true, published: true, signed: !!receipt.sig, world_version: saved.version, receipt, verify_url,
+        staging_package: { package_id: built.package.package_id, channel: "staging", preview_url: staged.preview_url, created: staged.created, manifest_hash: pubHash },
+        correlation_id: cid,
+      });
+    }
+    // GAMES-C: move the STAGING preview pointer back to an earlier package.
+    // It never touches the public world or its state; only the preview.
+    m = url.match(/^\/worlds\/([^/]+)\/staging\/rollback$/);
+    if (m && method === "POST") {
+      const me = await mustBeInternalTester(req, cid);
+      await repo.get(m[1], { requesterId: me.id, requireOwner: true });
+      const b = await readBody(req);
+      if (typeof b.to_package_id !== "string") throw Errors.validation("to_package_id is required", { correlationId: cid });
+      try {
+        const channel = stagingRegistry().rollback(m[1], b.to_package_id, { reason: typeof b.reason === "string" ? b.reason.slice(0, 200) : null });
+        return send(res, 200, { ok: true, world_id: m[1], channel: "staging", current: channel.current, history: channel.history.slice(-10), correlation_id: cid });
+      } catch (e: any) {
+        if (e instanceof PublishError) throw Errors.conflict(e.message, { correlationId: cid, meta: { code: e.code } });
+        throw e;
+      }
     }
     m = url.match(/^\/worlds\/([^/]+)\/save$/);
     if (m && method === "POST") {
@@ -2310,7 +2661,9 @@ const server = http.createServer(async (req, res) => {
         }
 
         const saved = await repo.upsert({ worldId: m[1], ownerId: me.id, manifest: incoming, state: "draft", expected_version: b.expected_version ?? null });
+        const v2m = saved.idempotent ? {} : await mirrorV2(() => worldMemV2.save(m![1], { manifest: incoming, author: me.id, label: "save" }), cid);
         return send(res, 200, {
+          ...v2m,
           ok: true, world_id: m[1], world_version: saved.version, manifest_hash: saved.manifest_hash,
           idempotent: saved.idempotent, state: "draft",
           unpublished: wasPublished || undefined,
@@ -2379,7 +2732,19 @@ const server = http.createServer(async (req, res) => {
         // cannot tell those apart must not assert the innocent one.
         runtimeUnavailable = "no runtime state has been recorded for this world";
       }
-      return send(res, 200, { ok: true, world_id: m[1], world_version: rec.version, manifest_hash: rec.manifest_hash, state: rec.state, owner: rec.owner_id, manifest: rec.manifest, runtime_state: snap, runtime_note: runtimeUnavailable ?? undefined, correlation_id: cid });
+      // GAMES-C: a returning player gets their own state, companion context and
+      // recent history in the same call. Degraded, never fatal; absent for a
+      // world with no v2 history yet.
+      // Edit and generation history name authors and intents, so only the
+      // owner gets them; any other signed-in player gets their own state only.
+      const resumed: any = principal && (await worldMemV2.head(m[1]).catch(() => null))
+        ? await optional("world-memory-v2-resume", async () => {
+            const r: any = await worldMemV2.resume(m![1], { player_id: principal.id });
+            const { manifest: _m, ...rest } = r;             // the manifest is already in this response
+            return principal.id === rec.owner_id ? rest : { world_id: rest.world_id, version: rest.version, player_state: rest.player_state };
+          }, cid)
+        : null;
+      return send(res, 200, { ok: true, world_id: m[1], world_version: rec.version, manifest_hash: rec.manifest_hash, state: rec.state, owner: rec.owner_id, manifest: rec.manifest, runtime_state: snap, runtime_note: runtimeUnavailable ?? undefined, resume: resumed?.ok ? resumed.value : undefined, correlation_id: cid });
     }
 
     return send(res, 404, { ok: false, error: "not_found", path: url, correlation_id: cid });

@@ -109,7 +109,11 @@ export function previewUrl(pkg, { env = process.env } = {}) {
   return `${base}/${encodeURIComponent(worldId)}/${pkg.package_id}/`;
 }
 
-export function createStagingRegistry({ root, now = () => new Date().toISOString(), env = process.env } = {}) {
+// readOnly: chmod each package dir to 0555/0444 once written. Immutability does
+// not depend on it (packages are content-addressed, re-verified on read, and a
+// differing overwrite is refused), and a read-only tree cannot be pruned or
+// cleaned up without a chmod first, so a host can turn it off.
+export function createStagingRegistry({ root, now = () => new Date().toISOString(), env = process.env, readOnly = true } = {}) {
   if (!root) throw new PublishError("root_required", "a registry root directory is required");
   assertStagingOnlyEnv(env);
   const channelFile = (worldId) => path.join(root, worldId, "channels", `${CHANNEL}.json`);
@@ -164,10 +168,10 @@ export function createStagingRegistry({ root, now = () => new Date().toISOString
         fs.mkdirSync(path.dirname(p), { recursive: true });
         fs.writeFileSync(p, bytes);
       }
-      chmodTree(tmp, 0o444, 0o555);
+      if (readOnly) chmodTree(tmp, 0o444, 0o555);
       try { fs.renameSync(tmp, dir); }
       catch (e) { chmodTree(tmp, 0o644, 0o755); fs.rmSync(tmp, { recursive: true, force: true }); throw new PublishError("immutable_conflict", "concurrent publish of the same id: " + e.message); }
-      fs.chmodSync(dir, 0o555);
+      if (readOnly) fs.chmodSync(dir, 0o555);
       created = true;
     }
     const channel = movePointer(pkg.world_id, pkg.package_id, "stage");
