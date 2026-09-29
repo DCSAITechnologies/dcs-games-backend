@@ -18,10 +18,30 @@ import { npcConceptPatch, applyNpcPresets } from "./npc/behaviours.mjs";
 import { TEMPLATES, templateConceptPatch, applyTemplate } from "./gameplay/templates.mjs";
 import { materialConceptPatch } from "./materials/material-styles.mjs";
 import { audioFor } from "./audio/sfx.mjs";
+import { resolveEngineExternal, LOCAL_FALLBACK_PROVIDER } from "./engine-flags.mjs";
 
 export const ENGINE_VERSION = "gamesd-1.0.0";
 export const OFFLINE_ENV = Object.freeze({ DCS_PROVIDERS_OFFLINE: "1" });
 export const FALLBACK_CREATED_AT = "2026-09-29T00:00:00.000Z";
+
+/**
+ * The package-level statement of how a fallback game was made (top-level
+ * `pkg.generation`, add-only). It is the same for every build, so it never
+ * disturbs byte-identical rebuilds, and it is true by construction: the build
+ * runs with OFFLINE_ENV, where every provider adapter reports UNAVAILABLE from
+ * its status check and is never invoked (test/gamesd-outbound-trap.test.mjs).
+ */
+export const GENERATION = Object.freeze({
+  provider: LOCAL_FALLBACK_PROVIDER,
+  engine: ENGINE_VERSION,
+  method: "procedural",
+  external_generation: false,
+  engine_external: false,
+  external_calls: 0,
+  cost_usd: 0,
+  note: "Built by the Games-D local fallback engine from a recipe, with no AI model or external provider. " +
+    "Stage provenance 'after_failed' entries name provider adapters that were skipped as unavailable (providers offline); none was called.",
+});
 
 /** Stage context for a (normalised, valid) recipe. */
 export function makeContext(recipe) {
@@ -67,7 +87,7 @@ export function overridesFor(recipe, ctx) {
     gameplay: (g, { concept, world, characters }) => applyTemplate(g, { ...ctx, concept, world, characters }),
     extras: ({ concept, world, characters, gameplay }) => {
       const audio = audioFor({ ...ctx, concept, world, characters, gameplay });
-      return audio ? { audio } : null;
+      return { generation: { ...GENERATION }, ...(audio ? { audio } : {}) };
     },
   };
 }
@@ -75,10 +95,15 @@ export function overridesFor(recipe, ctx) {
 /**
  * Build a fallback game from a recipe.
  * @param {object} recipeIn
- * @param {{ playtest?: boolean, createdAt?: string, deps?: object, maxSimSeconds?: number }} [opts]
- * @returns {Promise<{ ok, recipe, recipe_id, notes, pkg, validation, playtest, reachability, timings, build_ms }>}
+ * @param {{ playtest?: boolean, createdAt?: string, deps?: object, maxSimSeconds?: number, env?: object }} [opts]
+ *   `env` is read only for DCS_GAMES_ENGINE_EXTERNAL; provider calls always get OFFLINE_ENV.
+ * @returns {Promise<{ ok, provider, engine_external, recipe, recipe_id, notes, pkg, validation, playtest, reachability, timings, build_ms }>}
  */
-export async function buildFromRecipe(recipeIn, { playtest = true, createdAt = FALLBACK_CREATED_AT, deps, maxSimSeconds } = {}) {
+export async function buildFromRecipe(recipeIn, { playtest = true, createdAt = FALLBACK_CREATED_AT, deps, maxSimSeconds, env = process.env } = {}) {
+  // Fail closed: a request to go external is refused and reported, and the
+  // build carries on locally. The refusal stays out of the package so the
+  // package bytes never depend on the environment.
+  const engineExternal = resolveEngineExternal(env);
   const recipe = normaliseRecipe(recipeIn);
   const v = validateRecipe(recipe);
   if (!v.ok) {
@@ -87,6 +112,7 @@ export async function buildFromRecipe(recipeIn, { playtest = true, createdAt = F
     throw e;
   }
   const ctx = makeContext(recipe);
+  if (engineExternal.requested) ctx.notes.push(engineExternal.reason);
   const t0 = performance.now();
   const prompt = conceptPromptFor(recipe, ctx);
   const ov = overridesFor(recipe, ctx);
@@ -102,5 +128,5 @@ export async function buildFromRecipe(recipeIn, { playtest = true, createdAt = F
     maxSimSeconds,
     overrides: ov,
   });
-  return { ...res, recipe, recipe_id: recipeId(recipe), notes: ctx.notes, build_ms: Math.round(performance.now() - t0) };
+  return { ...res, provider: LOCAL_FALLBACK_PROVIDER, engine_external: engineExternal, recipe, recipe_id: recipeId(recipe), notes: ctx.notes, build_ms: Math.round(performance.now() - t0) };
 }
