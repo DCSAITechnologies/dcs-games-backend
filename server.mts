@@ -458,9 +458,25 @@ function recordPatchInHistory(before: any, after: any, patch: any) {
   return next;
 }
 
-/** Mirror a repository write into World Memory v2. Degraded, never fatal. */
-async function mirrorV2(op: () => Promise<any>, cid: string) {
-  const r: any = await optional("world-memory-v2", op, cid);
+/**
+ * Mirror a repository write into World Memory v2. Degraded, never fatal.
+ *
+ * v2 only appends to its edit history from its own patch-based edit(); these
+ * writes arrive as whole manifests, so the history row that `resume` returns
+ * to a creator is written here, beside the version it describes.
+ */
+async function mirrorV2(op: () => Promise<any>, cid: string, history?: { kind: string; label?: string | null; patch_id?: string | null; author?: string | null }) {
+  const r: any = await optional("world-memory-v2", async () => {
+    const out: any = await op();
+    const v = out?.version;
+    if (history && v && !out.idempotent) {
+      await worldMemV2.adapter.append(v.world_id, "edit_history", {
+        version: v.version, kind: history.kind, patch_id: history.patch_id ?? null, author: history.author ?? null,
+        label: history.label ? String(history.label).slice(0, 200) : null, manifest_hash: v.manifest_hash, at: v.created_at,
+      }, { max: worldMemV2.limits.maxEditHistory });
+    }
+    return out;
+  }, cid);
   return r.ok ? { version_hash: r.value?.version?.version_hash ?? undefined } : { world_memory_degraded: r.error };
 }
 
@@ -1875,7 +1891,7 @@ const server = http.createServer(async (req, res) => {
           // A world made before World Memory v2 has no v2 head yet: its pre-expansion content becomes its first v2 version.
           if (!(await worldMemV2.head(rec.world_id))) await worldMemV2.save(rec.world_id, { manifest: before, author: rec.owner_id, label: "imported" });
           return await worldMemV2.expand(rec.world_id, { manifest: stored, author: me.id, label: delta.label, kind: "expand_area" });
-        }, cid);
+        }, cid, { kind: "expand", label: delta.label, author: me.id });
         await pushUndo(rec.world_id, { kind: "expand", before_version: Number(rec.version), after_version: Number(saved.version), label: delta.label, at: new Date().toISOString() }, cid);
         await worldMemory.record(rec.world_id, { kind: "expanded", summary: `${delta.label} was added`, worldVersion: gate.manifest.world_version, actorId: me.id, detail: { request: b.request, delta_id: delta.delta_id } });
 
@@ -1956,7 +1972,7 @@ const server = http.createServer(async (req, res) => {
           });
         }
         const { saved, manifest: stored, publication } = await commitContentChange({ rec, me, manifest: gate.manifest, stage: "edited world", cid });
-        const v2m = await mirrorV2(() => worldMemV2.save(rec.world_id, { manifest: stored, author: me.id, kind: "edit", label: editSummary, idempotent: false }), cid);
+        const v2m = await mirrorV2(() => worldMemV2.save(rec.world_id, { manifest: stored, author: me.id, kind: "edit", label: editSummary, idempotent: false }), cid, { kind: "edit", label: editSummary, patch_id: editPatchId, author: me.id });
         await pushUndo(rec.world_id, { kind: "edit", before_version: Number(rec.version), after_version: Number(saved.version), label: editSummary, patch_id: editPatchId, at: new Date().toISOString() }, cid);
         await worldMemory.record(rec.world_id, { kind: "edited", summary: editSummary, worldVersion: gate.manifest.world_version, actorId: me.id, detail: { request: b.request, intent: editIntent, patch_id: editPatchId } });
         return send(res, 200, { ok: true, world_id: rec.world_id, summary: editSummary, intent: editIntent, patch_id: editPatchId ?? undefined, companion_context: companionCtx, world_version: gate.manifest.world_version, record_version: saved.version, content_hash: contentHashOf(stored), undo_available: true, playtest: gate.verdict, ...publication, ...v2m, correlation_id: cid });
@@ -2224,7 +2240,7 @@ const server = http.createServer(async (req, res) => {
             return send(res, 422, { ok: false, error: "quest_failed_playtest", detail: "the generated quest did not pass the playtest gate and was not saved", verdict: gate.verdict, quest: gen.quest, correlation_id: cid });
           }
           const { saved, manifest: stored, publication } = await commitContentChange({ rec, me, manifest: gate.manifest, stage: "world with a generated quest", cid });
-          const v2m = await mirrorV2(() => worldMemV2.save(rec.world_id, { manifest: stored, author: me.id, kind: "edit", label: `quest: ${gen.quest.title}`, idempotent: false }), cid);
+          const v2m = await mirrorV2(() => worldMemV2.save(rec.world_id, { manifest: stored, author: me.id, kind: "edit", label: `quest: ${gen.quest.title}`, idempotent: false }), cid, { kind: "quest", label: gen.quest.title, author: me.id });
           await pushUndo(rec.world_id, { kind: "quest", before_version: Number(rec.version), after_version: Number(saved.version), label: gen.quest.title, at: new Date().toISOString() }, cid);
           await worldMemory.record(rec.world_id, { kind: "edited", summary: `a quest was added: ${gen.quest.title}`, worldVersion: gate.manifest.world_version, actorId: me.id });
           return send(res, 200, { ok: true, applied: true, ...gen, world_version: gate.manifest.world_version, record_version: saved.version, playtest: gate.verdict, ...publication, ...v2m, correlation_id: cid });
