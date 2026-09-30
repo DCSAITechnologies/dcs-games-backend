@@ -172,8 +172,16 @@ test("load smoke: the public read paths survive modest concurrency with zero err
 // ------------------------------------------------------------- lost updates
 test("load smoke: concurrent plays are all persisted (no lost update in the collection store)", async () => {
   const before = rows("world_plays").length;
-  const statuses = await Promise.all(Array.from({ length: WRITE_BURST }, (_, i) =>
-    call(`/v3/worlds/${worldId}/play`, { method: "POST", token: READER, body: { seconds: 10 + i } }).then((r) => r.status)));
+  // One principal per play. This measures lost updates in the store, so every
+  // write must be one that SHOULD produce its own row: repeat plays by one
+  // principal inside the session window are folded into a single row by design
+  // (social.recordPlay), and with a single shared token the row count depended
+  // on how the burst interleaved — 8 when every request read before any
+  // insert, 7 on Node 22's timing when one saw its predecessor and folded.
+  const players = Array.from({ length: WRITE_BURST }, (_, i) =>
+    signLocalToken(SECRET, { sub: `smoke-player-${i}-${crypto.randomBytes(2).toString("hex")}`, email: `smoke-player-${i}@example.com` }, 3600));
+  const statuses = await Promise.all(players.map((token, i) =>
+    call(`/v3/worlds/${worldId}/play`, { method: "POST", token, body: { seconds: 10 + i } }).then((r) => r.status)));
 
   const accepted = statuses.filter((s) => s === 200 || s === 201).length;
   assert.equal(accepted, WRITE_BURST, "every play write was accepted with 2xx; got " + JSON.stringify(statuses));

@@ -3,7 +3,7 @@
 //
 // Entirely offline. Every external call goes to a fake fetch that records what
 // it was sent; no test spends money or touches a network.
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { createGenerationEngine, createAdapters, engineLaneAdapter, TASK, TASKS, FAILURE, ROUTING_MATRIX } from "../src/v3/engine/index.mjs";
 import { resolveRoutes } from "../src/v3/engine/routing.mjs";
@@ -14,6 +14,15 @@ import { BudgetLedger } from "../src/v3/engine/budget.mjs";
 import { HealthRegistry } from "../src/v3/engine/health.mjs";
 import { estimateUsd } from "../src/v3/engine/pricing.mjs";
 import { Lane } from "../src/v3/providers/contract.mjs";
+
+// The timeout tests wait on nothing but AbortSignal.timeout(), whose timer is
+// unref'd by design. In a server a listening socket keeps the loop alive; here
+// nothing does, and Node 22 (the deploy runtime, nixpacks nodejs_22) then
+// cancels the test mid-await, and every test after it, with "Promise
+// resolution is still pending but the event loop has already resolved". Node
+// 25 happened not to. Hold one ref'd handle for the life of this file.
+const keepAlive = setInterval(() => {}, 60_000);
+after(() => clearInterval(keepAlive));
 
 const FAKE_KEY = "fixture-openai-key-0123456789abcdef";
 const ONLINE = { DCS_PROVIDERS_ONLINE: "1" };
