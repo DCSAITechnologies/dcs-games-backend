@@ -57,6 +57,11 @@ jobs:
       # directory and dies on (ENOTDIR) — every browser suite, before a test.
       - name: Install Chrome for Testing
         run: |
+          # ubuntu-24.04 runners restrict unprivileged user namespaces through
+          # AppArmor, so Chrome's sandbox cannot start ("No usable sandbox").
+          # Lift that on this throwaway runner and keep the sandbox ON — the
+          # alternative, --no-sandbox, would test a browser nobody ships.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           out=$(npx --yes @puppeteer/browsers install chrome@stable --path "$RUNNER_TEMP/chrome" | tail -1)
           bin="${out#* }"
           test -x "$bin" || { echo "Chrome install did not yield an executable: $out"; exit 1; }
@@ -159,6 +164,11 @@ jobs:
       # directory and dies on (ENOTDIR) — every browser suite, before a test.
       - name: Install Chrome for Testing
         run: |
+          # ubuntu-24.04 runners restrict unprivileged user namespaces through
+          # AppArmor, so Chrome's sandbox cannot start ("No usable sandbox").
+          # Lift that on this throwaway runner and keep the sandbox ON — the
+          # alternative, --no-sandbox, would test a browser nobody ships.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           out=$(npx --yes @puppeteer/browsers install chrome@stable --path "$RUNNER_TEMP/chrome" | tail -1)
           bin="${out#* }"
           test -x "$bin" || { echo "Chrome install did not yield an executable: $out"; exit 1; }
