@@ -48,6 +48,11 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: "22" }
       - run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+      # test/harness-leak.test.mjs drives a real Chrome to prove the browser
+      # harness leaves nothing running; without one it fails "no Chrome binary
+      # found". Same install as the browser job.
+      - name: Install Chrome for Testing
+        run: npx --yes @puppeteer/browsers install chrome@stable --path "$HOME/.cache/puppeteer"
       - name: Persistence, safety and auth
         run: npm run test:unit
 
@@ -111,7 +116,8 @@ jobs:
           # integration/dcs-games-frontend-internal-preview-30sep2026.
           ref: d8a21a781046ace7f2424816fb6c92e35686b291
           path: frontend
-          token: ${{ secrets.FRONTEND_REPO_TOKEN || github.token }}
+          # Read-only deploy key on dcs-games-frontend (private; github.token cannot read it).
+          ssh-key: ${{ secrets.FRONTEND_DEPLOY_KEY }}
       - name: Diligence crawl — no fabricated public claim may reappear
         run: cd "$GITHUB_WORKSPACE/frontend" && node tools/diligence-crawl.mjs
 
@@ -135,7 +141,8 @@ jobs:
           # integration/dcs-games-frontend-internal-preview-30sep2026.
           ref: d8a21a781046ace7f2424816fb6c92e35686b291
           path: frontend
-          token: ${{ secrets.FRONTEND_REPO_TOKEN || github.token }}
+          # Read-only deploy key on dcs-games-frontend (private; github.token cannot read it).
+          ssh-key: ${{ secrets.FRONTEND_DEPLOY_KEY }}
       - run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
       - name: Install Chrome for Testing
         run: npx --yes @puppeteer/browsers install chrome@stable --path "$HOME/.cache/puppeteer"
@@ -198,7 +205,8 @@ jobs:
           repository: DCSAITechnologies/dcs-games-frontend
           ref: d8a21a781046ace7f2424816fb6c92e35686b291
           path: frontend
-          token: ${{ secrets.FRONTEND_REPO_TOKEN || github.token }}
+          # Read-only deploy key on dcs-games-frontend (private; github.token cannot read it).
+          ssh-key: ${{ secrets.FRONTEND_DEPLOY_KEY }}
       # Catch a dead pin before it silently costs a gate. The previous pin was
       # on no branch at all, so this job could never check out — see the note on
       # the ref above.
