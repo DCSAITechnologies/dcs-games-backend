@@ -107,6 +107,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: DCSAITechnologies/dcs-games-frontend
+          # Pinned to the staging candidate (games-staging-rc1): tip of
+          # integration/dcs-games-frontend-internal-preview-30sep2026.
+          ref: 9e5ae5de2b4e9c97995eab1e12e6aa17f22bc3d7
           path: frontend
           token: ${{ secrets.FRONTEND_REPO_TOKEN || github.token }}
       - name: Diligence crawl — no fabricated public claim may reappear
@@ -128,6 +131,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: DCSAITechnologies/dcs-games-frontend
+          # Pinned to the staging candidate (games-staging-rc1): tip of
+          # integration/dcs-games-frontend-internal-preview-30sep2026.
+          ref: 9e5ae5de2b4e9c97995eab1e12e6aa17f22bc3d7
           path: frontend
           token: ${{ secrets.FRONTEND_REPO_TOKEN || github.token }}
       - run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
@@ -177,12 +183,22 @@ jobs:
           # but the effect was the same as the sibling-directory check it
           # replaced: no anti-cheat evidence.
           #
-          # Verified 7 Sep 2026: this SHA is HEAD of main and its suite is green
-          # — 186 checks, 0 failures, including the speedhack regression
-          # (gross speedhack rejected, snapped to origin, exactly-at-limit
-          # accepted).
-          ref: 49f103531b6701b64afe03bf89a4615442e9aef3
+          # Re-pinned 30 Sep 2026 to the staging candidate (games-staging-rc1):
+          # tip of fix/games-c-netcode-closure. 20 suites green, including the
+          # speedhack regression, the multiplayer flag-OFF proof and the
+          # persistence-delta module this backend registers. (Previous pin
+          # 49f1035, 7 Sep, predated the flag and the delta module.)
+          ref: 347f44d1f2c9bae5891a026d39675c3750be0cf6
           path: netcode
+      # The flag-OFF suite also scans the site for a multiplayer entrypoint, so
+      # it needs the same pinned frontend the browser job tests.
+      - name: Check out the canonical frontend
+        uses: actions/checkout@v4
+        with:
+          repository: DCSAITechnologies/dcs-games-frontend
+          ref: 9e5ae5de2b4e9c97995eab1e12e6aa17f22bc3d7
+          path: frontend
+          token: ${{ secrets.FRONTEND_REPO_TOKEN || github.token }}
       # Catch a dead pin before it silently costs a gate. The previous pin was
       # on no branch at all, so this job could never check out — see the note on
       # the ref above.
@@ -194,6 +210,8 @@ jobs:
           cd netcode
           npm ci --no-audit --no-fund || npm install --no-audit --no-fund
           npm test
+        env:
+          DCS_SITE_DIR: ${{ github.workspace }}/frontend
 
   release:
     name: Release manifest
