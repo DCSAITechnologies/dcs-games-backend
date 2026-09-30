@@ -411,9 +411,11 @@ check("the subscription surface is dark", async () => {
  */
 function extractRoutes(src) {
   const literals = [...src.matchAll(/\b(?:url|path)\s*===\s*"([^"]+)"/g)].map((m) => m[1]);
+  // One regex literal at a time: a greedy `(.*)` swallowed everything between
+  // the first `/` and the LAST `/)` on a line, so `url.match(/a/) || url.match(/b/)`
+  // became one unparseable pattern and the whole check threw.
   const patterns = src.split("\n")
-    .map((line) => { const m = line.match(/\b(?:url|path)\.match\(\/(.*)\/[gimsuy]*\)/); return m ? m[1] : null; })
-    .filter(Boolean)
+    .flatMap((line) => [...line.matchAll(/\b(?:url|path)\.match\(\/((?:\\.|\[(?:\\.|[^\]\\])*\]|[^/\\\[\n])+)\/[gimsuy]*\)/g)].map((m) => m[1]))
     .map((sourceText) => new RegExp(sourceText));
 
   // Segment dispatch. One line, a conjunction of constraints on seg[i]:
