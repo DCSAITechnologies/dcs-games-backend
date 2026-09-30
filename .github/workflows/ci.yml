@@ -51,8 +51,17 @@ jobs:
       # test/harness-leak.test.mjs drives a real Chrome to prove the browser
       # harness leaves nothing running; without one it fails "no Chrome binary
       # found". Same install as the browser job.
+      # Installed outside ~/.cache/puppeteer and handed over by DCS_CHROME: the
+      # current installer writes a `.metadata` FILE into that cache, which the
+      # helper's directory walk (test/helpers/browser.mjs) reads as a version
+      # directory and dies on (ENOTDIR) — every browser suite, before a test.
       - name: Install Chrome for Testing
-        run: npx --yes @puppeteer/browsers install chrome@stable --path "$HOME/.cache/puppeteer"
+        run: |
+          out=$(npx --yes @puppeteer/browsers install chrome@stable --path "$RUNNER_TEMP/chrome" | tail -1)
+          bin="${out#* }"
+          test -x "$bin" || { echo "Chrome install did not yield an executable: $out"; exit 1; }
+          echo "DCS_CHROME=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
       - name: Persistence, safety and auth
         run: npm run test:unit
 
@@ -144,8 +153,17 @@ jobs:
           # Read-only deploy key on dcs-games-frontend (private; github.token cannot read it).
           ssh-key: ${{ secrets.FRONTEND_DEPLOY_KEY }}
       - run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+      # Installed outside ~/.cache/puppeteer and handed over by DCS_CHROME: the
+      # current installer writes a `.metadata` FILE into that cache, which the
+      # helper's directory walk (test/helpers/browser.mjs) reads as a version
+      # directory and dies on (ENOTDIR) — every browser suite, before a test.
       - name: Install Chrome for Testing
-        run: npx --yes @puppeteer/browsers install chrome@stable --path "$HOME/.cache/puppeteer"
+        run: |
+          out=$(npx --yes @puppeteer/browsers install chrome@stable --path "$RUNNER_TEMP/chrome" | tail -1)
+          bin="${out#* }"
+          test -x "$bin" || { echo "Chrome install did not yield an executable: $out"; exit 1; }
+          echo "DCS_CHROME=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
       - name: Runtime, truth and accessibility gates
         run: npm run test:browser
         env:
@@ -210,8 +228,18 @@ jobs:
       # Catch a dead pin before it silently costs a gate. The previous pin was
       # on no branch at all, so this job could never check out — see the note on
       # the ref above.
+      # The frontend is private: resolve its pins over SSH with the same
+      # read-only deploy key the checkout uses (key only in RUNNER_TEMP, removed after).
       - name: Every pinned external ref must exist
-        run: node scripts/verify-ci-pins.mjs
+        env:
+          FRONTEND_DEPLOY_KEY: ${{ secrets.FRONTEND_DEPLOY_KEY }}
+        run: |
+          key="$RUNNER_TEMP/frontend_deploy_key"
+          printf '%s\n' "$FRONTEND_DEPLOY_KEY" > "$key"; chmod 600 "$key"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          git config --global url."git@github.com:DCSAITechnologies/dcs-games-frontend.git".insteadOf "https://github.com/DCSAITechnologies/dcs-games-frontend.git"
+          rc=0; node scripts/verify-ci-pins.mjs || rc=$?
+          rm -f "$key"; exit $rc
         working-directory: ${{ github.workspace }}
       - name: Speedhack regression must stay closed
         run: |
