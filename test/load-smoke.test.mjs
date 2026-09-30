@@ -350,19 +350,45 @@ test("load smoke: discovery does not get slower as the catalogue grows", async (
       status = r.status;
       cards = (r.body?.worlds || []).length;
     }
-    took.sort((a, b) => a - b);
-    return { median: took[Math.floor(took.length / 2)], status, cards };
+    const sorted = [...took].sort((a, b) => a - b);
+    return { median: sorted[Math.floor(sorted.length / 2)], took, status, cards };
   };
 
   // 8 and 64 seeded outright, rather than 7 and 56 plus the source world:
   // the source is a draft by this point in the file, and a fixture that
   // counts on an earlier test's leftovers measures those instead.
   seedTo(8, "s");                                   // 8 published worlds in total
-  const small = await measure();
-  assert.equal(small.status, 200, "discovery must answer while the catalogue is small");
-
   seedTo(56, "l");                                  // 64 in total: 8x the catalogue
-  const large = await measure();
+
+  // INTERLEAVED, not one size and then the other. Measured back to back, a
+  // burst of load elsewhere on the machine during the second window alone
+  // (measured 30 Sep: 2.35ms -> 9.44ms under a parallel suite, against a
+  // quiet-machine growth of 1.2-1.8x) read as a 4x regression. So the 56 extra
+  // worlds are parked outside the store and brought back between rounds, the
+  // order alternates (small-large, large-small, ...), and each size's median is
+  // taken over every round — drift now lands on both sides of the ratio. The
+  // renames keep mtimes, so the per-world summary sidecars stay valid.
+  const parked = path.join(DATA, "worlds-parked");
+  fs.mkdirSync(parked, { recursive: true });
+  const extra = () => fs.readdirSync(worldsDir).filter((f) => f.startsWith(encodeURIComponent(`${worldId}_l`)));
+  const park = () => { for (const f of extra()) fs.renameSync(path.join(worldsDir, f), path.join(parked, f)); };
+  const unpark = () => { for (const f of fs.readdirSync(parked)) fs.renameSync(path.join(parked, f), path.join(worldsDir, f)); };
+  const pooled = { small: [], large: [] };
+  let small = { status: 0, cards: 0 }, large = { status: 0, cards: 0 };
+  const round = async (size) => {
+    if (size === "small") park(); else unpark();
+    const m = await measure(9);
+    pooled[size].push(...m.took);
+    if (size === "small") small = m; else large = m;
+  };
+  for (let r = 0; r < 6; r++) {
+    for (const size of r % 2 ? ["large", "small"] : ["small", "large"]) await round(size);
+  }
+  unpark();
+  const median = (xs) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
+  small.median = median(pooled.small);
+  large.median = median(pooled.large);
+  assert.equal(small.status, 200, "discovery must answer while the catalogue is small");
   assert.equal(large.status, 200, "discovery must still answer with a larger catalogue");
 
   // The page really did grow to its limit, or the comparison is between two

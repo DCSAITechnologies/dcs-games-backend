@@ -15,9 +15,33 @@
 // excuse itself, never its neighbours on the same line.
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
+import { fileURLToPath } from "node:url";
 
 const ROOTS = process.argv.slice(2).filter((a) => !a.startsWith("--"));
 const TARGETS = ROOTS.length ? ROOTS : [process.cwd()];
+
+// Known synthetic test credentials, excused ONE AT A TIME: an entry names the
+// file (relative to the scanned root), the rule, and the sha256 of the exact
+// matched literal. A different literal in the same file, or the same literal
+// anywhere else, is still a finding — nothing is excused by pattern or by path
+// alone. DCS_SECRET_SCAN_ALLOWLIST points at another file (tests use it).
+const ALLOWLIST_FILE = process.env.DCS_SECRET_SCAN_ALLOWLIST
+  || path.join(path.dirname(fileURLToPath(import.meta.url)), "secret-scan-allowlist.json");
+const ALLOWED = (() => {
+  if (!fs.existsSync(ALLOWLIST_FILE)) return [];
+  const list = JSON.parse(fs.readFileSync(ALLOWLIST_FILE, "utf8")).entries || [];
+  for (const e of list) {
+    if (!e.path || !e.rule || !/^[0-9a-f]{64}$/.test(e.sha256 || "") || !e.reason) {
+      console.log(`RESULT: FAILED — allowlist entry is incomplete (path, rule, sha256, reason all required): ${JSON.stringify(e)}`);
+      process.exit(1);
+    }
+  }
+  return list;
+})();
+const sha256 = (s) => crypto.createHash("sha256").update(s).digest("hex");
+const allowed = (rel, rule, literal) => ALLOWED.find((e) => e.path === rel && e.rule === rule && e.sha256 === sha256(literal));
+const allowlisted = [];
 
 // Directories with nothing of our own in them. `forensics` is deliberately NOT
 // here: the forensic quarantine is a ban on EXECUTING that content, not a
@@ -135,6 +159,8 @@ for (const root of TARGETS) {
         if (BENIGN.some((b) => b.test(literal))) continue;
         if (r.checkLine && !r.checkLine(line)) continue;
         if (r.check && !r.check(m[0], literal)) continue;
+        const a = allowed(rel.split(path.sep).join("/"), r.id, literal);
+        if (a) { allowlisted.push({ file: rel, line: i + 1, rule: r.id, reason: a.reason }); continue; }
         findings.push({ file: rel, line: i + 1, rule: r.id, why: r.why, excerpt: line.trim().slice(0, 90) });
       }
       if (CLIENT_PATTERNS.some((p) => p.test(rel)) && SERVER_ONLY_ENV.test(line)) {
@@ -168,6 +194,9 @@ if (emptyRoot) {
   process.exit(1);
 }
 
+// Every excused hit is printed, so an allowlist can never hide anything quietly.
+for (const a of allowlisted) console.log(`  allowlisted ${a.file}:${a.line} [${a.rule}] — ${a.reason}`);
+
 if (findings.length) {
   for (const f of findings) console.log(`  ${f.file}:${f.line} [${f.rule}] ${f.why}\n      > ${f.excerpt}`);
   console.log(`\nRESULT: FAILED (${findings.length} finding(s))`);
@@ -176,4 +205,4 @@ if (findings.length) {
 // Say exactly what was covered. This walks the WORKING TREE of each root; it
 // does not consult git, so an untracked file IS scanned and a .gitignored file
 // is scanned too (except for the skip list above).
-console.log(`\nRESULT: CLEAN — ${scanned} file(s) read across ${TARGETS.length} root(s), no credential found.`);
+console.log(`\nRESULT: CLEAN — ${scanned} file(s) read across ${TARGETS.length} root(s), no credential found${allowlisted.length ? ` (${allowlisted.length} synthetic test literal(s) allowlisted by path + sha256)` : ""}.`);

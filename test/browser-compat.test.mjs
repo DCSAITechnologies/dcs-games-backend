@@ -1157,10 +1157,19 @@ const ESTATE_PROBE = CONTRAST_HELPERS + `
           first.focus();
           // A skip link is normally parked off-screen and slid in on :focus.
           // Measuring the instant focus lands reads the START of that
-          // transition and calls a perfectly visible link hidden.
-          await new Promise(function (r) { setTimeout(r, 200); });
-          var fb = first.getBoundingClientRect();
-          R.skipTarget = { href: href, text: (first.innerText || label(first) || "").trim(), visibleOnFocus: fb.width > 0 && fb.height > 0 && fb.top > -fb.height && getComputedStyle(first).visibility !== "hidden" };
+          // transition and calls a perfectly visible link hidden. A fixed 200ms
+          // was not enough when frames stall under load (the .12s slide had not
+          // moved yet), so poll until it is visible, for up to 2s:
+          // a link that is really hidden stays hidden for all of it.
+          var shown = function () {
+            var b = first.getBoundingClientRect();
+            return b.width > 0 && b.height > 0 && b.top > -b.height && getComputedStyle(first).visibility !== "hidden";
+          };
+          var deadline = performance.now() + 2000;
+          while (!shown() && performance.now() < deadline) {
+            await new Promise(function (r) { setTimeout(r, 25); });
+          }
+          R.skipTarget = { href: href, text: (first.innerText || label(first) || "").trim(), visibleOnFocus: shown() };
           first.blur();
         }
       }
