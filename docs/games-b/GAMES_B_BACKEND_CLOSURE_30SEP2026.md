@@ -107,6 +107,22 @@ Seven existing suites pin the **public** visibility semantics (production-canary
 
 Gate the traffic on `GET /ready`.
 
-## 7. Games-C registration
+## 7. Games-C registration: persistence-delta (follow-up, 30 Sep 2026)
 
-No registration request was received. The protocol stands: Games-C sends one patch or request, and this lane applies the one `server.mts` line.
+Games-C `498242f` sent `backend/persistence-delta/REGISTRATION.patch`. Games-B applied it; Games-C did not edit `server.mts`.
+
+- **Applied** with `git apply -C1`. Strict `git apply` failed only because the import hunk's context now includes the audit-log import this branch added. All 3 hunks landed without conflict, and the delta handler sits before `whoOrNull`, after `/ready`. The module file at `src/v3/gamesc/persistence-delta/index.mjs` is byte-identical to Games-C's `index.mjs`.
+- **One adaptation.** The patch's `accessWorld` used raw `repo.get`, which treats every published world as readable. Under the internal publish control, that would let any user id write deltas into an internally published world. `accessWorld` now goes through `getWorldFor`:
+  - a published world takes deltas only from its owner or an internal tester;
+  - the netcode sends only a user id, so tester status comes from the **id** allowlist in `DCS_INTERNAL_TESTERS` (fail closed);
+  - drafts stay owner-only.
+
+  With `DCS_PUBLISH_VISIBILITY=public`, the Games-C contract applies as written.
+- **Flag default OFF.** `DCS_MULTIPLAYER_ENABLED` unset means both routes return 404 and nothing is written.
+- **Capability declarations.**
+  - `/health.multiplayer` reports the flag, whether the routes are registered and why not, the store, and the routes.
+  - `/health.routes.multiplayer` appears only when the routes really exist.
+  - `/ready` fails `multiplayer_persistence_delta` when the flag is on but the routes could not register (for example, no token).
+- **Tests.**
+  - `test/persistence-delta-registration.test.mjs` (5, in `test:api`) covers: flag OFF; ON without a token; ON with internal visibility (owner and tester allowed, stranger 404, user JWT 401, idempotent/409, replay via `/api/`); restart; and ON with public visibility.
+  - Games-C's own suites pass: `test:backend-delta` 7/7, `test:closure` 59/59, `test:flag-off` 55/55, `test:persistence` 32/32.

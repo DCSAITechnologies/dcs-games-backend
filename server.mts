@@ -55,6 +55,7 @@ import { interpret as companionInterpret, buildPatch as companionBuildPatch } fr
 import { createWorldMemoryV2WithPatchModule, createFsAdapter } from "./src/v3/gamesc/memory/index.mjs";                  // GAMES-C: hash-chained version ledger
 import { buildStagingPackage, atlasEnvSigner, createStagingRegistry, PublishError } from "./src/v3/gamesc/publish/index.mjs"; // GAMES-C: signed, content-addressed STAGING packages
 import { guardManifest, guardUserPrompt, createUserDailyCap } from "./src/v3/gamesc/guard/index.mjs";                   // GAMES-C: manifest/prompt threat checks + spend cap
+import { registerPersistenceDelta } from "./src/v3/gamesc/persistence-delta/index.mjs";                              // GAMES-C: netcode delta ingest + replay (DCS_MULTIPLAYER_ENABLED, default OFF)
 import { createGenerationEngine } from "./src/v3/engine/index.mjs";                                                       // GAMES-A: provider engine, local-only unless approved
 import { createAuditLog, promptFields } from "./src/core/audit-log.mjs";                                                  // Games-B closure: append-only prompt/output/publish log
 
@@ -155,6 +156,28 @@ const safety = createSafetyService();                                        // 
 const social = createSocialService(process.env, { safety, subscriptions: subs });
 const progression = createProgressionService({ social, worldMemory });
 const repo = createWorldRepository();                                        // A3: replaces the process-local Map + swallowed best-effort insert
+// GAMES-C: multiplayer delta ingest + replay for the netcode service. Registers
+// nothing unless DCS_MULTIPLAYER_ENABLED=1 and DCS_NETCODE_INGEST_TOKEN (>= 32
+// chars) are set; with the flag off both routes are this server's 404. The
+// permission check is the repository's own read rule: a user may change a world
+// they can read (published, or their own draft).
+// Games-B: routed through getWorldFor so the internal publish control holds for
+// multiplayer too. The netcode sends only a user id, so tester status is the id
+// allowlist in DCS_INTERNAL_TESTERS; an actor recognised only by a token role
+// claim is treated as a non-tester here (fail closed).
+const persistenceDelta = registerPersistenceDelta({
+  env: process.env,
+  dataDir: process.env.DCS_PERSISTENCE_DELTA_DIR || path.join(process.env.DCS_DATA_DIR || path.join(process.cwd(), ".dcs-data"), "persistence-delta"),
+  accessWorld: async (worldId: string, userId: string) => {
+    const isTester = String(process.env.DCS_INTERNAL_TESTERS || "").split(",").some((t) => t.trim().toLowerCase() === String(userId).toLowerCase());
+    try { await getWorldFor({ id: userId, isInternalTester: isTester }, worldId, { requesterId: userId }); return "ok"; }
+    catch (e: any) {
+      if (e?.httpStatus === 404) return "not_found";
+      if (e?.httpStatus === 403) return "forbidden";
+      throw e; // upstream failure → the module answers 503 and the netcode retries
+    }
+  },
+});
 console.log("A3 world store:", repo.kind);
 
 // GAMES-C. The repository stays the head and the authority for "which version
@@ -796,6 +819,8 @@ const server = http.createServer(async (req, res) => {
         safety: ["GET /safety/age", "GET /safety/blocks", "POST /safety/consent/parental", "POST /safety/report", "GET /safety/reports", "POST /safety/block", "GET /safety/consent/media", "GET /safety/moderation-history", "POST /safety/reports/:id/moderate"],
         jobs: ["GET /v3/jobs", "GET /v3/jobs/:id"],
         audit: ["GET /v3/audit", "GET /v3/audit/verify"],
+        // Present only when the flag is on and the routes are really registered.
+        ...(persistenceDelta.status.enabled ? { multiplayer: ["POST /persistence/delta", "GET /persistence/delta/replay"] } : {}),
         // Live, and previously invisible: these are dispatched inside the cw1
         // slice rather than by the main router, so nothing that scanned
         // server.mts alone could see them. /ts/* is the LEGACY moderation
@@ -848,6 +873,15 @@ const server = http.createServer(async (req, res) => {
       },
       // The internal-preview controls, stated so a watcher does not have to infer them.
       publish_control: { visibility: PUBLISH_VISIBILITY, publish_requires: "internal_tester", testers_configured: TESTERS_CONFIGURED > 0, prompt_guard: PROMPT_GUARD_SELFTEST, audit_log: { seq: auditLog.describe().seq, boot_chain_ok: !!auditLog.describe().boot_check.ok }, ready_url: "/ready" },
+      // Multiplayer, stated from what is actually registered. The flag defaults
+      // OFF; the delta routes exist only when it is on AND a service token and
+      // the permission check are configured.
+      multiplayer: {
+        flag_enabled: ["1", "true", "yes", "on"].includes(String(process.env.DCS_MULTIPLAYER_ENABLED ?? "").trim().toLowerCase()),
+        persistence_delta: { registered: persistenceDelta.status.enabled, reason: persistenceDelta.status.reason, store: persistenceDelta.status.store ?? null },
+        routes: persistenceDelta.status.enabled ? ["POST /persistence/delta", "GET /persistence/delta/replay"] : [],
+        auth: "netcode service token (DCS_NETCODE_INGEST_TOKEN), not a user credential",
+      },
       netcode: "ws-separate-service", ts: new Date().toISOString(),
     });
     }
@@ -881,6 +915,10 @@ const server = http.createServer(async (req, res) => {
       let stagingOk = true;
       try { stagingRegistry(); } catch { stagingOk = false; }
       add("staging_registry", stagingOk, true, "the staging package registry refused this environment");
+      {
+        const mpFlag = ["1", "true", "yes", "on"].includes(String(process.env.DCS_MULTIPLAYER_ENABLED ?? "").trim().toLowerCase());
+        if (mpFlag) add("multiplayer_persistence_delta", persistenceDelta.status.enabled, true, `multiplayer is enabled but the persistence-delta routes are not registered (${persistenceDelta.status.reason})`);
+      }
       const ready = checks.every((c) => c.ok || !c.required);
       return send(res, ready ? 200 : 503, {
         ok: ready, ready, publish_visibility: PUBLISH_VISIBILITY, checks,
@@ -889,6 +927,10 @@ const server = http.createServer(async (req, res) => {
         ts: new Date().toISOString(),
       });
     }
+
+    // GAMES-C: the netcode service authenticates with its own service token, not
+    // a user credential, so this runs BEFORE whoOrNull (which would 401 it).
+    if (await persistenceDelta(req, res, url, method)) return;
 
     // A1: resolve once. Anonymous is null; a *bad* credential throws 401 here and
     // never reaches a route, so no handler can be tricked into acting as someone else.
