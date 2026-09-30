@@ -35,7 +35,7 @@
     "test:gamesb:browser": "DCS_PROVIDERS_OFFLINE=1 node --test --test-concurrency=1 test/gamesb-browser.test.mjs test/gamesb-flagship.test.mjs",
     "gamesb:build": "node scripts/gamesb-build.mjs",
     "gamesb:flagship": "node src/gamesb/flagship/build.mjs",
-    "test:gamesd": "DCS_PROVIDERS_OFFLINE=1 node --test test/gamesd-gameplay-templates.test.mjs test/gamesd-gamesb-fixes.test.mjs test/gamesd-materials-lighting-audio.test.mjs test/gamesd-missions-layouts.test.mjs test/gamesd-npc-behaviours.test.mjs test/gamesd-quality.test.mjs test/gamesd-world-themes.test.mjs",
+    "test:gamesd": "DCS_PROVIDERS_OFFLINE=1 node --test test/gamesd-gameplay-templates.test.mjs test/gamesd-gamesb-fixes.test.mjs test/gamesd-materials-lighting-audio.test.mjs test/gamesd-missions-layouts.test.mjs test/gamesd-npc-behaviours.test.mjs test/gamesd-outbound-trap.test.mjs test/gamesd-quality.test.mjs test/gamesd-world-themes.test.mjs",
     "gamesd:bench": "node tools/gamesd-bench.mjs"
   },
   "dependencies": {
