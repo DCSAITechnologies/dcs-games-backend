@@ -115,3 +115,46 @@ test("server.mts wires the drain and reports it on /ready", () => {
   assert.match(src, /installGracefulShutdown\(server,/, "the listening server installs the SIGTERM drain");
   assert.match(src, /add\("not_draining", !shutdown\?\.isDraining\(\), true/, "/ready goes 503 while draining (required check)");
 });
+
+// On Railway the chain is podman-init -> npm start -> `sh -c <script>` -> tsx -> node.
+// npm forwards SIGTERM to that shell, and the container's shell does not exec a
+// single command, so without `exec` the signal stopped at the shell and node
+// never drained (seen on staging, 1 Oct 2026: pid 33 `sh -c tsx server.mts`
+// between npm and tsx). `exec` replaces the shell with tsx, which relays the
+// signal to the node process that runs the server.
+test("the start script execs, so SIGTERM from npm reaches the server process", () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(GB, "package.json"), "utf8"));
+  assert.match(pkg.scripts.start, /^exec tsx server\.mts$/);
+});
+
+// The container's sh stays resident between npm and the command (pid 33 above).
+// `; :` after the command reproduces that with any shell: the shell must wait
+// to run the `:`, so it cannot exec. The first case is the defect, the second
+// the fix, so this test fails if the harness stops being able to tell them apart.
+async function viaShell(script) {
+  const child = spawn("/bin/sh", ["-c", script], { env: { ...process.env, GRACE_MS: "8000" }, stdio: ["ignore", "pipe", "pipe"] });
+  let out = "";
+  const exited = new Promise((resolve) => child.on("exit", (code, signal) => resolve({ code, signal })));
+  const [port, pid] = await new Promise((resolve) => child.stdout.on("data", (d) => { out += d; const m = /listening (\d+) pid (\d+)/.exec(out); if (m) resolve([Number(m[1]), Number(m[2])]); }));
+  const slow = get(port, "/slow?ms=1200");
+  await sleep(200);
+  child.kill("SIGTERM");                         // to the shell's pid, as npm does
+  const r = await slow;
+  await exited;
+  await sleep(300);
+  let serverAlive = true;
+  try { process.kill(pid, 0); } catch { serverAlive = false; }
+  if (serverAlive) process.kill(pid, "SIGKILL"); // never leave the fixture behind
+  return { r, out, serverAlive };
+}
+
+test("SIGTERM to npm's shell reaches the server only when the script execs", async () => {
+  const node = `"${process.execPath}" "${FIXTURE}"`;
+  const resident = await viaShell(`${node}; :`);
+  assert.equal(resident.serverAlive, true, "without exec the shell takes the signal and the server never hears it (the staging defect)");
+  assert.doesNotMatch(resident.out, /\[shutdown\]/);
+  const execd = await viaShell(`exec ${node}; :`);
+  assert.equal(execd.r.status, 200, "in-flight request answered");
+  assert.equal(execd.serverAlive, false, "the server drained and exited");
+  assert.match(execd.out, /\[shutdown\] SIGTERM: draining/);
+});

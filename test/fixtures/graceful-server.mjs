@@ -19,4 +19,4 @@ const server = http.createServer((req, res) => {
   res.writeHead(404); res.end();
 });
 shutdown = installGracefulShutdown(server, { graceMs: Number(process.env.GRACE_MS || 5000) });
-server.listen(0, "127.0.0.1", () => console.log("listening " + server.address().port));
+server.listen(0, "127.0.0.1", () => console.log("listening " + server.address().port + " pid " + process.pid));
