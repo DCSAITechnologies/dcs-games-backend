@@ -128,7 +128,7 @@ jobs:
           repository: DCSAITechnologies/dcs-games-frontend
           # Pinned to the staging candidate (games-staging-rc1): tip of
           # integration/dcs-games-frontend-internal-preview-30sep2026.
-          ref: d8a21a781046ace7f2424816fb6c92e35686b291
+          ref: a10fec68b9a2089fc7b82d81d9e3e8ba64ff5cd6
           path: frontend
           # Read-only deploy key on dcs-games-frontend (private; github.token cannot read it).
           ssh-key: ${{ secrets.FRONTEND_DEPLOY_KEY }}
@@ -153,7 +153,7 @@ jobs:
           repository: DCSAITechnologies/dcs-games-frontend
           # Pinned to the staging candidate (games-staging-rc1): tip of
           # integration/dcs-games-frontend-internal-preview-30sep2026.
-          ref: d8a21a781046ace7f2424816fb6c92e35686b291
+          ref: a10fec68b9a2089fc7b82d81d9e3e8ba64ff5cd6
           path: frontend
           # Read-only deploy key on dcs-games-frontend (private; github.token cannot read it).
           ssh-key: ${{ secrets.FRONTEND_DEPLOY_KEY }}
@@ -231,7 +231,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: DCSAITechnologies/dcs-games-frontend
-          ref: d8a21a781046ace7f2424816fb6c92e35686b291
+          ref: a10fec68b9a2089fc7b82d81d9e3e8ba64ff5cd6
           path: frontend
           # Read-only deploy key on dcs-games-frontend (private; github.token cannot read it).
           ssh-key: ${{ secrets.FRONTEND_DEPLOY_KEY }}
