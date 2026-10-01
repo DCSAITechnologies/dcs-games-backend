@@ -1,3 +1,9 @@
+# SUPERSEDED (1 Oct 2026): Railway builds this service with RAILPACK, which
+# ignores this file — the deployed image had Node 18.20.8 and no psql. The
+# runtime is declared in railpack.json (node 22, postgresql-client) and the
+# deploy settings in railway.json. Kept only so a nixpacks build, if ever
+# selected, still gets the same two things.
+#
 # The runtime image needs a postgresql CLIENT, not a server.
 #
 # src/core/schema.mjs shells out to `psql` for the boot-time schema assertion

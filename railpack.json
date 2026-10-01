@@ -1,0 +1,14 @@
+{
+  "$schema": "https://schema.railpack.com",
+  "packages": {
+    "node": "22"
+  },
+  "steps": {
+    "install": {
+      "commands": ["env -u NPM_CONFIG_PRODUCTION npm ci --omit=dev"]
+    }
+  },
+  "deploy": {
+    "aptPackages": ["postgresql-client"]
+  }
+}
