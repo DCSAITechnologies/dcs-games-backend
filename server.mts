@@ -36,6 +36,7 @@ import fs from "node:fs";
 import { createCollection } from "./src/core/collection.mjs";                 // durable rows for the issued-receipt store
 import { createLiveStateService, mergeLiveState, cw5RuntimeStateSource, companionMemorySource } from "./src/core/livestate.mjs";
 import { readBuildInfo } from "./src/core/build-info.mjs";
+import { installGracefulShutdown } from "./src/core/graceful-shutdown.mjs";   // SIGTERM: drain in-flight requests, then exit 0
 import { createPlayerProgressService, playerProgressSources } from "./src/core/playerprogress.mjs";  // what the SERVER observed a player do  // B2: the server reads player-held state instead of asking the client for it   // B15: subscriptions, built DARK — nothing is purchasable
 import { createWorldMemory } from "./src/v3/memory/world-memory.mjs";           // B7: factual world chronology
 import { createCompanionService } from "./src/v3/companion/companion.mjs";      // B5: personal AI companion
@@ -730,6 +731,8 @@ function mediaPromptFor(manifest: any, target: string, b: any): string {
   }
 }
 
+// Set when this process listens (not under DCS_NO_LISTEN); /ready reads it.
+let shutdown: ReturnType<typeof installGracefulShutdown> | null = null;
 const server = http.createServer(async (req, res) => {
   if ((req.url || "").startsWith("/api/") && !(req.url || "").startsWith("/api/public/")) req.url = "/" + req.url.slice(5);
   const url = (req.url || "").split("?")[0];
@@ -893,6 +896,9 @@ const server = http.createServer(async (req, res) => {
     if (url === "/ready" && method === "GET") {
       const checks: any[] = [];
       const add = (name: string, ok: boolean, required: boolean, detail?: string) => checks.push({ name, ok: !!ok, required, detail: ok ? undefined : detail });
+      // A draining instance has been told to stop (SIGTERM); it finishes what it
+      // holds but must not be handed anything new.
+      add("not_draining", !shutdown?.isDraining(), true, "this instance received SIGTERM and is draining");
       add("auth_configured", auth.mode === "supabase-jwt" || auth.mode === "local-hs256", true, "the auth secret is ephemeral, so every token dies at the next restart");
       if (process.env.DATABASE_URL) {
         add("schema_version", SCHEMA_STATE.ok === true && Number(SCHEMA_STATE.version) >= REQUIRED_SCHEMA_VERSION, true, `the database schema is not at the version this build requires (v${REQUIRED_SCHEMA_VERSION})`);
@@ -3079,4 +3085,7 @@ const server = http.createServer(async (req, res) => {
 export { server };
 if (process.env.DCS_NO_LISTEN !== "1") {
   server.listen(PORT, () => console.log("DCS Games Core API v3 on :" + PORT + " auth=" + auth.mode + " store=" + repo.kind));
+  // Bounded drain on SIGTERM. Keep DCS_SHUTDOWN_GRACE_MS below the platform's
+  // draining window (the gap before it sends SIGKILL).
+  shutdown = installGracefulShutdown(server, { graceMs: Number(process.env.DCS_SHUTDOWN_GRACE_MS) || 10000 });
 }
