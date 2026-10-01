@@ -12,7 +12,8 @@ import { toRuntimeWorld, toBaseWorldRow } from "./src/cw2/runtime-schema.mjs"; /
 import { PersistenceEngine, InMemoryPersistenceStore, FilePersistenceStore } from "./src/cw5/cw5_persistence.ts";
 import { SupabasePersistenceStore } from "./src/cw5/cw5_supabase_store.ts";
 import { createIdentityStore, handleIdentity, retiredSocialRoutes } from "./src/cw1/identity-slice.mjs";
-import { handleTrustSafetySSO } from "./src/cw1/ts-sso-kyc-slice.mjs"; // CW1 v3.0: T&S console + payout-KYC, reconciled to gateway auth
+import { handleTrustSafetySSO } from "./src/cw1/ts-sso-kyc-slice.mjs";
+import { createCw1Store, checkCw1Boot } from "./src/cw1/store.mjs";            // CW1 durable store + fail-closed boot guard (staging/production never on memory) // CW1 v3.0: T&S console + payout-KYC, reconciled to gateway auth
 import { makeAtlasRoutes } from "./src/cw7/atlas-routes.mjs";
 import { verifyPageHTML } from "./src/cw7/atlas-verify-page.mjs"; // CW7: renderable public verify view
 import { makeKeyEndpoint } from "./src/cw7/atlas-key.mjs";       // CW7: GET /atlas/key (real ed25519 public key from env, honest when unset)
@@ -313,6 +314,29 @@ if (auth.mode === "local-hs256-ephemeral" && process.env.DCS_ALLOW_EPHEMERAL_AUT
   process.exit(78);   // EX_CONFIG, as the schema assertion uses
 }
 console.log("A1 auth mode:", auth.mode);
+
+// CW1 on a durable store, or not at all where durability is required.
+//
+// The T&S/KYC slice was mounted on a literal { mode: "memory" }, so every
+// staging deployment ran CW1 in process memory and lost it at each restart
+// (staging L1, 1 Oct 2026: "[cw1][db] IN-MEMORY FALLBACK ENGAGED"). The store
+// is now built once, on the same Supabase client as the rest of the data layer,
+// and probed. DCS_ENV=staging|production without it is a configuration error,
+// so the process exits before it can serve, as the schema and auth checks do.
+const cw1 = await createCw1Store({ env: process.env, dir: path.join(DATA_DIR, "cw1") });
+{
+  const verdict = checkCw1Boot(cw1, process.env);
+  if (!verdict.ok) {
+    console.error(JSON.stringify({
+      level: "fatal", cw1_store: cw1.mode, dcs_env: verdict.env,
+      detail: "Refusing to start: " + verdict.reason,
+      fix: "Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY for this environment and make sure dcsgames_users and dcsgames_profiles are reachable. The in-memory CW1 store is for DCS_ENV=local|development|test|ci only.",
+      ts: new Date().toISOString(),
+    }));
+    process.exit(78);   // EX_CONFIG
+  }
+  console.log("CW1 store:", cw1.mode, "(DCS_ENV=" + (verdict.env || "?") + ")");
+}
 
 const atlasKey = makeKeyEndpoint({ publicKey: () => atlasPublicKeyBase64() || process.env.ATLAS_PUBLIC_KEY || "" }); // prefer the raw key derived from the signer (matches sig + browser-embed verifiable)
 
@@ -794,6 +818,9 @@ const server = http.createServer(async (req, res) => {
       auth_header_fallback_removed: true,      // A1: x-user-id impersonation path deleted 6 Sep 2026
       internal_testing_window_ends: "2026-09-30",
       persistence: repo.kind,
+      // CW1 identity store: "supabase" (durable) or "memory" (local/test/CI only; refused at boot in staging/production).
+      cw1_store: cw1.mode,
+      cw1: { durable: cw1.mode === "supabase", healthy: cw1.healthy, reason: cw1.reason ?? null },   // a code only: /health never names a credential
       runtime_state_store: {
         kind: RUNTIME_STORE_KIND,
         durable: RUNTIME_STORE_DURABLE,
@@ -1246,7 +1273,7 @@ const server = http.createServer(async (req, res) => {
     if (url.startsWith("/ts/") || url.startsWith("/kyc/") || url.startsWith("/payout/")) {
       await mustBeInternalTester(req, cid);   // T&S console + payout KYC: internal testers only
     }
-    if (await handleTrustSafetySSO(req, res, { user: principal ? { id: principal.id } : null, send, body: readBody, db: { mode: "memory" } })) return; // T&S/KYC (in-memory repo; DARK). Supabase persistence = follow-up migration 0002
+    if (await handleTrustSafetySSO(req, res, { user: principal ? { id: principal.id } : null, send, body: readBody, repo: cw1.repo })) return; // T&S/KYC on the boot-built CW1 store (durable where required; see the CW1 boot guard)
 
     // ---- CW7 public trust surface ----
     if (url === "/atlas/key" && method === "GET") return send(res, 200, atlasKey.key());

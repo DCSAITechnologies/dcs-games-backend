@@ -79,10 +79,24 @@ export async function handleTrustSafetySSO(req, res, ctx) {
     return true;
   }
 
+
+  // On a DURABLE CW1 store (src/cw1/store.mjs) reports and the moderation audit
+  // trail are not kept here at all: they are durable in src/core/safety.mjs, and
+  // a second copy is how this slice's own POST /reports became a write-only store.
+  // A moderator is told where the durable queue is. Checked after the moderator
+  // test, so who may see what is unchanged.
+  const supersededForModerator = () => {
+    const to = repo.reports_superseded_by;
+    send(res, 410, { ok: false, error: "gone", superseded_by: to.list, moderate: to.moderate, history: to.history,
+      detail: "the T&S console reads the durable moderation queue: list at /safety/reports, decide at /safety/reports/:id/moderate, audit at /safety/moderation-history" });
+    return true;
+  };
+
   // ---- moderator queue ----
   if (path === "/ts/reports" && m === "GET") {
     const me = await repo.getUser(uid());
     if (!isModerator(me || user)) { send(res, 403, { error:"forbidden", reason:"moderator_only" }); return true; }
+    if (repo.reports_superseded_by) return supersededForModerator();
     send(res, 200, { reports: await repo.listReports(url.searchParams.get("state")) }); return true;
   }
 
@@ -90,6 +104,7 @@ export async function handleTrustSafetySSO(req, res, ctx) {
   if (seg[0]==="ts" && seg[1]==="reports" && seg[2] && seg[3]==="action" && m==="POST") {
     const me = await repo.getUser(uid());
     if (!isModerator(me || user)) { send(res, 403, { error:"forbidden", reason:"moderator_only" }); return true; }
+    if (repo.reports_superseded_by) return supersededForModerator();
     const report = await repo.getReport(seg[2]); if(!report){ send(res,404,{error:"no_report"}); return true; }
     const r = applyModeration(report, (await body(req)).action, uid());
     if (r.error) { send(res, 400, r); return true; }
@@ -105,6 +120,7 @@ export async function handleTrustSafetySSO(req, res, ctx) {
   if (seg[0]==="ts" && seg[1]==="reports" && seg[2] && seg[3]==="appeal" && seg[4]==="decide" && m==="POST") {
     const me = await repo.getUser(uid());
     if (!isModerator(me || user)) { send(res, 403, { error:"forbidden", reason:"moderator_only" }); return true; }
+    if (repo.reports_superseded_by) return supersededForModerator();
     const report = await repo.getReport(seg[2]); if(!report){ send(res,404,{error:"no_report"}); return true; }
     const r = applyAppeal(report, (await body(req)).decision, uid());
     if (r.error) { send(res, 400, r); return true; }
@@ -115,10 +131,14 @@ export async function handleTrustSafetySSO(req, res, ctx) {
   // ---- payout-KYC shell (DARK) ----
   if (path === "/payout/kyc" && m === "GET") {
     if (anon()) { send(res, 401, { error:"unauthenticated" }); return true; }
+    // No payout-KYC table exists in v14. A durable store says so; it does not
+    // fall back to a process-local map that a restart erases.
+    if (repo.kyc_store === "not_provisioned") { send(res, 200, { user_id: uid(), status: "none", _dark: true, payments_live: false, durable_store: "not_provisioned" }); return true; }
     send(res, 200, { ...await repo.getKyc(uid()), payments_live: false }); return true;
   }
   if (path === "/payout/kyc/start" && m === "POST") {
     if (anon()) { send(res, 401, { error:"unauthenticated" }); return true; }
+    if (repo.kyc_store === "not_provisioned") { send(res, 503, { ok: false, error: "kyc_store_not_provisioned", payments_live: false, detail: "payout KYC is DARK and has no durable table yet; nothing was recorded" }); return true; }
     const row = await repo.setKycStatus(uid(), "pending", null);
     send(res, 200, { ...row, status:"dark_pending", note:"KYC provider session created when DK enables payments" }); return true;
   }
