@@ -5,10 +5,16 @@
   },
   "steps": {
     "install": {
-      "commands": ["env -u NPM_CONFIG_PRODUCTION npm ci --omit=dev"]
+      "commands": [
+        { "path": "/app/node_modules/.bin" },
+        { "src": "package.json", "dest": "package.json" },
+        { "src": "package-lock.json", "dest": "package-lock.json" },
+        { "cmd": "env -u NPM_CONFIG_PRODUCTION npm ci --omit=dev", "customName": "npm ci --omit=dev (from package-lock.json)" }
+      ]
     }
   },
   "deploy": {
+    "startCommand": "node --import tsx server.mts",
     "aptPackages": ["postgresql-client"]
   }
 }

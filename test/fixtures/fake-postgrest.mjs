@@ -9,9 +9,12 @@
 // cache"), which is what a missing table looks like to a real client.
 import http from "node:http";
 
-export async function startFakePostgrest({ failTables = [], failAll = false } = {}) {
+// `host` defaults to loopback; a container-based check binds 0.0.0.0 and reaches it via host.docker.internal.
+// `delayMs` (or setDelay() later) holds every answer back, so a caller can be caught mid-request (e.g. by a SIGTERM).
+export async function startFakePostgrest({ failTables = [], failAll = false, host = "127.0.0.1", delayMs = 0 } = {}) {
   const tables = new Map();                       // table -> Map(keyString -> row)
   const requests = [];
+  let delay = delayMs;
   const tbl = (t) => { if (!tables.has(t)) tables.set(t, new Map()); return tables.get(t); };
 
   const server = http.createServer(async (req, res) => {
@@ -20,6 +23,7 @@ export async function startFakePostgrest({ failTables = [], failAll = false } = 
     let body = "";
     for await (const c of req) body += c;
     requests.push({ method: req.method, path: u.pathname, search: u.search });
+    if (delay) await new Promise((r) => setTimeout(r, delay));
     const reply = (code, obj, headers = {}) => { res.writeHead(code, { "content-type": "application/json", ...headers }); res.end(obj === undefined ? "" : JSON.stringify(obj)); };
     if (failAll) return reply(500, { message: "fake postgrest: failing every request" });
     if (!m) return reply(200, {});                                   // OpenAPI root and anything else
@@ -60,11 +64,13 @@ export async function startFakePostgrest({ failTables = [], failAll = false } = 
     }
     return reply(405, { message: "method not supported by the fake" });
   });
-  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  await new Promise((r) => server.listen(0, host, r));
   return {
     url: `http://127.0.0.1:${server.address().port}`,
+    port: server.address().port,
     rows: (t) => [...tbl(t).values()],
     requests,
+    setDelay: (ms) => { delay = ms; },
     close: () => new Promise((r) => { server.closeAllConnections?.(); server.close(r); }),
   };
 }

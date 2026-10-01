@@ -29,11 +29,29 @@ test("railway.json: RAILPACK, the start command bypasses npm, /ready gates traff
   assert.ok(r.deploy.drainingSeconds * 1000 > 10000, "the platform's SIGKILL must come after the server's 10s drain bound");
 });
 
-test("railpack.json: production-only install, Node 22, and psql in the runtime image", () => {
+test("railpack.json: the install step copies package.json AND package-lock.json before npm ci --omit=dev", () => {
+  // RC2 (89b53d6) replaced the install step's commands with the npm ci line
+  // alone. A step's `commands` REPLACES Railpack's defaults wholesale, and the
+  // defaults are what copy the manifests into the step: the RC2 build ran npm ci
+  // in an /app with no lockfile and failed EUSAGE (L1 deployment 175fad21,
+  // reproduced with a real railpack 0.40.1 build). The copies are explicit now.
+  const cmds = read("railpack.json").steps.install.commands;
+  const idx = (pred) => cmds.findIndex(pred);
+  const pkg = idx((c) => c && c.src === "package.json" && c.dest === "package.json");
+  const lock = idx((c) => c && c.src === "package-lock.json" && c.dest === "package-lock.json");
+  const ci = idx((c) => (typeof c === "string" ? c : c?.cmd || "").includes("npm ci --omit=dev"));
+  assert.ok(pkg >= 0, "package.json must be copied into the install step");
+  assert.ok(lock >= 0, "package-lock.json must be copied into the install step");
+  assert.ok(ci > pkg && ci > lock, "npm ci must run after both copies");
+  assert.match((cmds[ci].cmd || cmds[ci]), /^env -u NPM_CONFIG_PRODUCTION npm ci --omit=dev$/, "npm ci from the lockfile, without the deprecated production config");
+  assert.ok(!cmds.some((c) => /npm install/.test(typeof c === "string" ? c : c?.cmd || "")), "no npm install: the lockfile is the install");
+});
+
+test("railpack.json: Node 22, psql in the runtime image, and the same start command as railway.json", () => {
   const r = read("railpack.json");
-  assert.deepEqual(r.steps.install.commands, ["env -u NPM_CONFIG_PRODUCTION npm ci --omit=dev"], "--omit=dev, without the deprecated production config Railpack sets in the image");
   assert.equal(r.packages.node, "22");
   assert.ok(r.deploy.aptPackages.includes("postgresql-client"), "psql is the migration runner and the boot schema assertion's driver");
+  assert.equal(r.deploy.startCommand, read("railway.json").deploy.startCommand, "the image's own command matches what Railway runs");
 });
 
 test("--omit=dev keeps what the runtime needs: tsx is a production dependency", () => {
